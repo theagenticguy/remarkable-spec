@@ -1,0 +1,13 @@
+[tools]
+python = "3.12"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+
+[tasks]
+install = "uv sync --all-extras"
+test = "uv run pytest"
+lint = "uvx ruff check src/ --fix"
+format = "uvx ruff format src/"
+typecheck = "uvx ty check src/"
+check = { depends = ["lint", "format", "typecheck"], description = "Run all checks" }
