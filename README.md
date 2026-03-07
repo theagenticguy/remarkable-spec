@@ -76,7 +76,7 @@ When pushing `.md` files, the pipeline automatically:
 2. Resolves image paths (relative and absolute) to base64 data URIs
 3. Converts to PDF via WeasyPrint with e-ink-optimized styling
 
-```markdown
+~~~markdown
 ## Architecture
 
 ```mermaid
@@ -86,7 +86,7 @@ flowchart LR
 ```
 
 ![Photo](diagrams/photo.png)
-```
+~~~
 
 Both the diagram and the image render in the PDF on the reMarkable.
 
