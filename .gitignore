@@ -51,6 +51,8 @@ docs/.repomix/
 .pytest_cache/
 .ruff_cache/
 .testmondata
+.testmondata-shm
+.testmondata-wal
 coverage.xml
 .coverage
 .coverage.*

@@ -1,0 +1,371 @@
+{
+  "firmware": "3.27.3.0",
+  "measured_on_kernel": "6.12.49+git-imx8mm-ferrari-g68b95e858a0a",
+  "source": "read-only probe",
+  "measured_at": "2026-08-28T23:00:00Z",
+  "bus": "system",
+  "method": "Introspection only, via `busctl --system introspect <name> <path> --xml-interface --no-pager` and `busctl --system list/tree`, parsed with ElementTree. NO D-Bus method was invoked and NO property was read via Properties.Get, with the two disclosed exceptions in the caveats block below. Member counts in this file were computed by XML parse, not by grep, because grep-based counting on QtDBus output (which puts whole interfaces on one line) undercounts.",
+  "caveats": [
+    "Introspecting an unowned but activatable name STARTS the service. org.freedesktop.hostname1, locale1 and timedate1 are activatable and were started by introspection in a prior session; they are unowned again now, so this session did NOT re-introspect them and their shapes below are carried forward from that session with attribution. org.bluez was likewise not re-attempted.",
+    "`busctl introspect` without --xml-interface reads property VALUES via org.freedesktop.DBus.Properties.GetAll. That non-XML form was used exactly once this session, against org.freedesktop.DBus /org/freedesktop/DBus, to read the daemon's Features and Interfaces properties. It is a read, but it is a method call, and it is disclosed here rather than buried.",
+    "The systemd unit-object shapes were introspected on xochitl_2eservice specifically. Path escaping: '.' -> _2e, '-' -> _2d, and a leading digit is hex-escaped."
+  ],
+  "claims": [
+    {
+      "id": "inventory:bus-names",
+      "kind": "inventory",
+      "shape": "14 well-known names. 10 currently owned, 4 activation-only with no owner (org.bluez, org.freedesktop.hostname1, org.freedesktop.locale1, org.freedesktop.timedate1). FIVE non-freedesktop services: com.remarkable.devicepolicy, no.remarkable.marker, no.remarkable.sync, no.remarkable.update1, fi.w1.wpa_supplicant1.",
+      "evidence": "$ ssh remarkable 'busctl --system list --no-pager --no-legend' -> \"com.remarkable.devicepolicy pid=482 mdm-agent unit=mdm-agent.service / fi.w1.wpa_supplicant1 pid=550 wpa_supplicant unit=wpa_supplicant.service / no.remarkable.marker pid=481 marker-manager unit=marker-manager.service / no.remarkable.sync pid=486 rm-sync unit=rm-sync.service / no.remarkable.update1 pid=653 fakeupdateengin unit=update-engine.service / org.bluez pid=- - unit=- / org.freedesktop.DBus pid=1 systemd unit=init.scope / org.freedesktop.hostname1 pid=- / org.freedesktop.locale1 pid=- / org.freedesktop.login1 pid=370 systemd-logind / org.freedesktop.network1 pid=413 systemd-network / org.freedesktop.resolve1 pid=331 systemd-resolve / org.freedesktop.systemd1 pid=1 systemd / org.freedesktop.timedate1 pid=-\"; $ busctl --system list --no-legend --acquired | wc -l -> 10.",
+      "notes": "The bus daemon is dbus-daemon (reference implementation, not dbus-broker), hosted by pid 1's init.scope."
+    },
+    {
+      "id": "inventory:xochitl-is-a-client-only",
+      "kind": "inventory",
+      "shape": "xochitl (pid 416) holds FIVE anonymous connections :1.9 through :1.13 and owns ZERO well-known names.",
+      "evidence": "$ ssh remarkable 'busctl --system list --no-pager --no-legend' -> \":1.9 pid=416 xochitl unit=xochitl.service / :1.10 pid=416 xochitl / :1.11 pid=416 xochitl / :1.12 pid=416 xochitl / :1.13 pid=416 xochitl\" and no well-known name resolves to pid 416.",
+      "consequence": "There is NO D-Bus route into the Qt USB web server. /log.txt is the only oracle for rm.usb.web. Five connections from one process is consistent with a separate QDBusConnection per xochitl module (sync, marker, update, devicepolicy, and one more)."
+    },
+    {
+      "id": "com.remarkable.devicepolicy:/com/remarkable/devicepolicy:com.remarkable.devicepolicy.MDMAgent1",
+      "kind": "interface",
+      "service": "com.remarkable.devicepolicy",
+      "object_path": "/com/remarkable/devicepolicy",
+      "interface": "com.remarkable.devicepolicy.MDMAgent1",
+      "methods": [
+        "GetPolicies() -> (a{ss} policies)",
+        "GetEnrolledState() -> (b enrolled, s detail)",
+        "SetPolicyStatus(s policy, s value, b enforced, s _detail) -> ()"
+      ],
+      "signals": ["NotifyNewPolicies()", "NotifyMdmEnrolled()"],
+      "properties": [],
+      "counts": {"methods": 3, "signals": 2, "properties": 0},
+      "evidence": "$ ssh remarkable 'busctl --system introspect com.remarkable.devicepolicy /com/remarkable/devicepolicy --xml-interface --no-pager' | <ElementTree signature extractor> -> \"IFACE com.remarkable.devicepolicy.MDMAgent1 / M GetPolicies() -> (a{ss}) / M GetEnrolledState() -> (bs) / M SetPolicyStatus(ssbs) -> () / S NotifyNewPolicies() / S NotifyMdmEnrolled()\"; member-count pass -> \"com.remarkable.devicepolicy.MDMAgent1  M=3 S=2 P=0\".",
+      "owner": "mdm-agent.service, pid 482, /usr/bin/mdm-agent",
+      "notes": "Registered at exactly one path. GetPolicies returns a flat a{ss} string map, so MDM policy names and values are enumerable by any local caller (see policy claim). SetPolicyStatus is the only write-shaped member and was NOT invoked."
+    },
+    {
+      "id": "no.remarkable.marker:/no/remarkable/marker:no.remarkable.marker",
+      "kind": "interface",
+      "service": "no.remarkable.marker",
+      "object_path": "/no/remarkable/marker",
+      "interface": "no.remarkable.marker",
+      "methods": [],
+      "signals": [],
+      "properties": [
+        "BatteryCapacity: i [read]", "RealBatteryCapacity: i [read]",
+        "FirmwareUpdateStateMCU: u [read]", "FirmwareUpdateStateASIC: u [read]",
+        "HostUID: ay [read]", "MarkerUID: s [read]", "SerialNumber: s [read]",
+        "MarkerModelNumber: s [read]", "MarkerProductName: s [read]",
+        "FirmwareVersionMCU: s [read]", "FirmwareVersionASIC: s [read]",
+        "Docked: b [read]", "IsCharging: b [read]", "FirmwareUpdateProgress: u [read]"
+      ],
+      "counts": {"methods": 0, "signals": 0, "properties": 14},
+      "evidence": "$ ssh remarkable 'busctl --system introspect no.remarkable.marker /no/remarkable/marker --xml-interface --no-pager' | <extractor> -> \"IFACE no.remarkable.marker / P BatteryCapacity: i [read] / P RealBatteryCapacity: i [read] / P FirmwareUpdateStateMCU: u [read] / P FirmwareUpdateStateASIC: u [read] / P HostUID: ay [read] / P MarkerUID: s [read] / P SerialNumber: s [read] / P MarkerModelNumber: s [read] / P MarkerProductName: s [read] / P FirmwareVersionMCU: s [read] / P FirmwareVersionASIC: s [read] / P Docked: b [read] / P IsCharging: b [read] / P FirmwareUpdateProgress: u [read]\"; member-count pass -> \"no.remarkable.marker  M=0 S=0 P=14\".",
+      "owner": "marker-manager.service, pid 481, argv \"/usr/bin/marker-manager 60 80 300 0 1800 0 3\"",
+      "notes": "Stylus telemetry, not tablet telemetry. Zero methods and zero signals: state changes surface only via org.freedesktop.DBus.Properties.PropertiesChanged. SerialNumber/MarkerUID/HostUID are identity-shaped; property VALUES were not read. This is an sd-bus service, not Qt, despite being a reMarkable binary."
+    },
+    {
+      "id": "no.remarkable.marker:/no/remarkable/marker:no.remarkable.markerctrl",
+      "kind": "interface",
+      "service": "no.remarkable.marker",
+      "object_path": "/no/remarkable/marker",
+      "interface": "no.remarkable.markerctrl",
+      "methods": [
+        "updateFirmwareASIC() -> ()  [ANN org.freedesktop.DBus.Method.NoReply=true, org.freedesktop.systemd1.Privileged=true]",
+        "updateFirmwareMCU() -> ()  [same two annotations]"
+      ],
+      "signals": [],
+      "properties": [],
+      "counts": {"methods": 2, "signals": 0, "properties": 0},
+      "evidence": "$ <same introspect> -> \"IFACE no.remarkable.markerctrl / M updateFirmwareASIC() -> ()  ANN['NoReply=true', 'Privileged=true'] / M updateFirmwareMCU() -> ()  ANN['NoReply=true', 'Privileged=true']\"; member-count pass -> \"no.remarkable.markerctrl  M=2 S=0 P=0\".",
+      "notes": "Second interface on the SAME object path as the read surface -- telemetry and control are co-located. Both methods are fire-and-forget stylus firmware flashes; NOT invoked. The systemd1.Privileged annotation is decorative on a non-systemd service; the real gate is the bus policy file (root only)."
+    },
+    {
+      "id": "no.remarkable.update1:/no/remarkable/update1:no.remarkable.update1.Manager",
+      "kind": "interface",
+      "service": "no.remarkable.update1",
+      "object_path": "/no/remarkable/update1",
+      "interface": "no.remarkable.update1.Manager",
+      "methods": [
+        "AttemptUpdate() -> ()",
+        "ResetStatus() -> ()",
+        "GetStatus() -> (x last_checked_time, d progress, s current_operation, s new_version, x new_size)"
+      ],
+      "signals": ["StatusUpdate(x last_checked_time, d progress, s current_operation, s new_version, x new_size)"],
+      "properties": [],
+      "counts": {"methods": 3, "signals": 1, "properties": 0},
+      "evidence": "$ ssh remarkable 'busctl --system introspect no.remarkable.update1 /no/remarkable/update1 --xml-interface --no-pager' | <extractor> -> \"IFACE no.remarkable.update1.Manager / M AttemptUpdate() -> () / M ResetStatus() -> () / M GetStatus() -> (xdssx) / S StatusUpdate(xdssx)\"; member-count pass -> \"no.remarkable.update1.Manager  M=3 S=1 P=0\".",
+      "owner": "update-engine.service, pid 653, comm=\"fakeupdateengin\", argv=/usr/bin/fakeupdateengine_service",
+      "notes": "Deliberately ChromeOS-update_engine-shaped (identical 5-field status tuple on both GetStatus and StatusUpdate) but the process behind it is a stub named 'fake'. On BUILD_MODE_RM=public the real update engine is not shipped; the real work is swupdate.service over /tmp/sockinstctrl. Anything treating update1 as a live OTA channel here is talking to a mock. No properties: status is poll-by-method or listen-by-signal only. Not invoked."
+    },
+    {
+      "id": "no.remarkable.sync:/Synchronizer:no.remarkable.sync.Synchronizer",
+      "kind": "interface",
+      "service": "no.remarkable.sync",
+      "object_path": "/Synchronizer",
+      "interface": "no.remarkable.sync.Synchronizer",
+      "methods": [
+        "execute(s basePath, (asasasb) request) -> ()  [ANN org.qtproject.QtDBus.QtTypeName.In1=rmsync::ExecuteRequest]",
+        "setProtocolFlag(u flag) -> ()",
+        "releaseEntryLock(s id) -> ()",
+        "requestAbortAndCleanup() -> ()",
+        "clearConnectionCache() -> ()",
+        "setAvailableDiskSpace(x available) -> ()"
+      ],
+      "signals": [
+        "failed(s message)", "unauthorized()", "updateRequired()",
+        "batchFinished((y) batchStatus, b syncComplete)",
+        "isSyncingChanged(b syncing)",
+        "documentProgress(s id, d progress, i upload)",
+        "documentFinished((ay) entryId, a(ay) paths, a(ay) deletedPaths)",
+        "pathsDeleted(a(ay) paths)",
+        "syncProgressChanged((iidiii) stats)",
+        "entryFailed((ay) entryId)",
+        "inactiveEntriesChanged(as inactiveEntries)"
+      ],
+      "properties": ["isSyncing: b [read]"],
+      "counts": {"methods": 6, "signals": 11, "properties": 1},
+      "evidence": "$ ssh remarkable 'busctl --system tree no.remarkable.sync --no-pager' -> \"└─ /Synchronizer\" (single object); $ ssh remarkable 'busctl --system introspect no.remarkable.sync /Synchronizer --xml-interface --no-pager' | <extractor> -> \"IFACE no.remarkable.sync.Synchronizer / M execute(s(asasasb)) -> () ANN['In1=rmsync::ExecuteRequest'] / M setProtocolFlag(u) / M releaseEntryLock(s) / M requestAbortAndCleanup() / M clearConnectionCache() / M setAvailableDiskSpace(x) / S failed(s) / S unauthorized() / S updateRequired() / S batchFinished((y)b) / S isSyncingChanged(b) / S documentProgress(sdi) / S documentFinished((ay)a(ay)a(ay)) / S pathsDeleted(a(ay)) / S syncProgressChanged((iidiii)) / S entryFailed((ay)) / S inactiveEntriesChanged(as) / P isSyncing: b [read]\"; member-count pass -> \"no.remarkable.sync.Synchronizer  M=6 S=11 P=1 ro=1 rw=0\".",
+      "owner": "rm-sync.service, pid 486, /usr/bin/rm-sync",
+      "notes": "Object path is FLAT (/Synchronizer), not reverse-DNS like the other three reMarkable services. Qt-generated: QtTypeName annotations leak the internal C++ types rmsync::ExecuteRequest, rmsync::BatchStatus, rmsync::ProgressStats, entry::Id, entry::file::Paths. Directly relevant to a client: documentFinished and pathsDeleted give per-document sync completion with file paths, and entry::Id is (ay) not s -- the cloud sync layer models a document id as a raw byte array, not a UUID string. No method invoked."
+    },
+    {
+      "id": "fi.w1.wpa_supplicant1:/fi/w1/wpa_supplicant1:fi.w1.wpa_supplicant1",
+      "kind": "interface",
+      "service": "fi.w1.wpa_supplicant1",
+      "object_path": "/fi/w1/wpa_supplicant1",
+      "interface": "fi.w1.wpa_supplicant1",
+      "methods": ["CreateInterface(a{sv}) -> (o)", "RemoveInterface(o) -> ()", "GetInterface(s) -> (o)", "ExpectDisconnect() -> ()"],
+      "signals": ["InterfaceAdded(o, a{sv})", "InterfaceRemoved(o)", "PropertiesChanged(a{sv})"],
+      "properties": [
+        "DebugLevel: s [readwrite]", "DebugTimestamp: b [readwrite]", "DebugShowKeys: b [readwrite]",
+        "Interfaces: ao [read]", "EapMethods: as [read]", "Capabilities: as [read]"
+      ],
+      "counts": {"methods": 4, "signals": 3, "properties": 6, "read": 3, "readwrite": 3},
+      "evidence": "$ ssh remarkable 'busctl --system introspect fi.w1.wpa_supplicant1 /fi/w1/wpa_supplicant1 --xml-interface --no-pager' | <ElementTree counter> -> \"fi.w1.wpa_supplicant1  M=4 S=3 P=6 ro=3 rw=3 / rw: ['DebugLevel','DebugTimestamp','DebugShowKeys'] / ro: ['Interfaces','EapMethods','Capabilities']\".",
+      "owner": "wpa_supplicant.service, pid 550",
+      "notes": "DebugShowKeys is a WRITABLE property that would print PSKs into the journal -- i.e. into /log.txt, the oracle. NOT set. Note this service defines its OWN PropertiesChanged(a{sv}) on its own interface, distinct from the standard org.freedesktop.DBus.Properties.PropertiesChanged(s,a{sv},as); a listener must match both."
+    },
+    {
+      "id": "fi.w1.wpa_supplicant1:/fi/w1/wpa_supplicant1/Interfaces/0",
+      "kind": "interface",
+      "service": "fi.w1.wpa_supplicant1",
+      "object_path": "/fi/w1/wpa_supplicant1/Interfaces/0",
+      "interfaces": {
+        "fi.w1.wpa_supplicant1.Interface": {"methods": 37, "signals": 19, "properties": 122, "read": 22, "readwrite": 100},
+        "fi.w1.wpa_supplicant1.Interface.WPS": {"methods": 2, "signals": 3, "properties": 8, "read": 0, "readwrite": 8}
+      },
+      "evidence": "$ ssh remarkable 'busctl --system introspect fi.w1.wpa_supplicant1 /fi/w1/wpa_supplicant1/Interfaces/0 --xml-interface --no-pager' | <ElementTree counter> -> \"fi.w1.wpa_supplicant1.Interface  M=37 S=19 P=122 ro=22 rw=100\" and \"fi.w1.wpa_supplicant1.Interface.WPS  M=2 S=3 P=8 ro=0 rw=8 / rw: ['ProcessCredentials','ConfigMethods','DeviceName','Manufacturer','ModelName','ModelNumber','SerialNumber','DeviceType']\".",
+      "notes": "This is the widest mutation surface on the device: 100 writable properties on one object, versus 2 across all of systemd-logind. GetBlob(s)->(ay) plus the Blobs a{say} property is a credential-adjacent read path (EAP certs/keys live as wpa_supplicant blobs). The WPS sub-interface's Credentials(a{sv}) signal carries WPS-provisioned PSKs. Every WPS property is writable including SerialNumber. Nothing read or written."
+    },
+    {
+      "id": "org.freedesktop.systemd1:/org/freedesktop/systemd1:org.freedesktop.systemd1.Manager",
+      "kind": "interface",
+      "counts": {"methods": 87, "signals": 7, "properties": 123, "read": 115, "readwrite": 8},
+      "writable_properties": ["LogLevel", "LogTarget", "RuntimeWatchdogUSec", "RuntimeWatchdogPreUSec", "RuntimeWatchdogPreGovernor", "RebootWatchdogUSec", "KExecWatchdogUSec", "ServiceWatchdogs"],
+      "signals": ["UnitNew(so)", "UnitRemoved(so)", "JobNew(uos)", "JobRemoved(uoss)", "StartupFinished(tttttt)", "UnitFilesChanged()", "Reloading(b)"],
+      "evidence": "$ ssh remarkable 'busctl --system introspect org.freedesktop.systemd1 /org/freedesktop/systemd1 --xml-interface --no-pager' | <ElementTree counter> -> \"org.freedesktop.systemd1.Manager  M=87 S=7 P=123 ro=115 rw=8 / rw: ['LogLevel','LogTarget','RuntimeWatchdogUSec','RuntimeWatchdogPreUSec','RuntimeWatchdogPreGovernor','RebootWatchdogUSec','KExecWatchdogUSec','ServiceWatchdogs']\".",
+      "owner": "pid 1 / init.scope",
+      "notes": "The most dangerous service on the bus: StopUnit, RestartUnit, KillUnit, MaskUnitFiles, SwitchRoot, SoftReboot, PowerOff, Halt, KExec, Exit are all reachable. The lifecycle methods carry org.freedesktop.systemd1.Privileged=true; Reexecute carries NoReply=true. Root object has exactly two child node containers, <node name=\"job\"> and <node name=\"unit\">. Nothing invoked."
+    },
+    {
+      "id": "org.freedesktop.systemd1:/org/freedesktop/systemd1/unit/xochitl_2eservice",
+      "kind": "interface",
+      "shape": "A unit object carries exactly two non-standard interfaces: org.freedesktop.systemd1.Unit plus one type-specific interface (here .Service). EVERY property on BOTH is access=read.",
+      "counts": {
+        "org.freedesktop.systemd1.Unit": {"methods": 17, "signals": 0, "properties": 99, "read": 99, "readwrite": 0},
+        "org.freedesktop.systemd1.Service": {"methods": 5, "signals": 0, "properties": 334, "read": 334, "readwrite": 0}
+      },
+      "unit_methods": ["Start(s)->(o)", "Stop(s)->(o)", "Reload(s)->(o)", "Restart(s)->(o)", "TryRestart(s)->(o)", "ReloadOrRestart(s)->(o)", "ReloadOrTryRestart(s)->(o)", "EnqueueJob(ss)->(uososa(uosos))", "Kill(si)", "QueueSignal(sii)", "ResetFailed()", "SetProperties(ba(sv))", "Ref()", "Unref()", "Clean(as)", "Freeze()", "Thaw()"],
+      "service_methods": ["BindMount(ssbb)", "MountImage(ssbba(ss))", "DumpFileDescriptorStore()->(a(suuutuusu))", "GetProcesses()->(a(sus))", "AttachProcesses(sau)"],
+      "evidence": "$ ssh remarkable 'busctl --system introspect org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/xochitl_2eservice --xml-interface --no-pager' | <ElementTree counter> -> \"org.freedesktop.systemd1.Service  M=5 S=0 P=334 ro=334 rw=0\" and \"org.freedesktop.systemd1.Unit  M=17 S=0 P=99 ro=99 rw=0\".",
+      "consequence": "STRUCTURAL FACT FOR A READ-ONLY POLICY: on systemd unit objects no property is writable, so Properties.Set is not an escape hatch. All mutation flows through the 17 Unit methods. Introspect plus Properties.Get on a unit object is provably non-mutating, which means the entire xochitl service definition (ExecStart, Environment, cgroup and sandboxing limits -- 334 properties) is readable with zero mutation risk."
+    },
+    {
+      "id": "org.freedesktop.login1:/org/freedesktop/login1:org.freedesktop.login1.Manager",
+      "kind": "interface",
+      "counts": {"methods": 59, "signals": 9, "properties": 46, "read": 44, "readwrite": 2},
+      "writable_properties": ["EnableWallMessages [Privileged=true, EmitsChangedSignal=false]", "WallMessage [same]"],
+      "signals": ["SessionNew(so)", "SessionRemoved(so)", "UserNew(uo)", "UserRemoved(uo)", "SeatNew(so)", "SeatRemoved(so)", "PrepareForShutdown(b)", "PrepareForShutdownWithMetadata(ba{sv})", "PrepareForSleep(b)"],
+      "evidence": "$ ssh remarkable 'busctl --system introspect org.freedesktop.login1 /org/freedesktop/login1 --xml-interface --no-pager' | <ElementTree counter> -> \"org.freedesktop.login1.Manager  M=59 S=9 P=46 ro=44 rw=2 / rw: ['EnableWallMessages','WallMessage']\"; $ ssh remarkable 'busctl --system tree org.freedesktop.login1 --no-pager' -> only /seat/seat0 is populated; /session and /user are childless containers.",
+      "owner": "systemd-logind.service, pid 370",
+      "notes": "PrepareForSleep(b) plus Inhibit(ssss)->(h fd) is the correct observe path for 'the tablet is about to sleep' -- cheaper and more reliable than polling. Childless /session and /user confirm xochitl runs as a plain root system service, not inside a logind session, so there is no graphical session to enumerate. No method invoked."
+    },
+    {
+      "id": "org.freedesktop.network1:link-objects",
+      "kind": "interface",
+      "shape": "One /org/freedesktop/network1/link/_<escaped-ifindex> object per kernel netdev, plus ten purely descriptive /network/_<escaped-name> config objects. The interface SET on each link object is conditional on which DHCP client or server is actually configured on that link -- it is not a uniform schema.",
+      "measured": {
+        "/link/_31": {"ifindex": 1, "netdev": "lo", "interfaces": ["org.freedesktop.network1.Link"]},
+        "/link/_33": {"ifindex": 3, "netdev": "usb0", "interfaces": ["org.freedesktop.network1.Link"]},
+        "/link/_34": {"ifindex": 4, "netdev": "usb1", "interfaces": ["org.freedesktop.network1.DHCPServer", "org.freedesktop.network1.DHCPv6Client", "org.freedesktop.network1.Link"]},
+        "/link/_38": {"ifindex": 8, "netdev": "wlan0", "interfaces": ["org.freedesktop.network1.DHCPv4Client", "org.freedesktop.network1.DHCPv6Client", "org.freedesktop.network1.Link"]}
+      },
+      "evidence": "$ ssh remarkable 'busctl --system introspect org.freedesktop.network1 /org/freedesktop/network1/link --xml-interface --no-pager | grep \"node name\"' -> \"<node name=\\\"_34\\\"/> <node name=\\\"_31\\\"/> <node name=\\\"_33\\\"/> <node name=\\\"_38\\\"/>\"; $ ssh remarkable 'for l in _31 _33 _34 _36; do printf \"link/%s: \" $l; busctl --system introspect org.freedesktop.network1 /org/freedesktop/network1/link/$l --xml-interface --no-pager 2>/dev/null | grep -o \"network1\\.[A-Za-z0-9]*\" | sort -u | tr \"\\n\" \" \"; echo; done' -> \"link/_31: network1.Link / link/_33: network1.Link / link/_34: network1.DHCPServer network1.DHCPv6Client network1.Link / link/_36: <empty>\"; $ ssh remarkable 'busctl --system introspect org.freedesktop.network1 /org/freedesktop/network1/link/_38 --xml-interface --no-pager | grep -o \"network1\\.[A-Za-z0-9]*\" | sort -u' -> \"network1.DHCPv4Client / network1.DHCPv6Client / network1.Link\"; $ ssh remarkable 'for d in /sys/class/net/*; do printf \"%s=\" \"$(basename $d)\"; cat $d/ifindex; done' -> \"lo=1 usb0=3 usb1=4 wlan0=8\".",
+      "shapes": {
+        "org.freedesktop.network1.Link": "16 methods (SetNTP/SetDNS/SetDNSEx/SetDomains/SetDefaultRoute/SetLLMNR/SetMulticastDNS/SetDNSOverTLS/SetDNSSEC/SetDNSSECNegativeTrustAnchors/RevertNTP/RevertDNS/Renew/ForceRenew/Reconfigure/Describe()->(s json)), 0 signals, 8 read-only properties (OperationalState, CarrierState, AddressState, IPv4AddressState, IPv6AddressState, OnlineState, AdministrativeState, BitRates (tt))",
+        "org.freedesktop.network1.DHCPv4Client": "0 methods, 0 signals, 1 property: State s [read]",
+        "org.freedesktop.network1.DHCPv6Client": "0 methods, 0 signals, 1 property: State s [read] -- byte-identical shape to DHCPv4Client",
+        "org.freedesktop.network1.Network": "0 methods, 0 signals, 7 read-only const properties (Description, SourcePath, MatchMAC, MatchPath, MatchDriver, MatchType, MatchName)"
+      },
+      "path_escaping": "systemd hex-escapes a leading digit as _3<digit> and '-' as _2d. So /link/_31 = ifindex 1, _33 = 3, _34 = 4, _38 = 8. Network config objects decode: _310_2dusb = \"10-usb\", _325_2dwlan0 = \"25-wlan0\", _326_2dbnep0 = \"26-bnep0\", _342_2dethernet = \"42-ethernet\", and five stock systemd 80-*.network files (_380_2d6rd_2dtunnel, _380_2dcontainer_2dvb/-ve/-vz, _380_2dvm_2dvt, _380_2dwifi_2dadhoc).",
+      "network_objects_evidence": "$ ssh remarkable 'busctl --system introspect org.freedesktop.network1 /org/freedesktop/network1/network --xml-interface --no-pager | grep \"node name\"' -> \"_310_2dusb, _325_2dwlan0, _326_2dbnep0, _342_2dethernet, _380_2d6rd_2dtunnel, _380_2dcontainer_2dvb, _380_2dcontainer_2dve, _380_2dcontainer_2dvz, _380_2dvm_2dvt, _380_2dwifi_2dadhoc\".",
+      "owner": "systemd-networkd.service, pid 413 (user systemd-network, not root)",
+      "notes": "networkd exposes ZERO signals anywhere; state changes arrive only via the standard PropertiesChanged. Manager has 21 methods / 0 signals / 7 read-only properties, and Describe() -> (s json) is the whole-stack read in one call. \"10-usb\" is the .network config that gives the tablet 10.11.99.1."
+    },
+    {
+      "id": "org.freedesktop.resolve1:/org/freedesktop/resolve1:org.freedesktop.resolve1.Manager",
+      "kind": "interface",
+      "counts": {"methods": 20, "signals": 0, "properties": 19, "read": 19, "readwrite": 0},
+      "evidence": "carried forward from the prior session's `busctl --system introspect org.freedesktop.resolve1 /org/freedesktop/resolve1 --xml-interface --no-pager` (195-line XML) -> 20 methods incl. ResolveHostname(isit)->(a(iiay)st), ResolveAddress(iiayt)->(a(is)t), ResolveRecord(isqqt)->(a(iqqay)t), ResolveService(isssit)->(a(qqqsa(iiay)s)aayssst), GetLink(i)->(o), RegisterService(sssqqqaa{say})->(o), UnregisterService(o), ResetStatistics(), FlushCaches(), ResetServerFeatures(), plus the 10 SetLink*/RevertLink family; 19 read-only properties incl. CacheStatistics (ttt), DNSSECStatistics (tttt), ResolvConfMode s. Owner re-verified this session: $ busctl --system list -> \"org.freedesktop.resolve1  pid=331  systemd-resolve  unit=systemd-resolved.service\".",
+      "notes": "ResolveHostname/ResolveRecord are read-shaped but hit the NETWORK -- not invoked. RegisterService/UnregisterService is a live mDNS/DNS-SD publish surface. Link children mirror networkd's, so their names track live ifindex the same way. Sibling /org/freedesktop/resolve1/dnssd carries ONLY the standard trio and is a bare container for RegisterService results."
+    },
+    {
+      "id": "org.freedesktop.hostname1:/org/freedesktop/hostname1:org.freedesktop.hostname1",
+      "kind": "interface",
+      "activation": "bus-activatable, unowned at scan time",
+      "counts": {"methods": 10, "signals": 0, "properties": 23, "read": 23, "readwrite": 0},
+      "methods": ["SetHostname(sb)", "SetStaticHostname(sb)", "SetPrettyHostname(sb)", "SetIconName(sb)", "SetChassis(sb)", "SetDeployment(sb)", "SetLocation(sb)", "GetProductUUID(b)->(ay)", "GetHardwareSerial()->(s)", "Describe()->(s json)"],
+      "evidence": "carried forward from the prior session's introspection (this session did NOT re-introspect, because introspecting an unowned activatable name starts the service). That session recorded 23 properties, ALL access=read: Hostname s, StaticHostname s, PrettyHostname s, DefaultHostname s [const], HostnameSource s, IconName s, Chassis s, Deployment s, Location s, KernelName s [const], KernelRelease s [const], KernelVersion s [const], OperatingSystemPrettyName s [const], OperatingSystemCPEName s [const], OperatingSystemSupportEnd t [const], HomeURL s [const], HardwareVendor s [const], HardwareModel s [const], FirmwareVersion s [const], FirmwareVendor s [const], FirmwareDate t [const], MachineID ay [const], BootID ay [const]. Unowned status re-verified this session: $ busctl --system list -> \"org.freedesktop.hostname1  pid=-  -  unit=-\".",
+      "notes": "All mutation is via Set* methods, never property writes: every property is read and the writable ones are guarded behind polkit's interactive flag. Describe() -> JSON is a single-call read of everything here and is a cleaner identity source than xochitl.conf. Not invoked."
+    },
+    {
+      "id": "org.freedesktop.locale1:/org/freedesktop/locale1:org.freedesktop.locale1",
+      "kind": "interface",
+      "activation": "bus-activatable, unowned at scan time",
+      "counts": {"methods": 3, "signals": 0, "properties": 7, "read": 7, "readwrite": 0},
+      "methods": ["SetLocale(as, b)", "SetVConsoleKeyboard(s, s, b, b)", "SetX11Keyboard(s, s, s, s, b, b)"],
+      "properties": ["Locale: as [read]", "X11Layout: s [read]", "X11Model: s [read]", "X11Variant: s [read]", "X11Options: s [read]", "VConsoleKeymap: s [read]", "VConsoleKeymapToggle: s [read]"],
+      "evidence": "carried forward from the prior session's `busctl --system introspect org.freedesktop.locale1 /org/freedesktop/locale1 --xml-interface --no-pager`. Not re-introspected this session (activation side effect). Unowned re-verified: $ busctl --system list -> \"org.freedesktop.locale1  pid=-\".",
+      "notes": "Stock systemd-localed, nothing reMarkable-specific. The X11* properties are vestigial on a device with no X server."
+    },
+    {
+      "id": "org.freedesktop.timedate1:/org/freedesktop/timedate1:org.freedesktop.timedate1",
+      "kind": "interface",
+      "activation": "bus-activatable, unowned at scan time",
+      "counts": {"methods": 5, "signals": 0, "properties": 7, "read": 7, "readwrite": 0},
+      "methods": ["SetTime(x usec_utc, b relative, b interactive)", "SetTimezone(s, b)", "SetLocalRTC(b, b, b)", "SetNTP(b, b)", "ListTimezones()->(as)"],
+      "properties": ["Timezone: s [read]", "LocalRTC: b [read]", "CanNTP: b [read]", "NTP: b [read]", "NTPSynchronized: b [read]", "TimeUSec: t [read]", "RTCTimeUSec: t [read]"],
+      "evidence": "carried forward from the prior session's introspection (78-line XML). Not re-introspected (activation side effect). Unowned re-verified: $ busctl --system list -> \"org.freedesktop.timedate1  pid=-\".",
+      "notes": "NTPSynchronized plus TimeUSec is the read-only pair to poll if you need to know whether the device timestamps in .metadata lastModified are trustworthy. Time sync on this device is chrony, not timesyncd, and time-sync.target is inactive -- so the clock is not confirmed synced."
+    },
+    {
+      "id": "org.freedesktop.DBus:/org/freedesktop/DBus",
+      "kind": "interface",
+      "interfaces": {
+        "org.freedesktop.DBus": {"methods": 19, "signals": 4, "properties": 2},
+        "org.freedesktop.DBus.Monitoring": {"methods": 1, "signals": 0, "properties": 0},
+        "org.freedesktop.DBus.Debug.Stats": {"methods": 3, "signals": 0, "properties": 0}
+      },
+      "features": ["ActivatableServicesChanged", "HeaderFiltering", "SystemdActivation"],
+      "optional_interfaces": ["org.freedesktop.DBus.Monitoring", "org.freedesktop.DBus.Debug.Stats"],
+      "evidence": "$ ssh remarkable 'busctl --system introspect org.freedesktop.DBus /org/freedesktop/DBus --no-pager | grep -E \"Features|Interfaces|BecomeMonitor|GetStats\"' -> \".Features property as 3 \\\"ActivatableServicesChanged\\\" \\\"HeaderFiltering\\\" \\\"SystemdActivation\\\" const / .Interfaces property as 2 \\\"org.freedesktop.DBus.Monitoring\\\" \\\"org.freedesktop.DBus.Debug.Stats\\\" const / .GetStats method - a{sv} - / .BecomeMonitor method asu -\".",
+      "notes": "Debug.Stats is compiled in and advertised -- unusual on a shipping consumer device. GetAllMatchRules() would reveal exactly which signals every process subscribes to, i.e. a precise map of xochitl's D-Bus interests; read-only in effect, not invoked. Monitoring.BecomeMonitor(as,u) is the sanctioned way to observe live bus traffic (e.g. rm-sync's documentFinished) without touching any service; it IS a method call, so it was not invoked. Careful: StartServiceByName(s,u) would ACTIVATE a service -- forbidden and not called."
+    },
+    {
+      "id": "standard-interface:three-flavours",
+      "kind": "interface",
+      "shape": "The org.freedesktop.DBus.{Peer,Introspectable,Properties} trio comes in THREE distinguishable flavours on this device, and it is not universally present. You can identify a service's generator from introspection alone.",
+      "flavours": {
+        "sd-bus": "GetAll out-arg named \"props\"; Introspect out-arg \"xml_data\"; GetMachineId out-arg \"machine_uuid\"; PropertiesChanged signal args carry NO direction attribute; no annotations. Seen on hostname1, systemd1, login1, network1, resolve1, no.remarkable.marker.",
+        "Qt-annotated": "GetAll out-arg named \"values\" plus org.qtproject.QtDBus.QtTypeName.Out0=QVariantMap; PropertiesChanged signal args carry direction=\"out\" (an sd-bus impossibility) plus QtTypeName.Out1=QVariantMap. Seen on no.remarkable.update1 and no.remarkable.sync.",
+        "Qt-unnamed": "out-args carry NO name at all; Get/Set/GetAll declared in that order; Introspect and GetMachineId out-args also unnamed. Seen on com.remarkable.devicepolicy."
+      },
+      "evidence": "$ ssh remarkable 'for pair in \"org.freedesktop.hostname1 /org/freedesktop/hostname1\" \"org.freedesktop.systemd1 /org/freedesktop/systemd1\" \"no.remarkable.marker /no/remarkable/marker\" \"no.remarkable.update1 /no/remarkable/update1\" \"com.remarkable.devicepolicy /com/remarkable/devicepolicy\"; do set -- $pair; busctl --system introspect \"$1\" \"$2\" --xml-interface --no-pager | grep -A3 \"name=\\\"GetAll\\\"\"; done' -> hostname1/systemd1/marker all emit `<arg name=\"props\" direction=\"out\" type=\"a{sv}\"/>`; update1 emits `<arg name=\"values\" .../>` plus `<annotation name=\"org.qtproject.QtDBus.QtTypeName.Out0\" value=\"QVariantMap\"/>`; devicepolicy emits `<arg type=\"a{sv}\" direction=\"out\"/>` with no name. Presence check this session: $ <ElementTree counter on fi.w1.wpa_supplicant1 /fi/w1/wpa_supplicant1> -> \"org.freedesktop.DBus.Properties  M=3 S=0 P=0\" -- three methods and ZERO signals, i.e. no PropertiesChanged, and NO org.freedesktop.DBus.Peer interface at all.",
+      "notes": "wpa_supplicant is a fourth case for presence, not flavour: it omits Peer entirely and omits PropertiesChanged from Properties (it publishes its own instead), and its in-args are named \"interface\"/\"propname\" rather than interface_name/property_name. Container paths can carry nothing: $ busctl --system introspect fi.w1.wpa_supplicant1 /fi --xml-interface -> \"<node><node name=\\\"w1\\\"/></node>\", zero interfaces."
+    },
+    {
+      "id": "org.freedesktop.LogControl1",
+      "kind": "interface",
+      "object_path": "/org/freedesktop/LogControl1",
+      "shape": "Present at the SAME path on all 7 systemd services (hostname1, locale1, timedate1, login1, network1, resolve1, systemd1). ABSENT on all 4 reMarkable services.",
+      "counts": {"methods": 0, "signals": 0, "properties": 3, "read": 1, "readwrite": 2},
+      "properties": ["LogLevel: s [readwrite] {EmitsChangedSignal=false, org.freedesktop.systemd1.Privileged=true}", "LogTarget: s [readwrite] {same}", "SyslogIdentifier: s [read] {EmitsChangedSignal=false}"],
+      "evidence": "$ ssh remarkable 'busctl --system introspect org.freedesktop.hostname1 /org/freedesktop/LogControl1 --xml-interface --no-pager' | <ElementTree counter> -> \"org.freedesktop.LogControl1  M=0 S=0 P=3 ro=1 rw=2 / rw: ['LogLevel','LogTarget'] / ro: ['SyslogIdentifier']\"; presence sweep from the prior session -> PRESENT on systemd1, resolve1, network1, login1, timedate1, hostname1, locale1; \"Unknown object '/org/freedesktop/LogControl1'\" on no.remarkable.sync, no.remarkable.marker, no.remarkable.update1, com.remarkable.devicepolicy.",
+      "consequence": "The /log.txt oracle's verbosity is bus-tunable per systemd service. It is NOT tunable for xochitl: xochitl owns no bus name at all, so rm.usb.web verbosity cannot be raised over D-Bus. Properties.Set on LogLevel/LogTarget would be a mutation and was NOT performed."
+    },
+    {
+      "id": "policy:send-destination-matrix",
+      "kind": "policy",
+      "shape": "com.remarkable.devicepolicy is reachable by ANY local uid. The other three reMarkable services are root-only. Two of the three enforce that with an explicit default deny; marker relies on dbus-daemon's implicit deny.",
+      "matrix": {
+        "com.remarkable.devicepolicy": "root may own; <policy context=\"default\"><allow send_destination=\"com.remarkable.devicepolicy\"/></policy> -- ANY local uid may send",
+        "no.remarkable.marker": "root-only via <policy user=\"root\">{allow own, allow send_destination}</policy>; NO default stanza, so the implicit deny applies",
+        "no.remarkable.sync": "root allow own+send, plus explicit <policy context=\"default\"><deny send_destination=\"no.remarkable.sync\"/></policy>",
+        "no.remarkable.update1": "root allow own+send, explicit default deny, plus a dead-code allowlist for uid \"core\""
+      },
+      "evidence": "$ ssh remarkable 'cat /usr/share/dbus-1/system.d/com.remarkable.devicepolicy.conf' -> \"<policy user=\\\"root\\\"><allow own=\\\"com.remarkable.devicepolicy\\\"/></policy><policy context=\\\"default\\\"><allow send_destination=\\\"com.remarkable.devicepolicy\\\"/></policy>\"; $ cat .../no.remarkable.marker.conf -> only \"<policy user=\\\"root\\\"><allow own=\\\"no.remarkable.marker\\\"/><allow send_destination=\\\"no.remarkable.marker\\\"/></policy>\"; $ cat .../no.remarkable.sync.conf -> root allow plus \"<policy context=\\\"default\\\"><deny send_destination=\\\"no.remarkable.sync\\\" /></policy>\"; $ cat /etc/dbus-1/system.d/no.remarkable.update1.conf -> root allow, then \"<policy user=\\\"core\\\">\" with \"<!-- introspection is denied --><deny ... send_interface=\\\"org.freedesktop.DBus.Introspectable\\\" /><deny ... send_interface=\\\"org.freedesktop.DBus.Properties\\\" />\" and explicit allows for AttemptUpdate, ResetStatus, GetStatus, then \"<policy context=\\\"default\\\"><deny send_destination=\\\"no.remarkable.update1\\\" /></policy>\"; $ ssh remarkable 'grep \"^core:\" /etc/passwd || echo \"no core user\"' -> \"no core user\".",
+      "notes": "Two findings. (1) devicepolicy is the one reMarkable service any unprivileged local process can reach: GetPolicies()/GetEnrolledState() are readable by anyone, and SetPolicyStatus is callable by anyone -- gated by nothing in the bus policy. (2) The update1 \"core\" stanza is inherited ChromeOS/Flatcar boilerplate that never applies, but its intent is instructive: upstream considered INTROSPECTION itself privileged on this service. Introspection succeeded here only because the session is root."
+    },
+    {
+      "id": "policy:file-and-activation-inventory",
+      "kind": "policy",
+      "shape": "11 policy files under /usr/share/dbus-1/system.d/ plus 2 under /etc/dbus-1/system.d/. 10 activation files under /usr/share/dbus-1/system-services/. Five dbus-<name>.service Alias symlinks in /etc/systemd/system/ map activation names to real units.",
+      "evidence": "$ ssh remarkable 'ls /usr/share/dbus-1/system.d/ /etc/dbus-1/system.d/' -> /etc: \"dbus-wpa_supplicant.conf, no.remarkable.update1.conf\"; /usr/share: \"bluetooth.conf, com.remarkable.devicepolicy.conf, no.remarkable.marker.conf, no.remarkable.sync.conf, org.freedesktop.{hostname1,locale1,login1,network1,resolve1,systemd1,timedate1}.conf\"; $ ls /usr/share/dbus-1/system-services/ -> \"com.remarkable.devicepolicy.service, no.remarkable.marker.service, org.bluez.service, org.freedesktop.{hostname1,locale1,login1,network1,resolve1,systemd1,timedate1}.service\"; $ ls -l /etc/systemd/system/ | grep \"^l\" | grep dbus -> \"dbus-com.remarkable.devicepolicy.service -> /usr/lib/systemd/system/mdm-agent.service / dbus-fi.w1.wpa_supplicant1.service -> .../wpa_supplicant.service / dbus-org.bluez.service -> .../bluetooth.service / dbus-org.freedesktop.network1.service -> .../systemd-networkd.service / dbus-org.freedesktop.resolve1.service -> .../systemd-resolved.service\".",
+      "notes": "no.remarkable.sync and no.remarkable.update1 have policy files but NO activation file -- they are boot-started only and cannot be bus-activated. Conversely fi.w1.wpa_supplicant1 has a policy file and an Alias symlink but no activation file in system-services/."
+    },
+    {
+      "id": "quirk:mdm-agent-inlines-child-subtree",
+      "kind": "quirk",
+      "shape": "Introspect on a PARENT path of mdm-agent returns the child's FULL interface definitions nested inside <node name=\"child\">, not merely the child's name. sd-bus and QtDBus both emit only <node name=\"child\"/> stubs.",
+      "evidence": "$ ssh remarkable 'dbus-send --system --print-reply --dest=com.remarkable.devicepolicy /com/remarkable org.freedesktop.DBus.Introspectable.Introspect' -> a single reply containing \"<node>...<node name=\\\"devicepolicy\\\"><interface name=\\\"com.remarkable.devicepolicy.MDMAgent1\\\"> ...full method and signal list inline... </interface>...</node></node>\"; contrast $ busctl --system introspect com.remarkable.devicepolicy /com/remarkable/devicepolicy/bogus -> \"Failed to introspect object ...: Unknown object\", same for /bogus.",
+      "consequence": "(a) A single Introspect at /com or /com/remarkable yields the complete devicepolicy API. (b) busctl --xml-interface at a parent path DOUBLE-REPORTS interfaces, which is what initially looked like MDMAgent1 being registered at two paths. (c) The 'Unknown object' replies prove there is no sd-bus fallback prefix, so MDMAgent1 lives at exactly /com/remarkable/devicepolicy."
+    },
+    {
+      "id": "state:org.bluez-activation-times-out",
+      "kind": "device-state",
+      "shape": "org.bluez is registered as activatable with its policy installed, but activation blocks for the full 25s service_start_timeout and never yields an owner. Zero object paths obtainable. bluetooth.service is loaded/inactive/dead despite being enabled.",
+      "evidence": "from the prior session: $ ssh remarkable 'busctl --system tree org.bluez --no-pager' -> \"Failed to introspect object / of service org.bluez: Failed to activate service 'org.bluez': timed out (service_start_timeout=25000ms) / No objects discovered.\" (exit 1). Re-verified this session WITHOUT re-triggering activation: $ busctl --system list -> \"org.bluez  pid=-  -  unit=-\"; activation and policy files present per the inventory claim above.",
+      "notes": "NOT re-attempted this session, precisely because introspecting an unowned activatable name triggers a service start as an unavoidable side effect. The prior attempt failed, so nothing started. Recording the caveat rather than burying it."
+    },
+    {
+      "id": "state:device-policy-values",
+      "kind": "device-state",
+      "shape": "Device is UNENROLLED. GetPolicies returns 0 policies. Four policy names are observable from the log: BlockDeveloperMode, BlockRetail, BlockSSH, SoftwareAutoInstall -- all last applied as false.",
+      "evidence": "read from the /log.txt oracle, not by invoking any method: $ grep -F 'rm.modules.mdm.policymanager' /log.txt -> \"Set policy state false on PolicyName::BlockDeveloperMode (operator()<xofm::libs::devicepolicy::PolicyName, std::weak_ptr<xofm::libs::devicepolicy::IPolicy> > /home/runner/work/xochitl/xochitl/src/xofm/modules/devicepolicy/devicepolicymanager.cpp:110)\", same for PolicyName::BlockRetail, PolicyName::BlockSSH, PolicyName::SoftwareAutoInstall; $ grep -F 'rm.modules.mdm.dbus.policyagent' /log.txt -> \"GetPolicies returned 0 policies (getPolicies .../src/xofm/modules/mdm/policyagent.cpp:57)\".",
+      "consequence": "BlockSSH=false plus an empty policy set is one of the two independent reasons SSH is reachable (the other being secboot=unlocked gating dropbear@.service). Note that empty-policy-set, not an explicit allow, is why BlockSSH reads false."
+    }
+  ],
+  "refuted": [
+    {
+      "claim": "The sd-bus flavour of the standard trio is present on all 20+ objects enumerated, and only two flavour variants exist on the device.",
+      "observation": "Both universals fail. fi.w1.wpa_supplicant1 is a THIRD shape: in-args named \"interface\"/\"propname\" (not interface_name/property_name), Introspect out-arg \"data\" (not xml_data), NO PropertiesChanged signal on the Properties interface, and NO org.freedesktop.DBus.Peer interface at all -- re-verified this session by ElementTree parse: \"org.freedesktop.DBus.Properties  M=3 S=0 P=0\" and no Peer entry. And com.remarkable.devicepolicy is a fourth: every out-arg is UNNAMED, including GetMachineId and Introspect. Container paths can carry zero interfaces: /fi introspects to \"<node><node name=\\\"w1\\\"/></node>\".",
+      "correction": "Three flavours plus a presence caveat. See claim standard-interface:three-flavours."
+    },
+    {
+      "claim": "org.freedesktop.login1.Manager has 55 methods / 9 signals / 47 properties, of which 2 are readwrite and 45 are read.",
+      "observation": "Signals are right; methods and properties are not. ElementTree parse of the same object: \"org.freedesktop.login1.Manager  M=59 S=9 P=46 ro=44 rw=2\". Independent grep over the Manager interface block agrees (59/9/46, 2 readwrite, 44 read), as does the tabular busctl form. The claim's own shape field in fact enumerates all 59 method names while labelling the group \"(55)\", and 2+45=47 is one phantom read property.",
+      "correction": "59 methods / 9 signals / 46 properties (44 read + 2 readwrite: EnableWallMessages, WallMessage). Every member name, signature, annotation and the owner pid 370 verified exact."
+    },
+    {
+      "claim": "org.freedesktop.network1.DHCPv4Client and .DHCPv6Client are present on every /link/_XX object.",
+      "observation": "Neither is. Interface sets measured this session: /link/_31 (lo) and /link/_33 (usb0) carry ONLY org.freedesktop.network1.Link; /link/_34 (usb1) carries DHCPv6Client and DHCPServer but NOT DHCPv4Client; only the wlan0 object carries DHCPv4Client. networkd instantiates these per-link, conditional on what is actually configured -- usb1 SERVES DHCP (hence DHCPServer) rather than consuming it.",
+      "correction": "The interface set on a link object is conditional, not a uniform schema. usb1 additionally exports org.freedesktop.network1.DHCPServer, which no prior claim recorded."
+    },
+    {
+      "claim": "/link/_36 = ifindex 6 = wlan0, a stable path.",
+      "observation": "/link/_36 no longer exists: $ busctl --system introspect org.freedesktop.network1 /org/freedesktop/network1/link/_36 -> \"Unknown object '/org/freedesktop/network1/link/_36'.\" wlan0's ifindex is now 8, and the object is /link/_38. $ ssh remarkable 'for d in /sys/class/net/*; do printf \"%s=\" \"$(basename $d)\"; cat $d/ifindex; done' -> \"lo=1 usb0=3 usb1=4 wlan0=8\". The link tree lists _31, _33, _34, _38.",
+      "correction": "Only the ESCAPING RULE is firmware-invariant (leading digit hex-escaped, so _3<n> = ifindex n, and _2d = '-'). The specific numbers track live ifindex, which increments across wifi interface teardown/recreate. A client must resolve link paths by reading /sys/class/net/*/ifindex at runtime, never by hard-coding _36."
+    },
+    {
+      "claim": "LogControl1's LogLevel and LogTarget are the ONLY genuinely writable D-Bus properties anywhere on the device; everything else that mutates is a method.",
+      "observation": "False by a wide margin. ElementTree parse this session: org.freedesktop.systemd1.Manager has 8 readwrite properties, six of which have nothing to do with logging -- RuntimeWatchdogUSec, RuntimeWatchdogPreUSec, RuntimeWatchdogPreGovernor, RebootWatchdogUSec, KExecWatchdogUSec, ServiceWatchdogs. org.freedesktop.login1.Manager has 2 (EnableWallMessages, WallMessage). fi.w1.wpa_supplicant1 has 3 (DebugLevel, DebugTimestamp, DebugShowKeys), its Interfaces/0 object has 108 across two interfaces, and Network objects add Enabled and Properties.",
+      "correction": "The LogControl1 shape and its 7-present/4-absent distribution are exact; the exclusivity note is not. wpa_supplicant's DebugLevel is a second bus-tunable log knob outside LogControl1, and DebugShowKeys would leak PSKs into the /log.txt oracle."
+    },
+    {
+      "claim": "com.remarkable.devicepolicy's activation file points at a nonexistent unit (SystemdService=dbus-com.remarkable.devicepolicy.service), a latent packaging bug that would fall through to Exec=/bin/false.",
+      "observation": "The unit exists. $ ssh remarkable 'ls -l /etc/systemd/system/ | grep \"^l\" | grep dbus' -> \"dbus-com.remarkable.devicepolicy.service -> /usr/lib/systemd/system/mdm-agent.service\" -- the standard systemd Alias symlink, in the HIGHEST-precedence unit directory, installed from mdm-agent.service's [Install] Alias=. Four sibling names use the identical idiom (bluez, wpa_supplicant, network1, resolve1). The original probe checked only /lib/systemd/system, the VENDOR dir, where Alias symlinks are never written (and /lib is itself a symlink to usr/lib).",
+      "correction": "No packaging bug. Activation resolves to mdm-agent.service and restarts it; Exec=/bin/false is never reached. The sub-claim that no.remarkable.sync and no.remarkable.update1 lack activation files entirely DOES hold."
+    },
+    {
+      "claim": "fi.w1.wpa_supplicant1.Interface has 149 properties, ~110 readwrite.",
+      "observation": "ElementTree parse this session: \"fi.w1.wpa_supplicant1.Interface  M=37 S=19 P=122 ro=22 rw=100\". The whole object, across all four interfaces, totals 130 properties, so no grouping yields 149. The claim is also internally inconsistent: it enumerates exactly 22 read-only names, so \"everything else\" of 149 would be 127, not ~110.",
+      "correction": "122 properties: 22 read, 100 readwrite, 0 write-only. All 37 method and 19 signal signatures verified exact. The directional point survives -- 100 writable properties on one object versus 2 across all of logind."
+    },
+    {
+      "claim": "The established D-Bus inventory lists three reMarkable services.",
+      "observation": "There are four (no.remarkable.sync was missing), plus fi.w1.wpa_supplicant1 as a fifth non-freedesktop service. Re-verified: $ busctl --system list --no-legend --acquired | wc -l -> 10, with no.remarkable.sync at :1.7 owned by rm-sync.service pid 486 and fi.w1.wpa_supplicant1 at :1.6 owned by wpa_supplicant.service pid 550.",
+      "correction": "See claim inventory:bus-names. 14 well-known names, 10 owned, 4 activation-only."
+    }
+  ]
+}

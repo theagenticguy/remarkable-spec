@@ -1,0 +1,221 @@
+{
+  "firmware": "3.27.3.0",
+  "measured_on_kernel": "6.12.49+git-imx8mm-ferrari-g68b95e858a0a",
+  "source": "read-only probe",
+  "measured_at": "2026-08-28T23:00:00Z",
+  "device": {
+    "machine": "reMarkable Ferrari",
+    "build": "20260612085811",
+    "os": "Codex Linux 5.7.126 (scarthgap)",
+    "build_mode": "public",
+    "endpoint": "http://10.11.99.1/",
+    "host_side": "10.11.99.12 on en11 (USB-C CDC-ECM gadget)"
+  },
+  "method": "GET and HEAD only. Every request was correlated against GET /log.txt, which returns the live systemd journal containing the Qt server's own rm.usb.web verdict for each request. Sentinel paths (/RMSPEC-PROBE-START etc.) were requested before and after each probe batch so the log slice could be bracketed exactly. POST /upload was NEVER requested in any form, including GET, because the server ignores the request method and a GET to that path could not be proven non-mutating.",
+  "claims": [
+    {
+      "id": "transport:listener",
+      "kind": "transport",
+      "shape": "One TCP listener bound to the single address 10.11.99.1:80 (not 0.0.0.0), owned by PID 416 = xochitl. There is no separate systemd unit for the web server.",
+      "evidence": "$ ssh remarkable 'grep \" 0A \" /proc/net/tcp' -> \"   1: 01630B0A:0050 00000000:0000 0A ... 3880 1 ...\" (LE 01630B0A = 10.11.99.1, 0x0050 = 80, inode 3880); $ ssh remarkable 'systemctl show xochitl.service -p MainPID' -> \"MainPID=416\"; socket-owner scan over /proc/*/fd matched socket:[3880] to pid=416 comm=xochitl.",
+      "consequence": "Unreachable over Wi-Fi even when SSH-over-Wi-Fi is armed. The only lever over the HTTP API is xochitl.service itself; there is no web unit to restart."
+    },
+    {
+      "id": "transport:usb-gadget-addressing",
+      "kind": "transport",
+      "shape": "10.11.99.1/27 is bound to usb1 (CDC ECM) alone. usb0 (RNDIS) is NO-CARRIER with no IP address.",
+      "evidence": "$ ssh remarkable 'ip -o addr show dev usb0; ip -o addr show dev usb1' -> usb0 produced no output; \"4: usb1    inet 10.11.99.1/27 brd 10.11.99.31 scope global usb1\"; $ ssh remarkable 'for d in /sys/class/net/*; do printf \"%s=\" \"$(basename $d)\"; cat $d/ifindex; done' -> \"lo=1 / usb0=3 / usb1=4 / wlan0=8\".",
+      "consequence": "A client that binds or routes via usb0 will never reach the web server."
+    },
+    {
+      "id": "protocol:methods",
+      "kind": "protocol",
+      "shape": "GET and HEAD both work. HEAD returns identical status and Content-Type with a zero-length body. The server does not dispatch on method: the path alone selects the handler.",
+      "evidence": "$ curl -sS -I -o /dev/null -w '%{http_code} %{content_type} %{size_download}' -> \"HEAD /documents/      -> 200 application/json; charset=ISO-8859-1 0\"; \"HEAD /log.txt         -> 200 text/plain 0\"; \"HEAD /assets/index.css -> 200 text/css 0\".",
+      "consequence": "HEAD is the safe probe for existence and content type. Because method is ignored, a POST/PUT/DELETE to a read route is indistinguishable from a GET, and a GET to a write route is indistinguishable from a POST -- which is why /upload must never be requested at all."
+    },
+    {
+      "id": "protocol:framing-and-charset",
+      "kind": "protocol",
+      "shape": "Responses are HTTP/1.1 with Transfer-Encoding: chunked. Successful /download responses send BOTH Content-Length and Transfer-Encoding: chunked in the same response. All JSON bodies are labelled \"application/json; charset=ISO-8859-1\" even though the payload contains UTF-8 document titles.",
+      "evidence": "$ curl -sS -D - -o /dev/null 'http://10.11.99.1/download/40fa3080-af19-4fa9-9a42-a73f6fb7b22d/pdf' -> \"HTTP/1.1 200 / Content-Disposition: attachment; filename=\\\"Quick sheets.pdf\\\" / Content-Length: 6021585 / Content-Type: application/pdf / Transfer-Encoding: chunked\"; $ curl -sS -D - http://10.11.99.1/documents/ -> \"HTTP/1.1 200 / Content-Type: application/json; charset=ISO-8859-1 / Transfer-Encoding: chunked\".",
+      "consequence": "Clients must not trust the advertised charset. Strict HTTP/1.1 clients that reject simultaneous Content-Length and Transfer-Encoding will fail on /download."
+    },
+    {
+      "id": "route:GET /documents/",
+      "kind": "route",
+      "path_template": "/documents/",
+      "methods_verified": ["GET", "HEAD"],
+      "status": 200,
+      "content_type_advertised": "application/json; charset=ISO-8859-1",
+      "content_type_actual": "JSON, UTF-8 encoded",
+      "response_shape": "JSON array of entry objects. DocumentType keys: Bookmarked (bool), CurrentPage (int), ID (uuid), ModifiedClient (ISO-8601 with Z), Parent (uuid or \"\"), Type (\"DocumentType\"), VisibleName (string), VissibleName (string, sic -- misspelled duplicate of VisibleName), fileType (\"pdf\" | \"notebook\"). CollectionType entries omit CurrentPage and fileType and carry Type=\"CollectionType\".",
+      "evidence": "$ curl -sS -w 'http=%{http_code} type=%{content_type} bytes=%{size_download}' http://10.11.99.1/documents/ -> \"http=200 type=application/json; charset=ISO-8859-1 bytes=2902\"; body begins \"[\\n    {\\n        \\\"Bookmarked\\\": false,\\n        \\\"CurrentPage\\\": 134,\\n        \\\"ID\\\": \\\"d3b38661-8f31-4412-a6f7-16343cc5e48c\\\",\\n        \\\"ModifiedClient\\\": \\\"2026-03-09T20:06:11.193Z\\\",\\n        \\\"Parent\\\": \\\"\\\",\\n        \\\"Type\\\": \\\"DocumentType\\\",\\n        \\\"VisibleName\\\": \\\"Calendar 2026\\\",\\n        \\\"VissibleName\\\": \\\"Calendar 2026\\\",\\n        \\\"fileType\\\": \\\"pdf\\\"\\n    },\" and returned 9 entries (6 DocumentType, 3 CollectionType, all Parent=\"\").",
+      "notes": "The trailing slash is load-bearing. Query strings are accepted and ignored: GET /documents/?x=1 returned the byte-identical 2902-byte root listing. Both VisibleName and VissibleName are always present and always equal in the 9+22 entries observed; a parser should read VisibleName and treat VissibleName as a legacy alias."
+    },
+    {
+      "id": "route:GET /documents/{parentId}",
+      "kind": "route",
+      "path_template": "/documents/{parentId}",
+      "methods_verified": ["GET"],
+      "status": 200,
+      "content_type_advertised": "application/json; charset=ISO-8859-1",
+      "response_shape": "Same array-of-entries shape as /documents/. The argument is a PARENT (folder) id, not a document id: entries returned all carry Parent == {parentId}.",
+      "evidence": "$ curl -sS 'http://10.11.99.1/documents/3807c887-677a-4ef5-b8e1-18127c716ef2' -> http=200, 8331 bytes, 22 entries, every one \"\\\"Parent\\\": \\\"3807c887-677a-4ef5-b8e1-18127c716ef2\\\"\" (the \"Work\" CollectionType); $ curl -sS 'http://10.11.99.1/documents/40fa3080-af19-4fa9-9a42-a73f6fb7b22d' -> http=200, 2902 bytes, byte-identical to the root listing (cmp -s reported IDENTICAL); $ curl -sS 'http://10.11.99.1/documents/00000000-0000-0000-0000-000000000000' -> http=200, 2902 bytes, also byte-identical to the root listing.",
+      "notes": "Resolution rule, measured: if {parentId} names a CollectionType, its children are returned correctly; if it names a DocumentType or does not exist, the handler silently falls back to the ROOT listing with status 200 and no error. So a 200 is not proof the id was recognised -- a client must compare the returned entries' Parent field against the id it asked for. No rm.usb.web line is logged for any of these three cases, so the oracle cannot distinguish them either."
+    },
+    {
+      "id": "route:GET /download/{id}/{format}",
+      "kind": "route",
+      "path_template": "/download/{documentId}/{format}",
+      "methods_verified": ["GET"],
+      "status": [200, 400],
+      "format_values": {
+        "pdf": "200, Content-Type: application/pdf, Content-Disposition: attachment; filename=\"<VisibleName>.pdf\", body starts %PDF-1",
+        "rmdoc": "200, Content-Type: application/zip, Content-Disposition: attachment; filename=\"<VisibleName>.rmdoc\", body starts PK\\x03\\x04"
+      },
+      "evidence": "$ for f in pdf rmdoc epub png svg zip PDF; do curl -sS -o f.bin -w '%{http_code} %{content_type} %{size_download}' \"http://10.11.99.1/download/40fa3080-af19-4fa9-9a42-a73f6fb7b22d/$f\"; xxd -p -l 6 f.bin; done -> \"pdf -> 200 application/pdf 6021585 magic=255044462d31\"; \"rmdoc -> 200 application/zip 6848549 magic=504b03041400\"; \"epub -> 400 ... 34\"; \"png -> 400\"; \"svg -> 400\"; \"zip -> 400\"; \"PDF -> 400\" (all four 400s body {\"error\":\"Filetype not supported\"}). $ curl -sS 'http://10.11.99.1/download/d3b38661-8f31-4412-a6f7-16343cc5e48c/pdf' -> \"200 application/pdf 2158068 magic=255044462d31\".",
+      "error_cases": {
+        "unsupported format": "400 {\"error\":\"Filetype not supported\"} -- any third segment other than the exact lowercase strings pdf or rmdoc, including \"PDF\", \"note.pdf\", \"epub\", \"png\", \"svg\", \"zip\", and a bare filename",
+        "fewer than three path segments": "400 {\"error\":\"Malformed URL\"} -- verified for /download/, /download/{id}, and /download/{id}/",
+        "CollectionType id": "400 {\"error\":\"Can only download documents\"}",
+        "unknown id": "400 {\"error\":\"No such entry\"}"
+      },
+      "error_evidence": "$ curl -sS 'http://10.11.99.1/download/' -> \"400 25\" body {\"error\":\"Malformed URL\"}; same for /download/40fa3080-af19-4fa9-9a42-a73f6fb7b22d and .../40fa3080-af19-4fa9-9a42-a73f6fb7b22d/. $ curl -sS 'http://10.11.99.1/download/3807c887-677a-4ef5-b8e1-18127c716ef2/pdf' -> \"400 39\" body {\"error\":\"Can only download documents\"}. $ curl -sS 'http://10.11.99.1/download/00000000-0000-0000-0000-000000000000/pdf' -> \"400 25\" body {\"error\":\"No such entry\"}.",
+      "corroboration": "The shipped web UI bundle constructs this URL with format as a defaulted parameter: $ ssh remarkable 'grep -o -E \".{160}/download/.{200}\" /usr/share/remarkable/webui/assets/index.js' -> \"Tx=async(e,t=\\\"pdf\\\")=>{ ... fetch(`/download/${e}/${t}`,{method:\\\"get\\\",credentials:\\\"same-origin\\\",signal:AbortSignal.timeout(3e4)}) ... if(n.status!==200)throw new Error(`File download failed (${n.status})`)\".",
+      "notes": "The rmdoc format is the whole reason this route matters to a client: it is a server-side archive of the document's authoritative on-disk files, and it is the only HTTP route that returns .rm stroke data."
+    },
+    {
+      "id": "artifact:.rmdoc archive shape",
+      "kind": "response-artifact",
+      "shape": "ZIP archive containing exactly three kinds of member: <docUUID>.metadata, <docUUID>.content, and <docUUID>/<pageUUID>.rm -- one .rm per page. No .local, no .pagedata, no .thumbnails, no .pdf, no nesting below <docUUID>/.",
+      "evidence": "$ curl -sS -o q.rmdoc 'http://10.11.99.1/download/40fa3080-af19-4fa9-9a42-a73f6fb7b22d/rmdoc' && unzip -l q.rmdoc -> \"275 ... 40fa3080-af19-4fa9-9a42-a73f6fb7b22d.metadata / 16162 ... 40fa3080-af19-4fa9-9a42-a73f6fb7b22d.content / 107441 ... 40fa3080-af19-4fa9-9a42-a73f6fb7b22d/8cfa9c18-0e4f-485a-b94e-5076dbdd3cb2.rm / ... / 10553946  25 files\"; $ unzip -Z1 q.rmdoc | sed 's/.*\\.//' | sort | uniq -c -> \"23 rm / 1 metadata / 1 content\".",
+      "notes": "The 23 .rm members match the 23 .rm files in the on-disk <docUUID>/ directory and the 23 PNGs in <docUUID>.thumbnails/ for this document. The server re-times the .metadata and .content members to the moment of the request (08-28-2026 23:00) while preserving original mtimes on the .rm members."
+    },
+    {
+      "id": "route:GET /thumbnail/{id}",
+      "kind": "route",
+      "path_template": "/thumbnail/{documentId}",
+      "methods_verified": ["GET"],
+      "status": [200, 400, 500],
+      "content_type_advertised": "image/jpeg",
+      "content_type_actual": "PNG",
+      "evidence": "$ curl -sS -o b_thumb.bin -w '%{http_code} %{content_type} %{size_download}' 'http://10.11.99.1/thumbnail/40fa3080-af19-4fa9-9a42-a73f6fb7b22d' -> \"200 image/jpeg 41013\"; $ xxd -l 16 b_thumb.bin -> \"00000000: 8950 4e47 0d0a 1a0a 0000 000d 4948 4452  .PNG........IHDR\".",
+      "error_cases": {
+        "missing id": "400 {\"error\":\"Missing thumbnail ID\"} for GET /thumbnail/",
+        "unknown id": "500 {\"error\":\"Unable to get thumbnail for entry\"}",
+        "bare /thumbnail with no trailing slash": "500 {\"error\":\"Unknown file\"} -- not routed at all"
+      },
+      "error_evidence": "$ curl -sS 'http://10.11.99.1/thumbnail/' -> \"400 32\" body {\"error\":\"Missing thumbnail ID\"}; $ curl -sS 'http://10.11.99.1/thumbnail/00000000-0000-0000-0000-000000000000' -> \"500 45\" body {\"error\":\"Unable to get thumbnail for entry\"}; log oracle shows \"Bad path \\\"/thumbnail\\\" \\\"\\\"\" followed by \"ERROR \\\"Unknown file\\\"\" for the bare form.",
+      "notes": "Content-Type is a lie on the success path: the advertised image/jpeg is contradicted by the PNG magic. A client must sniff the magic bytes. The shipped web UI never calls this route: $ ssh remarkable 'grep -o -E \"/(documents|download|upload|thumbnail|log)[a-zA-Z0-9_./{}$?=&-]*\" /usr/share/remarkable/webui/assets/index.js | sort | uniq -c' returned /documents/ x2, /upload, /log.txt, /download/ and no /thumbnail. It exists only for external clients."
+    },
+    {
+      "id": "route:GET /log.txt",
+      "kind": "route",
+      "path_template": "/log.txt",
+      "methods_verified": ["GET", "HEAD"],
+      "status": 200,
+      "content_type_advertised": "text/plain",
+      "response_shape": "The persistent systemd journal, rendered at microsecond precision (equivalent to journalctl -o short-iso-precise), spanning all retained boots. ~9.7 MB / ~78,500 lines at measurement time. Served with Content-Disposition: attachment and a request-time filename.",
+      "evidence": "$ curl -sS -D h_log.txt -o /dev/null -w 'http=%{http_code} type=%{content_type} bytes=%{size_download}' http://10.11.99.1/log.txt -> \"http=200 type=text/plain bytes=9703824\"; headers -> \"HTTP/1.1 200 / Content-Disposition: attachment; filename=\\\"log-2026-08-28T22:56:27.txt\\\" / Content-Type: text/plain / Transfer-Encoding: chunked\".",
+      "notes": "This is the oracle. See claim oracle:verdict-pairs. The journal is byte-capped, not boot-capped: $ ssh remarkable 'grep -v \"^#\" /etc/systemd/journald.conf | grep -v \"^$\"' -> \"[Journal] / SystemMaxUse=50M / SystemKeepFree=20M\"; $ ssh remarkable 'journalctl --disk-usage' -> \"Archived and active journals take up 47.5M in the file system.\" So the window is already at its cap and the oldest boots rotate out continuously. Any line count, byte size, boot count, or per-category line count read from /log.txt is a property of the rolling window at the moment of the fetch, NOT a firmware constant."
+    },
+    {
+      "id": "route:GET / and /index.html",
+      "kind": "route",
+      "path_template": ["/", "/index.html"],
+      "methods_verified": ["GET"],
+      "status": 200,
+      "content_type_advertised": "text/html",
+      "response_shape": "444-byte SPA shell that loads /assets/index.js and /assets/index.css.",
+      "evidence": "$ curl -sS -D h_root.txt -o b_root.html -w 'http=%{http_code} type=%{content_type} bytes=%{size_download}' http://10.11.99.1/ -> \"http=200 type=text/html bytes=444\"; $ curl -sS 'http://10.11.99.1/index.html' -> \"200 text/html 444\"."
+    },
+    {
+      "id": "route:static files",
+      "kind": "route",
+      "path_template": "/<file> and /assets/<file>, served from /usr/share/remarkable/webui/",
+      "methods_verified": ["GET", "HEAD"],
+      "status": [200, 404],
+      "shape": "Exactly five entries at the web root (assets/, favicon-32x32.png, index.html, reMarkableSans.woff2, reMarkableSerif.woff2) and exactly three under assets/ (index.css, index.js, rm_logo.svg). Content-Type is correctly derived per extension.",
+      "evidence": "$ ssh remarkable 'ls -A /usr/share/remarkable/webui/' -> \"assets / favicon-32x32.png / index.html / reMarkableSans.woff2 / reMarkableSerif.woff2\"; $ ssh remarkable 'ls -A /usr/share/remarkable/webui/assets' -> \"index.css / index.js / rm_logo.svg\"; probes -> \"/favicon-32x32.png -> 200 image/png 716\"; \"/reMarkableSans.woff2 -> 200 font/woff2 44668\"; \"/assets/index.css -> 200 text/css 73826\"; \"/assets/index.js -> 200 text/javascript 616082\"; \"/assets/rm_logo.svg -> 200 image/svg+xml 4675\".",
+      "error_cases": {
+        "/assets/ (directory)": "404 {\"error\":\"Unable to open file /usr/share/remarkable/webui/assets\"} -- the path IS routed, the directory open fails"
+      },
+      "error_evidence": "$ curl -sS http://10.11.99.1/assets/ -> \"404 application/json; charset=ISO-8859-1 66\" body {\"error\":\"Unable to open file /usr/share/remarkable/webui/assets\"}; log oracle for the same request -> \"ERROR \\\"Unable to open file /usr/share/remarkable/webui/assets\\\"\" with NO preceding \"Bad path\" line."
+    },
+    {
+      "id": "route:POST /upload",
+      "kind": "route",
+      "path_template": "/upload",
+      "methods_verified": [],
+      "not_probed": true,
+      "shape": "Multipart upload endpoint. Returns 201 on success. NOT PROBED IN ANY FORM, including GET, because the server ignores the request method (see protocol:methods) and a GET to this path could not be proven non-mutating.",
+      "evidence": "$ ssh remarkable 'grep -o -E \".{160}/download/.{200}\" /usr/share/remarkable/webui/assets/index.js' -> the surrounding bundle text reads \"),body:n}));if(r.status!==201)throw new Error(`Upload failed (${r.status})`)}catch(n){throw Np(n)}\" -- so the client asserts status 201. Historical journal lines from a prior session record the failure verdict: $ grep -a 'rm.usb.web' /log.txt -> \"ERROR \\\"No file sent\\\"\" (i.e. the handler is reached and rejects when no multipart body is present).",
+      "notes": "\"No file sent\" is therefore an /upload-handler error string, inferred from the oracle rather than from a live probe. Everything else about this route -- accepted content types, field names, response body -- is UNMEASURED on this firmware."
+    },
+    {
+      "id": "error-contract",
+      "kind": "protocol",
+      "shape": "Every error body is a single-line JSON object {\"error\":\"<message>\"} with Content-Type application/json; charset=ISO-8859-1. FOUR status codes are in use: 200 (success, and also the silent /documents/{id} fallback), 400 (routed path, bad argument), 404 (routed path, backing file unopenable), 500 (path not routed, or backing entry unresolvable).",
+      "status_map": {
+        "400": ["Malformed URL", "Filetype not supported", "Can only download documents", "No such entry", "Missing thumbnail ID"],
+        "404": ["Unable to open file /usr/share/remarkable/webui/assets"],
+        "500": ["Unknown file", "Unable to get thumbnail for entry"],
+        "unobserved-status": ["No file sent (from /upload; status not measured because the route was not probed)"]
+      },
+      "evidence": "Bodies captured verbatim: {\"error\":\"Unknown file\"} (24 bytes, status 500, from /nope-xyz, /documents, /images/, /images/foo.png, /thumbnail, /download); {\"error\":\"Malformed URL\"} (25, 400); {\"error\":\"Filetype not supported\"} (34, 400); {\"error\":\"Can only download documents\"} (39, 400); {\"error\":\"No such entry\"} (25, 400); {\"error\":\"Missing thumbnail ID\"} (32, 400); {\"error\":\"Unable to get thumbnail for entry\"} (45, 500); {\"error\":\"Unable to open file /usr/share/remarkable/webui/assets\"} (66, 404).",
+      "notes": "Nine distinct error strings are known: the eight above plus \"No file sent\" from the /upload handler, recorded from the log oracle only. Status code alone is not a sufficient discriminator -- 400 covers five semantically different failures and 500 covers both \"no such route\" and \"route exists, entry missing\"."
+    },
+    {
+      "id": "oracle:verdict-pairs",
+      "kind": "oracle",
+      "shape": "The rm.usb.web logger category in /log.txt is the server's own verdict channel. It emits exactly two line shapes: 'Bad path \"<path>\" \"<second>\"' and 'ERROR \"<message>\"'. A path that is NOT routed produces the PAIR (Bad path, then ERROR \"Unknown file\"). A path that IS routed but whose handler rejects produces a BARE ERROR line with no preceding Bad path. A path that is routed and succeeds produces NO line at all.",
+      "evidence": "Bracketed probe slice: $ curl http://10.11.99.1/RMSPEC-FORMAT-START ; <7 download probes> ; $ curl http://10.11.99.1/RMSPEC-FORMAT-END ; then $ curl -sS -o log5.txt http://10.11.99.1/log.txt && awk '/RMSPEC-FORMAT-START/,0' log5.txt | grep -a 'rm.usb.web' -> \"Bad path \\\"/RMSPEC-FORMAT-START\\\" \\\"\\\" / ERROR \\\"Unknown file\\\" / ERROR \\\"Filetype not supported\\\" x5 / ERROR \\\"Can only download documents\\\" / ERROR \\\"No such entry\\\" / Bad path \\\"/RMSPEC-FORMAT-END\\\" \\\"\\\" / ERROR \\\"Unknown file\\\"\". The two successful downloads (pdf, rmdoc) in that same batch produced ZERO lines. A separate slice confirms the same for /documents/, /documents/{id}, /thumbnail/{id} and every 200 static hit: zero rm.usb.web lines.",
+      "notes": "The second argument of 'Bad path' is empty in 100% of occurrences: $ grep -a 'rm.usb.web' log3.txt | grep -a 'Bad path' | sed 's/^.*rm\\.usb\\.web *//' | sort -u returned 59 distinct lines, every one ending in ' \"\"'. Practical rule for route discovery: probe a candidate, then read the log slice. Bad-path-pair = the route does not exist. Bare ERROR = the route exists and you got the arguments wrong. Silence = you got a real response."
+    },
+    {
+      "id": "route-table:closed",
+      "kind": "route",
+      "shape": "The route table is closed at six path families: /documents/, /documents/{parentId}, /download/{id}/{format}, /thumbnail/{id}, /log.txt, /upload, plus the static file tree (/, /index.html, /favicon-32x32.png, /reMarkable*.woff2, /assets/<file>). Everything else is Bad path.",
+      "evidence": "$ grep -a 'rm.usb.web' log3.txt | grep -a 'Bad path' | sed 's/^.*rm\\.usb\\.web *//' | sort -u -> 59 distinct Bad path entries covering, verbatim: /about, /api, /api/, /api/v1, /battery, /bundle.js, /config, /content/{uuid}, /cover/{uuid}, /device, /deviceinfo, /document/{uuid}, /documents, /download, /export/{uuid}, /favicon.ico, /file/{uuid}, /files, /folder/{uuid}, /folders/, /health, /images/, /images/foo.png, /info, /journal.txt, /log, /logs, /main.js, /manifest.json, /metadata/{uuid}, /nope, /pagedata/{uuid}, /pages/{uuid}, /preview/{uuid}, /render/{uuid}, /robots.txt, /search, /settings, /static/<non-ascii>, /status, /storage, /thumbnail, /thumbnails/{uuid}, /trash, /v1, /version -- all followed by ERROR \"Unknown file\".",
+      "notes": "There is no versioned API prefix, no health endpoint, no device-info endpoint, no per-page or per-metadata route, and no trash/search route. Singular /document/{uuid} does not exist; only plural /documents/{parentId}. Bare /download and bare /thumbnail without a trailing slash are Bad path, while /download/ and /thumbnail/ are routed -- the trailing slash is what enters the handler."
+    }
+  ],
+  "refuted": [
+    {
+      "claim": "GET /download/{id}/{name} -- the third path segment is a filename, and the route always returns application/pdf.",
+      "observation": "Neither half survives. The third segment is a FORMAT selector, not a filename: every filename-shaped value returned 400 {\"error\":\"Filetype not supported\"} -- \"note\", \"note.pdf\", \"note.rmdoc\", \"note.zip\", \"note.epub\", \"note.rm\", and the URL-encoded document title \"Quick%20sheets\" all failed. Only the exact lowercase strings \"pdf\" and \"rmdoc\" succeed. And the content type is not always application/pdf: format=rmdoc returns 200 with Content-Type: application/zip and a PK\\x03\\x04 body. The shipped web UI bundle confirms the parameter's role: `Tx=async(e,t=\"pdf\")=>{ ... fetch(`/download/${e}/${t}`, ...)`.",
+      "correction": "See claim route:GET /download/{id}/{format}. Filename is server-generated into Content-Disposition from VisibleName, not supplied by the caller."
+    },
+    {
+      "claim": "GET /documents/{id} on a DocumentType id returns the ROOT listing, not that document -- the endpoint does not validate its argument.",
+      "observation": "The DocumentType half reproduces exactly (byte-identical 2902-byte root listing, cmp -s IDENTICAL), and an unknown UUID behaves the same way. But \"does not validate its argument\" is too strong: a CollectionType id IS resolved correctly. /documents/3807c887-677a-4ef5-b8e1-18127c716ef2 returned 8331 bytes / 22 entries, every one with Parent set to that collection id.",
+      "correction": "The argument is a parent/folder id. It resolves for CollectionType and silently falls back to root for anything else. A 200 does not confirm the id was recognised; compare the returned Parent field against the requested id."
+    },
+    {
+      "claim": "Static tree includes /images/.",
+      "observation": "It does not. $ curl -sS 'http://10.11.99.1/images/' -> 500, body {\"error\":\"Unknown file\"}, and the oracle logged \"Bad path \\\"/images/\\\" \\\"\\\"\" then \"ERROR \\\"Unknown file\\\"\". Same for /images/foo.png. There is no images directory on disk: $ ssh remarkable 'ls -A /usr/share/remarkable/webui/' -> assets, favicon-32x32.png, index.html, reMarkableSans.woff2, reMarkableSerif.woff2.",
+      "correction": "The static tree is the web root's five entries plus the three files under assets/. /images/ is not a route on 3.27.3.0."
+    },
+    {
+      "claim": "Error contract: {\"error\": \"<msg>\"}. Unknown path -> 500 \"Unknown file\". Bad request -> 400.",
+      "observation": "The body shape and those two status mappings hold, but the contract has a third and fourth code and more strings than stated. GET /assets/ returns 404 with {\"error\":\"Unable to open file /usr/share/remarkable/webui/assets\"} -- a status code absent from the stated contract. GET /thumbnail/{unknown-uuid} returns 500 with {\"error\":\"Unable to get thumbnail for entry\"} -- a 500 that is NOT \"Unknown file\" and NOT an unknown path.",
+      "correction": "Four status codes (200/400/404/500) and nine known error strings. See claim error-contract. 500 means either \"path not routed\" or \"routed, entry unresolvable\"."
+    },
+    {
+      "claim": "rm.usb.web has exactly TWO message shapes and a closed 5-value ERROR vocabulary: Unknown file, Malformed URL, No file sent, Filetype not supported, Unable to open file /usr/share/remarkable/webui/assets.",
+      "observation": "The two line shapes hold. The 5-value vocabulary does not: probing the thumbnail and download argument space produced four more strings this session, each logged by rm.usb.web -- \"Missing thumbnail ID\", \"Unable to get thumbnail for entry\", \"Can only download documents\", \"No such entry\".",
+      "correction": "At least nine ERROR strings exist. The vocabulary is open-ended with respect to probe coverage, not closed: it grows as new argument shapes are exercised, so a spec should treat the list as a lower bound."
+    },
+    {
+      "claim": "GET /log.txt returns the live system journal (~5 MB).",
+      "observation": "It is the journal, but the size is not a constant. Measured 9,703,824 bytes / ~78,500 lines this session, against a journald cap of SystemMaxUse=50M with 47.5M already in use and 6 retained boots. The window is at its cap and rotating.",
+      "correction": "Treat /log.txt size, line count, retained-boot count, and every per-category line count as rolling-window observations timestamped at fetch, never as firmware facts."
+    },
+    {
+      "claim": "Content-Type on /documents/ is application/json.",
+      "observation": "It is advertised as \"application/json; charset=ISO-8859-1\" while the body carries UTF-8 document titles.",
+      "correction": "Ignore the advertised charset and decode as UTF-8."
+    }
+  ]
+}

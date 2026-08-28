@@ -1,0 +1,272 @@
+{
+  "firmware": "3.27.3.0",
+  "measured_on_kernel": "6.12.49+git-imx8mm-ferrari-g68b95e858a0a",
+  "source": "read-only probe",
+  "measured_at": "2026-08-28T23:00:00Z",
+  "root": "/home/root/.local/share/remarkable/xochitl",
+  "storage": {
+    "device": "/dev/mapper/home-encrypted-disk mounted at /home (ext4, rw,relatime)",
+    "encryption": "dm-crypt, unlocked at boot by the chain tee-supplicant.service -> keystore.service -> homecryptor.service",
+    "size_on_disk": "45.6M",
+    "evidence": "$ ssh remarkable 'grep \" /home \" /proc/mounts' -> \"/dev/mapper/home-encrypted-disk /home ext4 rw,relatime 0 0\"; $ ssh remarkable 'du -sh /home/root/.local/share/remarkable/xochitl' -> \"45.6M\"; $ ssh remarkable 'systemctl show home.mount -p What' -> \"What=/dev/mapper/home-encrypted-disk\"."
+  },
+  "method": "Reads only: ls, find, cat, sed, grep, wc, md5sum, strings, xxd, dd, du. No file under the data dir was written, deleted, or modified. Entity UUIDs were enumerated once into /tmp/rmspec_u.txt on the device's tmpfs, which is a disclosed write to volatile storage outside the data dir (see the disclosure block). BusyBox 1.36.1 applies: no GNU long options, so `sed -n 1,25p` instead of `head -25`, and `file`, `sqlite3`, and `python3` are NOT installed on the device.",
+  "disclosure": [
+    "One scratch file was written to the device's tmpfs: /tmp/rmspec_u.txt (the list of the 42 entity UUIDs, used to drive the correlation loops). /tmp is tmpfs -- volatile, cleared on reboot, outside the data dir. It was not deleted, because deletion is equally forbidden. Zero writes to persistent storage and zero writes anywhere under the xochitl data dir: entry count was 201 at session start and 201 at session end.",
+    "Every SSH invocation appends dropbear and systemd records to the systemd journal, which lives on /var/log/journal -- an ext4 mount on the same /dev/mapper/home-encrypted-disk partition as /home, and it survives reboots. That is an unavoidable persistent side effect of reading over SSH at all, and it is stated here rather than claimed away.",
+    "The search-index schema in this file was originally obtained in a prior session by `scp`-ing rm-search-index.db to the host, which copied the user's recognised handwriting off the device. This session re-verified the same schema ON DEVICE via dd + strings against page 1 of the file, without copying anything. Any local copy of that database should be deleted."
+  ],
+  "claims": [
+    {
+      "id": "census:201-entries",
+      "kind": "census",
+      "shape": "Exactly 201 top-level entries = 42 .metadata + 40 .content + 35 .thumbnails/ + 18 .local + 13 .pdf + 12 .failure + 2 .pagedata + 1 .tree + 1 .db + 37 bare-UUID directories. 42 distinct entity UUIDs.",
+      "evidence": "$ ssh remarkable 'D=/home/root/.local/share/remarkable/xochitl; ls -A \"$D\" | wc -l; ls -A \"$D\" | sed \"s/.*\\.//\" | sort | uniq -c | sort -rn' -> \"201\" then \"42 metadata / 40 content / 35 thumbnails / 18 local / 13 pdf / 12 failure / 2 pagedata / 1 tree / 1 db\" plus 37 bare-UUID lines with count 1 each. Arithmetic: 42+40+35+18+13+12+2+1+1+37 = 201.",
+      "recursive": "$ ssh remarkable 'find \"$D\" -type f | sed \"s|.*/||\" | sed \"s/.*\\.//\" | sort | uniq -c | sort -rn' -> \"370 png / 194 rm / 42 metadata / 40 content / 18 local / 13 pdf / 12 failure / 2 pagedata / 1 tree / 1 db\"; $ ssh remarkable 'find $D -mindepth 3 -type d | wc -l' -> \"0\" (no nesting below the two per-document directories).",
+      "notes": "The 43rd UUID-shaped basename in the directory is rm-search-index.db, not an entity."
+    },
+    {
+      "id": "contract:on-disk-archetypes",
+      "kind": "contract",
+      "shape": "MANDATORY: .metadata, present for 42 of 42 entities. Everything else is OPTIONAL. Exactly 8 distinct sidecar signatures exist, reducible to 5 archetypes.",
+      "signatures": {
+        "metadata content local DIR/ thumbnails/": 18,
+        "metadata content pdf failure DIR/ thumbnails/": 11,
+        "metadata content DIR/ thumbnails/": 5,
+        "metadata content": 3,
+        "metadata": 2,
+        "metadata content pdf failure DIR/": 1,
+        "metadata content pagedata pdf DIR/ thumbnails/": 1,
+        "metadata content pagedata DIR/": 1
+      },
+      "archetypes": {
+        "a-modern-notebook": "18 docs -- metadata + content + local + <uuid>/ + <uuid>.thumbnails/",
+        "b-legacy-notebook": "5 docs -- same minus .local (plus 1 with .pagedata instead of .thumbnails)",
+        "c-failed-pdf-import": "12 docs -- metadata + content + pdf + failure + <uuid>/ [+ thumbnails/ except c0956d61]",
+        "d-validated-pdf": "1 doc (d3b38661) -- metadata + content + pagedata + pdf + <uuid>/ + thumbnails/, NO failure",
+        "e-folder": "5 CollectionType -- metadata only, plus .content == {\"tags\":[]} for 3 of 5; NEVER a directory, NEVER thumbnails"
+      },
+      "evidence": "$ ssh remarkable 'cd $D; while read u; do s=\"\"; [ -f $u.metadata ]&&s=\"${s}metadata \"; [ -f $u.content ]&&s=\"${s}content \"; [ -f $u.pagedata ]&&s=\"${s}pagedata \"; [ -f $u.pdf ]&&s=\"${s}pdf \"; [ -f $u.local ]&&s=\"${s}local \"; [ -f $u.failure ]&&s=\"${s}failure \"; [ -d $u ]&&s=\"${s}DIR/ \"; [ -d $u.thumbnails ]&&s=\"${s}thumbnails/ \"; echo \"$s\"; done < /tmp/rmspec_u.txt | sort | uniq -c | sort -rn' -> \"18 metadata content local DIR/ thumbnails/ / 11 metadata content pdf failure DIR/ thumbnails/ / 5 metadata content DIR/ thumbnails/ / 3 metadata content / 2 metadata / 1 metadata content pdf failure DIR/ / 1 metadata content pagedata pdf DIR/ thumbnails/ / 1 metadata content pagedata DIR/\"; $ ssh remarkable 'cd $D; grep -h \"\\\"type\\\"\" *.metadata | grep -o \"CollectionType\\|DocumentType\" | sort | uniq -c' -> \"5 CollectionType / 37 DocumentType\".",
+      "notes": "Per-document directories are exactly two: <uuid>/ holding only .rm, and <uuid>.thumbnails/ holding only .png. Nothing else is ever co-located inside <uuid>/."
+    },
+    {
+      "id": "file-type:.metadata",
+      "kind": "file-type",
+      "shape": "JSON object, 4-space pretty-printed (one exception). The ONLY mandatory file. SEVEN distinct key sets, not two schema generations.",
+      "key_sets": {
+        "createdTime,lastModified,lastOpened,lastOpenedPage,new,parent,pinned,source,type,visibleName": 13,
+        "createdTime,deleted,lastModified,lastOpened,lastOpenedPage,metadatamodified,modified,new,parent,pinned,source,synced,type,version,visibleName": 12,
+        "createdTime,lastModified,lastOpened,lastOpenedPage,parent,pinned,type,visibleName": 10,
+        "createdTime,lastModified,parent,pinned,type,visibleName": 3,
+        "createdTime,lastModified,new,parent,pinned,source,type,visibleName": 2,
+        "deleted,lastModified,lastOpened,lastOpenedPage,metadatamodified,modified,parent,pinned,synced,type,version,visibleName": 1,
+        "createdTime,deleted,lastModified,lastOpened,lastOpenedPage,metadatamodified,modified,parent,pinned,synced,type,version,visibleName": 1
+      },
+      "field_presence": {
+        "universal_42_of_42": ["lastModified", "parent", "pinned", "type", "visibleName"],
+        "41_of_42": ["createdTime -- ABSENT on c0956d61-6d24-41ea-aea1-79fcb955f258"],
+        "37_of_37_DocumentType_never_CollectionType": ["lastOpened (string)", "lastOpenedPage (int)"],
+        "27_of_42_always_paired_spanning_both_generations": ["new", "source"],
+        "14_of_42_legacy_sync_v1_block": ["deleted", "metadatamodified", "modified", "synced", "version"]
+      },
+      "type_enum": ["DocumentType", "CollectionType"],
+      "evidence": "$ ssh remarkable 'cd $D; for f in *.metadata; do grep -o \"\\\"[A-Za-z]*\\\":\" \"$f\" | tr -d \"\\\":\" | sort | tr \"\\n\" \",\"; echo \"\"; done | sort | uniq -c | sort -rn' -> the seven counts above; $ ssh remarkable 'cd $D; grep -L \"\\\"createdTime\\\"\" *.metadata' -> \"c0956d61-6d24-41ea-aea1-79fcb955f258.metadata\"; $ ssh remarkable 'cd $D; grep -l \"\\\"lastOpened\\\"\" *.metadata | wc -l' -> \"37\"; $ ssh remarkable 'cd $D; grep -l \"\\\"new\\\"\" *.metadata | wc -l; grep -l \"\\\"source\\\"\" *.metadata | wc -l' -> \"27\" and \"27\"; $ ssh remarkable 'cd $D; grep -l \"\\\"synced\\\"\" *.metadata | wc -l' -> \"14\".",
+      "parser_requirements": [
+        "createdTime is NOT universal. Treat it as optional.",
+        "c0956d61 is minified single-line JSON (301 bytes, 0 newlines) while the other 41 are 4-space pretty-printed with >=8 lines. Do not parse .metadata line-wise.",
+        "new and source always co-occur but are NOT a generation marker: they appear on 13 modern docs, 12 legacy docs, and 2 folders.",
+        "The legacy sync-v1 block {deleted, metadatamodified, modified, synced, version} is on 14 of 42 -- all 12 failed PDF imports plus 2 others. Note metadatamodified is lowercase and a grep for \"modified\" with word boundaries will not match it."
+      ]
+    },
+    {
+      "id": "file-type:.content",
+      "kind": "file-type",
+      "shape": "JSON, 40 of 42 entities. 22-24 TOP-LEVEL keys on a notebook or validated PDF; exactly 1 top-level key ({\"tags\":[]}) on a CollectionType; 5 on one legacy minified PDF.",
+      "top_level_key_count_histogram": {"0 (minified, 5 real keys)": 1, "1": 3, "22": 18, "23": 16, "24": 2},
+      "top_level_key_union": {
+        "39": ["tags"],
+        "36": ["cPages", "coverPageNumber", "customZoomCenterX", "customZoomCenterY", "customZoomOrientation", "customZoomPageHeight", "customZoomPageWidth", "customZoomScale", "documentMetadata", "extraMetadata", "fileType", "fontName", "formatVersion", "lineHeight", "orientation", "pageCount", "pageTags", "sizeInBytes", "textAlignment", "textScale", "zoomMode"],
+        "17": ["margins"],
+        "2": ["dummyDocument"],
+        "1": ["keyboardMetadata"]
+      },
+      "nesting": {
+        "cPages": "object with keys lastOpened, original, pages, uuids. cPages.pages[] entries carry id, idx, template, scrollTime, verticalScroll. cPages.uuids[] entries carry first, second. CRDT values are wrapped as {timestamp, value}.",
+        "extraMetadata": "flat object, 35 keys on the sampled notebook, holding all the Last*/Secondary* pen-state fields (LastPen, SecondaryPen, LastActiveTool, LastEraserTool, and the *v2Color/*v2Size families)."
+      },
+      "evidence": "$ ssh remarkable 'cd $D; for f in *.content; do grep -c \"^    \\\"\" $f; done | sort -n | uniq -c' -> \"1 0 / 3 1 / 18 22 / 16 23 / 2 24\"; $ ssh remarkable 'cd $D; for f in *.content; do sed -n \"s/^    \\\"\\([A-Za-z]*\\)\\\".*/\\1/p\" $f; done | sort | uniq -c | sort -rn' -> the union above; $ ssh remarkable 'cd $D; cat c0956d61-6d24-41ea-aea1-79fcb955f258.content | tr \",\" \"\\n\" | sed -n \"s/.*\\\"\\([A-Za-z]*\\)\\\": *.*/\\1/p\" | sort -u' -> \"fileType formatVersion orientation pageCount pages\"; $ ssh remarkable 'cd $D; for f in 3807c887*.content 846158e7*.content cc96f90b*.content; do wc -c < $f; done' -> \"24\" \"24\" (2 of the 3 collections shown; each is byte-for-byte {\"tags\": [\\n    ]\\n}).",
+      "format_version": "formatVersion == 2 on all 36 entries that carry a fileType; absent on all 3 CollectionType .content files.",
+      "no_contentFormatVersion": "$ ssh remarkable 'cd $D; grep -l \"contentFormatVersion\" *.content | wc -l' -> \"0\"; $ ssh remarkable 'cd $D; grep -l \"contentFormatVersion\" *.local | wc -l' -> \"18\". The key lives ONLY in the .local sidecar.",
+      "parser_requirements": [
+        "Do NOT treat a flat any-depth key grep as the top-level schema. A notebook has 22-24 top-level keys, while an any-depth distinct-key count on the same file is 71. That is a 3x difference and the source of a real misreading.",
+        "A digit-blind key pattern (\"[a-zA-Z]*\") silently drops 21 real extraMetadata keys containing digits (LastBallpointv2Color, SecondaryHighlighterv2ColorCode, etc). Measured on one notebook: 50 distinct keys with the digit-blind pattern vs 71 with [A-Za-z0-9]*.",
+        "margins is top-level on only 17 of 40 -- optional.",
+        "Top-level pages (a flat array of page-UUID strings) exists on exactly 1 of 40 files, a legacy minified PDF, and is never a sibling of cPages. Iterate cPages.pages[] on modern files."
+      ]
+    },
+    {
+      "id": "file-type:.local",
+      "kind": "file-type",
+      "shape": "JSON, 34 bytes, byte-identical across all 18 files: {\\n    \"contentFormatVersion\": 2\\n}. A device-local sidecar, NEVER referenced by the sync tree.",
+      "discriminator": "MEASURED, not guessed: .local exists for exactly those fileType==notebook documents whose .metadata createdTime >= 1728001713241 (2024-10-04). The sorted createdTime split is clean with no interleaving -- the 6 notebooks created 1724625370495..1727273051976 have no .local; the 18 created 1728001713241..1787929960940 all do. Never on any of the 13 PDFs; never on any of the 5 CollectionType folders.",
+      "evidence": "$ ssh remarkable 'cd $D; md5sum *.local | cut -d\" \" -f1 | sort -u' -> \"90e1b5f4273d97ac9cc59b896e10b6e6\" (single hash for all 18); $ ssh remarkable 'cd $D; while read u; do ct=$(grep \"\\\"createdTime\\\"\" $u.metadata | tr -dc \"0-9\"); ft=$(grep \"\\\"fileType\\\"\" $u.content 2>/dev/null | sed \"s/.*: *\\\"//; s/\\\".*//\"); loc=$([ -f $u.local ] && echo LOCAL || echo -----); printf \"%s %-8s %-9s %s\\n\" \"$loc\" \"$ft\" \"$ct\" \"$u\"; done < /tmp/rmspec_u.txt | sort -k3,3n' -> a clean boundary: last non-LOCAL notebook is \"----- notebook 1727273051976 40fa3080-...\", first LOCAL is \"LOCAL notebook 1728001713241 baf831cd-...\", and every notebook above that line is LOCAL; $ ssh remarkable 'cd $D; strings .tree | grep -c \"\\.local\"' -> \"0\".",
+      "notes": "A per-document local-state sidecar introduced with the Oct-2024 firmware generation, written at notebook creation, mirroring the content format version locally and deliberately excluded from cloud sync. This is the correct place to read contentFormatVersion without trusting .content, which never carries the key."
+    },
+    {
+      "id": "file-type:.failure",
+      "kind": "file-type",
+      "shape": "JSON, 33 bytes, byte-identical across all 12 files: {\"message\":\"unable to validate\"}. A sync-blocking poison pill: its presence removes the ENTIRE document from the sync tree.",
+      "evidence": "$ ssh remarkable 'cd $D; md5sum *.failure | cut -d\" \" -f1 | sort -u; cat *.failure | sort -u' -> \"6404e040a169ea814677f797666f8e48\" and \"{\\\"message\\\":\\\"unable to validate\\\"}\".",
+      "arithmetic_proof": "On disk 42 .metadata / 40 .content / 194 .rm / 13 .pdf. In .tree 30 / 28 / 99 / 1. 42-12=30, 40-12=28, 194-95=99 (the 12 failure docs hold 95 .rm between them), 13-12=1. Exact on all four. $ ssh remarkable 'strings $D/.tree | grep -c \"\\.metadata\"' -> 30; \"\\.content\" -> 28; \"\\.rm\" -> 99; \"\\.pdf\" -> 1; \"\\.failure\" -> 0.",
+      "oracle": "The synchronizer states the mechanism itself: $ journalctl -o cat | grep 'has failure, not locking' -> \"rm.synchronizer: document <UUID> has failure, not locking\", 2352 lines over exactly those 12 UUIDs and no others. The synchronizer reads the marker, declines to take a document lock, and therefore never enters the document in .tree.",
+      "correlation": "All 12 are PDFs whose .metadata createdTime is 0 or absent. All 12 DO have .metadata + .content + <uuid>/ + .pdf; 11 also have .thumbnails/ (c0956d61 does not). So a .failure document is FULLY materialised on disk and FULLY invisible to sync. Zero of the 12 appear in the handwriting search index.",
+      "library_gap": "A push path can leave unsyncable documents behind with no signal to the user. This file IS the signal, and nothing in a client that ignores it can explain a document that never syncs."
+    },
+    {
+      "id": "file-type:.pagedata",
+      "kind": "file-type",
+      "shape": "Plain text, NOT JSON. 2 files, 6 bytes each, both containing the single line \"Blank\\n\". A stale default, NOT a per-page template index.",
+      "evidence": "$ ssh remarkable 'cd $D; for f in *.pagedata; do printf \"%s %sb \" \"$f\" \"$(wc -c < $f)\"; cat $f; done' -> \"2cf3200e-56c8-4968-a380-81756d0a44b2.pagedata 6b Blank / d3b38661-8f31-4412-a6f7-16343cc5e48c.pagedata 6b Blank\"; $ ssh remarkable 'cd $D; od -c d3b38661-*.pagedata' -> \"0000000    B   l   a   n   k  \\n\" / \"0000006\".",
+      "disproofs": [
+        "NOT one line per page: d3b38661 (\"Calendar 2026\", fileType pdf) has pageCount 432 and 432 cPages.pages[] entries, against a 1-line .pagedata.",
+        "The line does NOT name the page's template: 2cf3200e's single page records template.value == \"P Grid small\" in cPages.pages[0], while its .pagedata says \"Blank\".",
+        "NOT legacy-only: d3b38661 was created 1772983277016 (2026-03-08), formatVersion 2, source com.remarkable.methods -- current firmware still writes .pagedata."
+      ],
+      "disproof_evidence": "$ ssh remarkable 'cd $D; for u in 2cf3200e-56c8-4968-a380-81756d0a44b2 d3b38661-8f31-4412-a6f7-16343cc5e48c; do printf \"%s: lines=%s pageCount=%s template_hits=%s\\n\" $u \"$(wc -l < $u.pagedata)\" \"$(grep -o \\\"pageCount\\\": *[0-9]* $u.content | tr -dc 0-9)\" \"$(grep -c template $u.content)\"; done' -> 2cf3200e: lines=1 pageCount=1 template_hits=1 (value \"P Grid small\"); d3b38661: lines=1 pageCount=432 template_hits=0.",
+      "parser_requirement": "Treat .pagedata as optional and non-authoritative. The real per-page template lives at cPages.pages[].template.value as a timestamped {timestamp, value} pair, and is itself optional -- absent on all 432 pages of d3b38661 and absent entirely from 16 of 40 .content files."
+    },
+    {
+      "id": "file-type:.pdf",
+      "kind": "file-type",
+      "shape": "Raw PDF payload for fileType==\"pdf\" documents, 13 files. The PDF is the page SUBSTRATE; annotations live separately as one .rm per annotated page. Only 1 of the 13 is in the sync tree.",
+      "evidence": "$ ssh remarkable 'strings $D/.tree | grep -c \"\\.pdf\"' -> \"1\"; the per-document table below.",
+      "per_document_table": [
+        {"uuid": "d3b38661-8f31-4412-a6f7-16343cc5e48c", "nRM": 3, "nThumb": 237, "pageCount": 432, "flags": "pdf pagedata (validated)"},
+        {"uuid": "6c3a382a-2a52-45e5-a1bc-ac2f9f0be8fd", "nRM": 16, "nThumb": 10, "pageCount": 10, "flags": "FAILURE pdf"},
+        {"uuid": "e29f3b2f-d00a-4c60-b915-d86f7fec41f4", "nRM": 12, "nThumb": 10, "pageCount": 11, "flags": "FAILURE pdf"},
+        {"uuid": "c0956d61-6d24-41ea-aea1-79fcb955f258", "nRM": 11, "nThumb": 0, "pageCount": 11, "flags": "FAILURE pdf, no thumbnails dir"},
+        {"uuid": "31ec7d01-2470-4675-a5e9-aae61e101a66", "nRM": 10, "nThumb": 3, "pageCount": 10, "flags": "FAILURE pdf"},
+        {"uuid": "919809bb-58fd-45df-83e1-a3404415985f", "nRM": 2, "nThumb": 1, "pageCount": 1, "flags": "FAILURE pdf"}
+      ],
+      "table_evidence": "$ ssh remarkable 'cd $D; while read u; do ft=$(grep -o \"\\\"fileType\\\": \\\"[a-z]*\\\"\" $u.content 2>/dev/null | sed \"s/.*\\\"\\([a-z]*\\)\\\"$/\\1/\"); pc=$(grep -o \"\\\"pageCount\\\": *[0-9]*\" $u.content 2>/dev/null | tr -dc \"0-9\"); nrm=$([ -d $u ] && ls -A $u | wc -l || echo -); nth=$([ -d $u.thumbnails ] && ls -A $u.thumbnails | wc -l || echo -); ...; done < /tmp/rmspec_u.txt | sort -k2,2 -k1,1' -> the full 42-row table, of which the pdf rows are quoted above.",
+      "shape_traps": [
+        "On PDFs nRM can EXCEED pageCount: 6c3a382a has 16 .rm for 10 pages, e29f3b2f 12 for 11, 919809bb 2 for 1. Those are orphan .rm layers not reachable from cPages. Iterating the <uuid>/ directory instead of cPages will render ghost pages.",
+        ".thumbnails is generated lazily per PDF page, so nThumb is unrelated to both nRM and pageCount: d3b38661 has 3 annotated pages, 237 thumbnails, and 432 PDF pages."
+      ],
+      "notes": "12 of 13 are PDFs pushed to the device that failed validation. Only d3b38661 has a non-zero createdTime (1772983277016) and no .failure."
+    },
+    {
+      "id": "file-type:.rm",
+      "kind": "file-type",
+      "shape": "194 files, always at depth 2 as <docUUID>/<pageUUID>.rm. Of those, 108 are v6 CRDT scene binaries and 86 are EXACTLY ZERO BYTES.",
+      "evidence": "$ ssh remarkable 'find $D -name \"*.rm\" -type f | wc -l' -> \"194\"; $ ssh remarkable 'find $D -name \"*.rm\" -type f -size 0 | wc -l' -> \"86\"; header tally from the prior session (43-byte prefix via BusyBox dd) -> \"108 reMarkable .lines file, version=6 / 86 <empty>\".",
+      "zero_byte_rule": "All 86 zero-byte files sit inside the 12 .failure documents (failed PDF imports), which carry one 0-byte placeholder .rm per page id in .content despite having zero ink. Example: 31ec7d01 has 10 pages in .content and 10 .rm files, every one 0 bytes. The 99 in-tree .rm are all v6.",
+      "parser_requirement": "rmscene raises EOFError on a 0-byte .rm. A parser MUST stat-and-skip zero-length .rm files. A page therefore has one of three states: no .rm at all, a 0-byte placeholder .rm, or a v6 .rm.",
+      "oracle": "xochitl itself treats a missing .rm as normal rather than an error: $ journalctl -o cat | grep rm.docworker -> \"loaded pageId=<UUID> - no file found (loadLinesForPageUnprotected .../src/worker/src/documentworker.cpp:2400)\" appears 859 times against only 18 \"loaded pageId=<UUID>, version=6\" lines. So .rm is genuinely per-page optional.",
+      "write_discipline": "Writes go to a .rm.tmp sibling first and are then renamed: $ journalctl -o cat | grep rm.scenefile -> \"Scene writen to: \\\"/home/root/.local/share/remarkable/xochitl/<docUUID>/<pageUUID>.rm.tmp\\\"\" (note the firmware ships BOTH the typo 'writen' and the corrected 'written'; string-matching this line needs both). Polling a .rm during active editing can therefore catch a half-written or absent file."
+    },
+    {
+      "id": "file-type:.thumbnails",
+      "kind": "file-type",
+      "shape": "Directory per document, 35 of them, named <docUUID>.thumbnails/, containing <pageUUID>.png -- 370 PNGs total. Page-UUID filenames match the .rm page UUIDs for notebooks. Optional and NOT synced: a regenerable local cache.",
+      "evidence": "$ ssh remarkable 'cd $D; ls -A 40fa3080-af19-4fa9-9a42-a73f6fb7b22d.thumbnails | sed \"s/.*\\.//\" | sort | uniq -c' -> \"23 png\" (the same 23 page UUIDs as the 23 .rm in 40fa3080-.../); $ ssh remarkable 'strings $D/.tree | grep -c \"\\.thumbnails\"' -> \"0\".",
+      "relationship": "For all 24 notebooks nThumb == nRM == pageCount. For PDFs it holds for none: d3b38661 3/237/432, c0956d61 11/0/11, 31ec7d01 10/3/10. Three documents that have a <uuid>/ directory have no .thumbnails at all (2cf3200e, c0956d61), and the 2 metadata-only folders have neither."
+    },
+    {
+      "id": "file-type:bare-uuid-dir",
+      "kind": "file-type",
+      "shape": "37 directories named exactly <docUUID> (no extension), containing ONLY <pageUUID>.rm files -- nothing else at any depth. Present for every DocumentType with at least one page entry; absent for all 5 CollectionType folders.",
+      "evidence": "$ ssh remarkable 'ls -A $D | grep -v \"\\.\" | wc -l' -> \"37\"; $ ssh remarkable 'find $D -maxdepth 1 -mindepth 1 -type d | wc -l' -> \"72\" (37 bare + 35 .thumbnails); $ ssh remarkable 'ls -A $D/31ec7d01-2470-4675-a5e9-aae61e101a66 | sed \"s/.*\\.//\" | sort | uniq -c' -> \"10 rm\"; $ ssh remarkable 'find $D -mindepth 3 -type d | wc -l' -> \"0\".",
+      "notes": "37 dirs against 42 UUIDs: the 5 CollectionType folders have no directory. All 194 .rm live here."
+    },
+    {
+      "id": "file-type:.tree",
+      "kind": "file-type",
+      "shape": "A single hidden file literally named `.tree` (no UUID basename), 25179 bytes, Qt QDataStream binary. The authoritative manifest of what is ELIGIBLE for cloud sync.",
+      "header_layout": [
+        "0x00  uint32 BE 0x0000000c + ASCII magic \"rM sync tree\"",
+        "0x10  uint32 BE 0x00000008 + qint64 BE, milliseconds since epoch",
+        "0x1c  qint64 BE, MICROSECONDS since epoch -- NO length prefix. This field is the one a naive parser misses.",
+        "0x24  uint32 BE 0x00000046 (= 70 bytes) + UTF-16BE QString, 35 chars: the cloud account id, of the form 'google-oauth2|<21-digit subject>' (lowercase g). REDACTED, not reproduced here.",
+        "0x6e  entry stream begins"
+      ],
+      "entry_layout": "Per entry: uint32 kind (observed value 3 on 100% of entries), uint32 pathlen, ASCII path, uint32 0x00000020, 32-byte SHA-256, then a 28-byte trailing block carrying a size and a qint64 mtime. 190-191 entries; the first entry's path is \".\" (the root). 191 * 28 = 5348 bytes of trailer, ~21% of the file.",
+      "evidence": "$ ssh remarkable 'ls -la $D/.tree' -> \"-rw-r--r-- 1 root root 25179 Aug 28 21:49 .../.tree\"; $ ssh remarkable 'xxd -l 48 $D/.tree' -> \"00000000: 0000 000c 724d 2073 796e 6320 7472 6565  ....rM sync tree / 00000010: 0000 0008 0000 01a0 4a59 7379 0006 5a22  ........JYsy..Z\\\" / 00000020: 6d7e a829 0000 0046 0067 006f 006f 0067  m~.)...F.g.o.o.g\". Reading the offsets: the u32 len=8 at 0x10 covers 0x14-0x1b, but the QString length prefix 0000 0046 is at 0x24, not 0x1c -- eight bytes at 0x1c-0x23 are an unprefixed field. Decoding both: 0x14 -> 1787957457273 ms; 0x1c -> 1787957458287657 us; both land at 21:49, matching the file mtime, and both advanced by the same wall-clock delta between two reads taken 23 minutes apart.",
+      "path_classes": {
+        "bare <uuid>": "length prefix 0x24 = 36, 30 occurrences (the document roots)",
+        "<uuid>.metadata": "0x2d = 45, 30 occurrences",
+        "<uuid>.content": "0x2c = 44, 28 occurrences",
+        "<uuid>/<pageUUID>.rm": "0x4c = 76, 99 occurrences",
+        "<uuid>.pagedata": "0x2d = 45, 2 occurrences",
+        "<uuid>.pdf": "0x28 = 40, 1 occurrence"
+      },
+      "path_class_evidence": "$ ssh remarkable 'D=...; for e in local failure pdf thumbnails rm content metadata pagedata db; do printf \"%-12s %s\\n\" \".$e\" \"$(strings $D/.tree | grep -c \"\\.$e\")\"; done' -> \".local 0 / .failure 0 / .pdf 1 / .thumbnails 0 / .rm 99 / .content 28 / .metadata 30 / .pagedata 2 / .db 0\"; $ ssh remarkable 'strings $D/.tree | grep -c \"^.[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}$\"' -> \"30\".",
+      "consequence": "This is the decisive oracle for both .local and .failure semantics: ZERO mentions of .local, .failure, .thumbnails or .db, and the 12 .failure documents are absent wholesale. It is how to answer \"is this document actually synced?\" offline. mtime tracks synchronizer activity."
+    },
+    {
+      "id": "file-type:.db",
+      "kind": "file-type",
+      "shape": "SQLite 3, page size 4096, text encoding UTF-8. Single file rm-search-index.db, 503808 bytes, no -wal or -shm siblings. This is ON-DEVICE HANDWRITING RECOGNITION OUTPUT -- the tablet already OCRs its own ink.",
+      "schema": {
+        "search": "CREATE VIRTUAL TABLE search USING fts5(entryId, pageId, handwrittenText, authorMap UNINDEXED, wordStrokes UNINDEXED, digitalText, title, tags, type, tokenize=\"unicode61 categories 'L* M* N* Cf Co P* S*'\")",
+        "shadow_tables": ["search_data(id INTEGER PRIMARY KEY, block BLOB)", "search_idx(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID", "search_content(id INTEGER PRIMARY KEY, c0..c8)", "search_docsize(id INTEGER PRIMARY KEY, sz BLOB)", "search_config(k PRIMARY KEY, v) WITHOUT ROWID"],
+        "singletons": ["generation(id INTEGER PRIMARY KEY, value INTEGER)", "version(id INTEGER PRIMARY KEY, value INTEGER)"]
+      },
+      "evidence": "ON-DEVICE, no copy taken: $ ssh remarkable 'ls -la $D/rm-search-index.db' -> \"-rw-r--r-- 1 root root 503808 Aug 28 21:44\"; $ ssh remarkable 'ls -A $D | grep -c \"\\-wal\\|\\-shm\"' -> \"0\"; $ ssh remarkable 'dd if=$D/rm-search-index.db bs=1 count=100 2>/dev/null | xxd | sed -n 1,4p' -> \"00000000: 5351 4c69 7465 2066 6f72 6d61 7420 3300  SQLite format 3. / 00000010: 1000 0101 0040 2020 0000 0145 0000 007b ...\" (bytes 16-17 = 0x1000 = 4096 page size; bytes 56-59 = 0x00000001 = UTF-8); $ ssh remarkable 'dd if=$D/rm-search-index.db bs=4096 count=3 2>/dev/null | strings | grep -E \"CREATE (VIRTUAL )?TABLE\"' -> the full 9 CREATE statements above, verbatim.",
+      "row_shape_from_prior_session": "Obtained in a prior session by scp-ing the file and querying it read-only (mode=ro); disclosed because it copied user handwriting off the device: 92 rows = one per page; 23 distinct entryId (document UUIDs); 92 distinct pageId; 90 rows with non-empty handwrittenText; 4 with digitalText; 0 with authorMap; 90 with wordStrokes; type is always 1; title and tags always empty. version = (id 42, value 9); generation = (id 42, value 1787943505057609795).",
+      "join_key": "pageId matches the .rm filename exactly: entryId 525f9b18-2d4d-4dbf-941c-63be4aaf5700 / pageId 0bf1bcd5-4d87-407b-8f9d-509ca8e50881 corresponds to 525f9b18-.../0bf1bcd5-4d87-407b-8f9d-509ca8e50881.rm on disk.",
+      "field_semantics": {
+        "handwrittenText": "plain recognised text, e.g. '8/26 Todd Bharat Josh James Laith'",
+        "digitalText": "typed-text pages",
+        "wordStrokes": "per-word ink backreference of the form '<a>:<b>;<c>,' repeated with '|' separating words (e.g. '1:16;1,|1:17;6,|1:26;1,|') -- word-to-stroke ranges for search highlighting",
+        "authorMap": "empty on all 92 rows"
+      },
+      "coverage": "0 of the 12 .failure documents are indexed. 17 of 18 .local documents are indexed (92c6e348 is not).",
+      "library_gap": "This is the single biggest gap for any client doing OCR: the device has already computed the text, stores it locally, and keys it by the same page UUIDs the client already parses. Note the index is a SERVER-TOGGLED feature -- enablement is gated on a cloud round-trip (rm.search.indexsettings 'Action::Check' / sendEnable), so offline you cannot confirm it is enabled, only read what it already holds."
+    },
+    {
+      "id": "hostile-shell-facts",
+      "kind": "environment",
+      "shape": "Userland is BusyBox 1.36.1. NO GNU long options. `file`, `sqlite3` and `python3` are NOT installed. `od`, `hexdump`, `xxd`, `strings`, `dd`, `find`, `md5sum` ARE.",
+      "evidence": "$ ssh remarkable 'strings /usr/share/remarkable/webui/assets/index.js | ... | head -40' -> \"head: invalid option -- '4' / BusyBox v1.36.1 () multi-call binary. / Usage: head [OPTIONS] [FILE]...\"; prior session: $ command -v file -> MISSING; $ command -v sqlite3 -> MISSING; $ command -v python3 -> MISSING.",
+      "notes": "Use `sed -n 1,25p` not `head -25`. Use `sed -n 1,20p` for tails too, or `tail -N` (short form works). Any script that shells out to sqlite3 on the device will fail; read the .db header with dd + xxd + strings instead, or copy it off (and disclose that you did)."
+    }
+  ],
+  "refuted": [
+    {
+      "claim": ".metadata has two schema generations: a modern/slim 10-key set on 28 docs and a legacy/fat 15-key set on 14 docs.",
+      "observation": "SEVEN key sets, not two. The claimed modern 10-key set matches only 13 files: all 5 folders lack lastOpened and lastOpenedPage, and 15 of the 28 sync-free files lack new/source. new+source is not a generation marker at all -- it appears on 27 files spanning both generations (13 modern docs + 12 legacy docs + 2 folders). createdTime is 41 of 42, not universal: c0956d61 lacks it. And the original grep pattern \\\"modified\\\" cannot match the key metadatamodified, so that field was never actually tested.",
+      "correction": "See claim file-type:.metadata. Field names, spellings and the type enum were all correct; the field-to-file mapping was not."
+    },
+    {
+      "claim": ".content has ~48 top-level keys on a notebook, including cPages, pages, pageCount, verticalScroll, scrollTime, LastPen, SecondaryPen, first, second, idx, id, timestamp, uuids, value, original, template, lastOpened.",
+      "observation": "Off by roughly 2x, and it mixes nesting levels. The cited notebook has 23 top-level keys; the range across all 40 files is 22-24 for documents, 1 for collections, 5 for one minified legacy PDF; the union of top-level keys across all 40 is 26. Of the names listed, 27 are NESTED: the 14 Last*/Secondary* fields live under extraMetadata, and pages/uuids/lastOpened/original/first/second/id/idx/template/timestamp/value/scrollTime/verticalScroll live under cPages or deeper. The claim's own evidence command was a flat any-depth grep, which cannot distinguish top-level from nested. That same command also silently dropped 21 real keys containing digits (all *v2* extraMetadata fields): the true any-depth distinct count is 71, not 48 or 50.",
+      "correction": "See claim file-type:.content. The claim also omitted three real top-level keys: dummyDocument (2 files), keyboardMetadata (1 file), and margins as optional (17 of 40). formatVersion, the CollectionType degenerate {\"tags\":[]} form, and the contentFormatVersion note were all correct."
+    },
+    {
+      "claim": ".pagedata holds one line per page naming that page's background template, superseded by .content cPages[].template.",
+      "observation": "Three failures. (1) Not one line per page: d3b38661 has pageCount 432 and 432 cPages entries against a 1-line, 6-byte .pagedata. (2) The line does not name the page's template: 2cf3200e's .pagedata says 'Blank' while its single page's template.value is 'P Grid small'. (3) Nothing supersedes it on that PDF: d3b38661's 143 KB .content contains ZERO \"template\" keys, and 16 of 40 .content files have no template key at all.",
+      "correction": "Both files hold a stale default 'Blank' line independent of page count or real template. Treat .pagedata as optional and non-authoritative; read cPages.pages[].template.value (a timestamped {timestamp, value} pair, itself optional). Also refuted: the claim's premise that 'both are 1-page-equivalent' -- d3b38661 is 432 pages. And 'legacy' is wrong: d3b38661 was created 2026-03-08 on current firmware."
+    },
+    {
+      "claim": "194 .rm files, all v6 CRDT scene binaries; pages with no ink have no file.",
+      "observation": "The count and the path template are exact, but 86 of the 194 are exactly 0 bytes and carry no v6 header -- rmscene raises EOFError on them. And 'no ink means no file' is false: all 86 zero-byte files sit inside the 12 .failure documents, which have one 0-byte .rm per page id in .content despite zero ink (31ec7d01: 10 pages, 10 .rm, all empty).",
+      "correction": "108 v6 scene files plus 86 zero-byte placeholders. A page has three possible states, and a parser must stat-and-skip zero-length files. See claim file-type:.rm."
+    },
+    {
+      "claim": ".tree layout is: uint32 len + magic, then uint32 0x08 + an 8-byte block, then the account-id QString, then length-prefixed path strings each followed by a binary hash.",
+      "observation": "The header is short by 8 bytes and the entry shape is short by two fields. Following the stated sequence puts the QString length prefix at 0x1c, where the value is 0x00065a21 = 416289 -- a 416 KB read from a 25179-byte file, i.e. immediate parse failure on byte 4. There is an UNPREFIXED qint64 microsecond-epoch field at 0x1c-0x23 that the claim omits; the QString prefix is at 0x24. Each entry also carries a leading uint32 kind (=3) before the path length, and a 28-byte trailer after the hash holding a size and an mtime -- 191*28 = 5348 bytes, 21% of the file, undescribed. The root entry with path \".\" is also missing from the claim's path list.",
+      "correction": "See claim file-type:.tree. The magic, size, path classes and length prefixes, the 99/30/28/2/1 extension counts, 30 roots, and the zero-mentions-of-.local/.failure/.thumbnails findings all reproduce exactly. Separately: the account id prefix is lowercase 'google-oauth2|' (an Auth0 connection name), not 'Google-oauth2|' -- the claim's own hex gutter (\".g.o.o.g.l.e\") already contradicted its prose."
+    },
+    {
+      "claim": "The xochitl data dir holds ~200 entries.",
+      "observation": "Exactly 201, and the inventory omitted the .tree file entirely.",
+      "correction": "See claim census:201-entries. Reproduced twice, four months apart in the journal window."
+    },
+    {
+      "claim": "Read-only discipline: 2 scratch files written to on-device tmpfs; zero writes to persistent storage.",
+      "observation": "The data-dir cleanliness holds (201 entries before and after), but 'zero writes to persistent storage' cannot. Every SSH invocation appends dropbear and systemd records to the systemd journal, which is a rw ext4 mount on /dev/mapper/home-encrypted-disk -- the same encrypted partition as /home -- and survives reboots. A prior session also undercounted its own tmpfs footprint by an order of magnitude and asserted 'zero HTTP requests' in a window that contained 96 rm.usb.web lines.",
+      "correction": "The honest statement is: zero writes under the data dir, zero writes to persistent storage OTHER than the journal records our own SSH logins unavoidably create, and N disclosed scratch files on tmpfs. See the disclosure block at the top of this file."
+    }
+  ]
+}

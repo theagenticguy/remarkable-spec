@@ -1,0 +1,608 @@
+{
+  "firmware": "3.27.3.0",
+  "measured_on_kernel": "6.12.49+git-imx8mm-ferrari-g68b95e858a0a",
+  "source": "read-only probe",
+  "measured_at": "2026-08-28T23:00:00Z",
+  "oracle": "GET /log.txt",
+  "method": "One GET /log.txt (9,703,824 bytes / ~78,500 lines, spanning 6 retained boots from 2026-05-07T15:07:45 to now) parsed with a Python regex census. Two extractions were run and reconciled: (A) the xochitl padded-column format, and (B) the 'category: msg' format used by every other daemon. Padding collisions were collapsed using the source-file path each line carries. No device state was read or changed.",
+  "volatility_warning": "EVERY per-category line count in this file is a property of the rolling ~50 MB journal window at the moment of the fetch, NOT a firmware constant. journald.conf sets SystemMaxUse=50M with 47.5M already in use, so the oldest boots rotate out continuously. Several categories emit a fixed number of lines PER xochitl START (e.g. xofm.core.launcher, rm.library.loader, rm.user.auth.cli, rm.crashuploader.helpers all emit N-per-boot), so their counts move in lockstep with how many boots the window happens to retain. Cite counts as observations with a timestamp; never as a spec constant. The category NAMES, source files, and message shapes ARE stable.",
+  "log_format": {
+    "format_A_xochitl": "<iso8601-microsecond> <host> xochitl[<pid>]: <HH:MM:SS.mmm> <category left-justified in a 25-column field><message>[ (<function> <buildpath>:<line>)]",
+    "format_B_other_daemons": "<iso8601-microsecond> <host> <ident>[<pid>]: <category>: <message>",
+    "format_C_no_pid": "<iso8601-microsecond> <host> <ident>: <message> -- kernel: and the sleep-*.sh hook scripts carry NO [pid] and NO category; kernel lines alone are ~54% of the file",
+    "format_D_separators": "-- Boot <boot-id> -- lines, bare, no host or ident",
+    "field_width_proof": "The category field is exactly 25 columns wide, measured at the boundary: rm.epaperkeyboardhandler is 24 chars and is followed by 1 space (field=25); rm.network.authentication is 25 chars and is followed by ZERO spaces, so the message abuts the name with no separator. Also measured: rm.batterymanager len=17 pad=8, default len=7 pad=18, rm.search.indexsettings len=23 pad=2, rm.mdm.dbus-adaptor len=19 pad=6 -- every one sums to exactly 25.",
+    "field_width_evidence": "$ python3 -c \"re.search(r'xochitl\\[\\d+\\]: \\d\\d:\\d\\d:\\d\\d\\.\\d\\d\\d (<cat>)( *)', raw)\" over log5.txt -> \"rm.epaperkeyboardhandler len= 24 pad=  1 field=25 / rm.network.authentication len= 25 pad=  0 field=25 / rm.batterymanager len= 17 pad=  8 field=25 / default len=  7 pad= 18 field=25 / rm.search.indexsettings len= 23 pad=  2 field=25 / rm.mdm.dbus-adaptor len= 19 pad=  6 field=25\".",
+    "parsing_rule": "A category name of 25 or more characters RUNS INTO its message with no separator, producing phantom category names. Split on the 25-column boundary, or resolve against the known name set. A whitespace-splitting parser reports 57 raw tokens for what are actually 47 categories in format A."
+  },
+  "census": {
+    "distinct_rm_and_xofm_categories": 49,
+    "raw_tokens_before_collision_collapse": 57,
+    "padding_collision_groups": 9,
+    "phantom_names_produced": 13,
+    "non_rm_categories": {"default": 155, "qt.network.http2": 152},
+    "evidence": "$ python3 <census script> over log5.txt -> \"RAW padded tokens: 57 / colon-format names: 10 / distinct rm.*/xofm.* after collapse: 49 / non-rm/xofm categories: {'default': 155, 'qt.network.http2': 152}\".",
+    "collision_map": {
+      "rm.epaperevdevtouchscreenhandler (32 chars)": ["...evdevtouch", "...ymin", "...ymax", "...xmin", "...xmax", "...screenGeometry", "...rotate", "...pmin", "...pmax"],
+      "rm.network.authentication (25 chars)": ["...Fetching", "...userTokenHostname", "...User"],
+      "rm.batterymanager.slumberinhibitor (34)": ["...erased"],
+      "rm.batterymanager.suspenddelay (30)": ["...PowerStateRm12x"],
+      "rm.modules.mdm.dbus.policyagent (31)": ["...GetPolicies"],
+      "rm.modules.mdm.policymanager (28)": ["...Set"],
+      "rm.modules.reopennotification (29)": ["...Reopen"],
+      "rm.entryfile.documentcontentfile (32)": ["...Lock"],
+      "xofm.modules.devicereporter (27)": ["...DeviceReporter"]
+    },
+    "collision_evidence": "$ python3 <census script> COLLISION MAP output -> \"rm.entryfile.documentcontentfileLock -> rm.entryfile.documentcontentfile / rm.epaperevdevtouchscreenhandler{evdevtouch,pmax,pmin,rotate,screenGeometry,xmax,xmin,ymax,ymin} -> rm.epaperevdevtouchscreenhandler / rm.network.authentication{Fetching,User,userTokenHostname} -> rm.network.authentication\"; the remaining six were resolved by their source-file path, which is unambiguous (e.g. rm.batterymanager.slumberinhibitorerased carries .../batterymanager/src/slumberinhibitor.cpp and the message 'erased N invalid slumber inhibitors').",
+    "not_a_category": {
+      "rm.tmp": "matches 255 times in the log but is NOT a logger category: 0 occurrences in the category column. All hits are the '.rm.tmp' FILE SUFFIX inside rm.scenefile's 'Scene written to:' messages. A naive \\b(rm|xofm)\\.\\w+ regex over the whole line invents it.",
+      "rm.tmp_evidence": "$ python3 -c \"pad.count('rm.tmp')\" -> 0; $ python3 -c \"len(re.findall(r'\\brm\\.tmp\\b', raw))\" -> 255.",
+      "rm.library": "Bare rm.library is NOT present in this window. $ grep -oE ' rm\\.library[a-z.]*' log5.txt | sort | uniq -c -> only rm.library.ext.open, rm.library.loader, rm.library.view. A prior session recorded one bare rm.library line ('Trying to create collection with invalid parent, defaulting to toplevel') dated 2026-04-29, which has since rotated out -- which is why this window reports 49 categories where an earlier one reported 50."
+    }
+  },
+  "claims": [
+    {
+      "id": "rm.usb.web",
+      "lines_observed": 174,
+      "governs": "The USB web server's request ROUTER. This IS the oracle for the HTTP surface.",
+      "shape": "Exactly TWO message shapes: 'Bad path \"<path>\" \"<second>\"' (second arg empty in 100% of 59 distinct occurrences) and 'ERROR \"<message>\"'. No source path is ever logged. Nine known ERROR strings: Unknown file, Malformed URL, No file sent, Filetype not supported, Unable to open file /usr/share/remarkable/webui/assets, Missing thumbnail ID, Unable to get thumbnail for entry, Can only download documents, No such entry.",
+      "evidence": "$ python3 <shape census> for rm.usb.web -> \"174 lines, 70 shapes\" with the top shapes \"71 ERROR \\\"Unknown file\\\" / 18 ERROR \\\"Filetype not supported\\\" / 5 ERROR \\\"Malformed URL\\\" / 4 Bad path \\\"/documents\\\" \\\"\\\" / 3 ERROR \\\"Unable to open file /usr/share/remarkable/webui/assets\\\" / 2 ERROR \\\"No file sent\\\"\" (the 70 shapes are 59 distinct Bad path values plus the error strings).",
+      "verdict_semantics": "Not-routed = the PAIR (Bad path, then ERROR \"Unknown file\"). Routed-but-rejected = a BARE ERROR line with no preceding Bad path. Routed-and-succeeded = NO line at all. See http.json claim oracle:verdict-pairs for the bracketed-sentinel technique.",
+      "notes": "Static assets are served from /usr/share/remarkable/webui/assets. '/documents' without a trailing slash is a Bad path while '/documents/' is valid -- the trailing slash is load-bearing. Since xochitl owns no D-Bus name, this category is the ONLY window into the HTTP server, and its verbosity is not bus-tunable."
+    },
+    {
+      "id": "rm.synchronizer",
+      "lines_observed": 2592,
+      "governs": "The cloud sync engine's run loop, in the rm-sync PROCESS (format B: 'rm-sync[486]: rm.synchronizer: <msg>'). Loudest category by a factor of 1.6.",
+      "shape": "Scheduling ('-- execute requested: <ISO8601>', '-- execute ended: <ISO8601>'), batching ('-- running sync, batch: N/-1, minimal:true|false' and 'batch: N/1'), and per-document eligibility ('document <uuid> has failure, not locking'). No source path logged.",
+      "evidence": "$ python3 <shape census> for rm.synchronizer -> \"2592 lines, 137 shapes\" with \"1956 document <uuid> has failure, not locking / 163 -- execute ended: N-N-NTN:N:N.N / 148 -- execute requested: N-N-NTN:N:N.N / 113 -- running sync, batch: N/-N, minimal:true / 33 -- running sync, batch: N/-N, minimal:false / 15 -- running sync, batch: N/N, minimal:true\".",
+      "notes": "This is the authoritative verdict on .failure: the synchronizer reads the marker, declines the document lock, and therefore never enters the document in .tree. 1956 of its 2592 lines are that one message, over exactly the 12 .failure UUIDs. Companion category rm.documentlockmanager is the lock side of the same mechanism. Also emits 'Stopping sync because of network-level failure' and 'sync resolution: root hash (local=... server=...)'."
+    },
+    {
+      "id": "rm.batterymanager",
+      "lines_observed": 1600,
+      "source": "src/xofm/libs/batterymanager/src/batterymanager.cpp",
+      "governs": "Battery and power-state tracking. Loudest xochitl-format category.",
+      "shape": "'Woke up with reason=<REASON> and battery level=N', 'Setting sleep delay interval to HH:MM:SS.mmm', 'Light sleep timer timed out', 'Changing display state from <A> to <B>' (states seen: Normal, DeepSleep).",
+      "evidence": "$ python3 <census> -> \"1600  rm.batterymanager   src/xofm/libs/batterymanager/src/batterymanager.cpp\"; sample line \"2026-08-28T21:49:30.093212+00:00 imx8mm-ferrari xochitl[416]: 21:49:30.092 rm.batterymanager        Woke up with reason=... and battery level=97 (onWakeup /home/runner/work/xochitl/xochitl/src/xofm/libs/batterymanager/src/batterymanager.cpp:509)\".",
+      "notes": "The single-file attribution is exact -- all 1600 lines resolve to that one .cpp. This is the cheapest awake/charging/slumbering heartbeat in the log, but it is NOT a reliable asleep marker on its own (see the refutation of the rm.light.front sleep-marker claim)."
+    },
+    {
+      "id": "rm.docworker",
+      "lines_observed": 1397,
+      "source": "src/worker/src/documentworker.cpp",
+      "governs": "The per-document worker thread: one spawned and retired per open document UUID, and the thing that loads page stroke data.",
+      "shape": "Five messages: '-> worker on <uuid> now running', '-> worker on <uuid> now exiting (run ...:1603 or :1487)', 'loaded pageId=<uuid>, version=6 (loadLinesForPageUnprotected ...)', 'loaded pageId=<uuid> - no file found (loadLinesForPageUnprotected ...)', 'no renderer possible for file type: ' (trailing empty type).",
+      "evidence": "$ python3 <census> -> \"1397  rm.docworker   src/worker/src/documentworker.cpp\"; per-shape breakdown from a bracketed sample: \"859 loaded pageId=<uuid> - no file found / 18 loaded pageId=<uuid>, version=6 / 11 -> worker on <uuid> now running / 9 -> worker on <uuid> now exiting / 8 no renderer possible for file type: \".",
+      "notes": "The most valuable category for a client parsing .rm. 'version=6' confirms the v6 format per page. '- no file found' marks a page entry with no .rm on disk -- and it is the OVERWHELMING majority (95% in the sampled window), which is the device's own statement that .rm is per-page optional. loadLinesForPageUnprotected emits from three different line numbers (2400, 2402, 2330), so no single line number is a stable signature. 'no renderer possible for file type: ' with an EMPTY type corresponds to the zero-byte .rm placeholders in the .failure documents."
+    },
+    {
+      "id": "rm.sys.timer",
+      "lines_observed": 880,
+      "source": "src/xofm/libs/timer/src/timer.cpp:27",
+      "governs": "xochitl's internal NAMED-TIMER framework. Every firing is logged with the timer's name, making it a free schedule map of the application.",
+      "shape": "'Type::{Normal|Rtc} timer <name> timed out (operator() .../timer.cpp:27)'. Type:: is a two-valued ENUM, not a literal, and Rtc is the MAJORITY.",
+      "timer_names": {
+        "Rtc sleepDelayTimer": "the loudest single timer, ~49% of the category",
+        "Normal entryUploadTimer": "deferred document upload",
+        "Normal markerSleepDebounceTimer": "stylus sleep debounce",
+        "Rtc lockUploadTimer": null,
+        "Rtc lightSleepTimer": null,
+        "Normal calendarUpdateTimer": null,
+        "Normal jsonReporter": "telemetry flush",
+        "Normal searchIndexEnableTimer": null,
+        "Rtc mcuFirmwareUpdateTimer": null
+      },
+      "evidence": "$ grep -F 'rm.sys.timer' log | sed -n 's/.*Type::\\([A-Za-z]*\\) timer \\([^ ]*\\) timed out.*/\\1 \\2/p' | sort | uniq -c | sort -rn -> \"428 Rtc sleepDelayTimer / 140 Normal entryUploadTimer / 116 Normal markerSleepDebounceTimer / 61 Rtc lockUploadTimer / 52 Rtc lightSleepTimer / 37 Normal calendarUpdateTimer / 36 Normal jsonReporter / 3 Normal searchIndexEnableTimer / 1 Rtc mcuFirmwareUpdateTimer\" (874-line sample; Rtc 542 vs Normal 332); single emit site confirmed -> all lines carry '(operator() /home/runner/work/xochitl/xochitl/src/xofm/libs/timer/src/timer.cpp:27)'.",
+      "notes": "NAME COLLISION: this is a LOGGER CATEGORY, not the systemd unit the name suggests. There is no rm.sys.timer unit; only 4 timers are loaded device-wide and the reMarkable one is rm-sanity.timer. The RTC half of this category is the power/sleep scheduling and is the half a client actually wants."
+    },
+    {
+      "id": "rm.scenefile",
+      "lines_observed": 322,
+      "governs": "Serialization of the CRDT scene (.rm) file.",
+      "shape": "Three shapes, and the TYPO MATTERS: 'Scene written to: \"<path>.rm.tmp\"' (226), 'Scene writen to: \"<path>.rm.tmp\"' (29, sic), 'File has UUID map with N entries' (67). No source path logged.",
+      "evidence": "$ python3 <shape census> for rm.scenefile -> \"322 lines, 3 shapes / 226  Scene written to: \\\"/home/root/.local/share/remarkable/xochitl/<uuid>/<uuid>.rm.tmp\\\" / 67  File has UUID map with N entries / 29  Scene writen to: \\\"...<uuid>.rm.tmp\\\"\".",
+      "parser_requirements": [
+        "Writes go to a .rm.TMP sibling first and are then renamed, so polling a .rm during active editing can catch a half-written or absent file.",
+        "The firmware ships BOTH spellings, 'writen' and 'written' -- the typo was fixed mid-history and both are live in one journal window. String-matching this line needs both.",
+        "'File has UUID map with N entries' is the CRDT author/UUID table the v6 format carries."
+      ]
+    },
+    {
+      "id": "rm.orientationmodule",
+      "lines_observed": 177,
+      "source": ["src/xofm/libs/orientation/src/orientationwrapper.cpp", "src/xofm/modules/orientation/setup.cpp"],
+      "governs": "Screen rotation. The ONLY category logged from two distinct source files (a lib wrapper plus a module setup).",
+      "shape": "'Setting new orientation <Portrait|Landscape|InvertedPortrait|InvertedLandscape>' and 'Setting forced portrait window orientation Portrait'.",
+      "evidence": "$ python3 <census> -> \"177  rm.orientationmodule  src/xofm/modules/orientation/setup.cpp; src/xofm/libs/orientation/src/orientationwrapper.cpp\".",
+      "notes": "Enumerates the complete 4-way orientation set plus a 'forced' override path -- relevant to any renderer deciding page aspect, since a page authored in landscape needs the same enum."
+    },
+    {
+      "id": "rm.epaperevdevtouchscreenhandler",
+      "lines_observed": 66,
+      "governs": "The e-paper TOUCH (finger) input handler over evdev. Produces NINE phantom names on a naive parse (32-char category).",
+      "hard_device_facts": {
+        "device": "/dev/input/event3, name \"Elan touch input\", discovered via device discovery",
+        "raw_x": "min 0, max 2064",
+        "raw_y": "min 0, max 2832",
+        "pressure": "min 0, max 0 -- touch reports NO pressure",
+        "screenGeometry": "QRect(0,0 1620x2160)",
+        "rotate": "QTransform(type=TxNone, 11=1 12=0 13=0 21=0 22=1 23=0 31=0 32=0 33=1) -- identity",
+        "device_count": "1 touch device, 0 pending handlers"
+      },
+      "evidence": "$ grep -a 'rm.epaperevdevtouchscreenhandler' log5.txt | sed 's/^.*rm\\.epaperevdevtouchscreenhandler//' | sort -u -> \"evdevtouch: /dev/input/event3 / evdevtouch: /dev/input/event3: device name: Elan touch input / evdevtouch: /dev/input/event3: min pressure: 0 max pressure: 0 / evdevtouch: /dev/input/event3: min X: 0 max X: 2064 / evdevtouch: /dev/input/event3: min Y: 0 max Y: 2832 / evdevtouch: Adding device at /dev/input/event3 / evdevtouch: Updating QInputDeviceManager device count: 1 touch devices, 0 pending handler(s) / evdevtouch: Using device /dev/input/event3 / evdevtouch: Using device discovery / pmax 0 / pmin 0 / rotate QTransform(type=TxNone, 11=1 12=0 13=0 21=0 22=1 23=0 31=0 32=0 33=1) / screenGeometry QRect(0,0 1620x2160) / xmax 2064 / xmin 0 / ymax 2832 / ymin 0\".",
+      "consequence": "Touch reports min pressure == max pressure == 0, so pressure in .rm strokes comes ONLY from the pen digitizer, never from touch. And the 2064x2832 touch grid is a DIFFERENT coordinate space from the 1620x2160 display, so raw touch coordinates need scaling."
+    },
+    {
+      "id": "rm.network.authentication",
+      "lines_observed": 162,
+      "source": "src/xofm/libs/network/src/authentication.cpp",
+      "governs": "Cloud AUTH: discovering the token host, then fetching a user token, with in-flight deduplication. Produces THREE phantom names on a naive parse (exactly 25 chars, so zero padding).",
+      "shape": "'Fetching user token [fetchUserToken]', 'User token request already in flight [onUserTokenHostNameReceived]', 'userTokenHostname received: value(webapp-prod.cloud.remarkable.engineering)', 'userTokenHostname received: error(Host not found error)' / 'error(Unspecified network error)'.",
+      "evidence": "$ python3 <census> -> \"162  rm.network.authentication  src/xofm/libs/network/src/authentication.cpp\" after collapsing the three phantoms rm.network.authenticationFetching (62), ...authenticationuserTokenHostname (62), ...authenticationUser (2). Emitted by both xochitl (format A) and rm-sync (format B, which proves the true name).",
+      "notes": "It logs the token HOSTNAME (webapp-prod.cloud.remarkable.engineering) but no token material, so these lines need no redaction. The 'value(...)' form is the SUCCESS line -- do not misread it as a failure."
+    },
+    {
+      "id": "rm.network.usertoken",
+      "lines_observed": 144,
+      "source": "src/xofm/libs/network/src/usertoken.cpp",
+      "governs": "User-token lifetime and PROACTIVE REFRESH scheduling.",
+      "shape": "FOUR templates across two functions and six emit sites. setUserToken at :74 and :82 -> \"UserToken: setting a new userToken (<20-char JWT header prefix>...) with expiry <YYYY-MM-DD HH:MM:SS.nnnnnnnnn>\". scheduleUpdate at :142 and :150 -> \"Scheduled token update at <absolute timestamp>, <N>ms from now\". scheduleUpdate at :138 and :146 -> \"Scheduled immediate token update. Token expiry: <timestamp>\".",
+      "evidence": "$ grep -F 'rm.network.usertoken' log | grep -oE 'usertoken\\.cpp:[0-9]+' | sort | uniq -c -> \"10 :74 / 50 :82 / 2 :138 / 8 :142 / 1 :146 / 49 :150\"; verbatim: \"rm.network.usertoken     Scheduled token update at 2026-08-28 23:49:25.271, 10500000ms from now (scheduleUpdate /home/runner/work/xochitl/xochitl/src/xofm/libs/network/src/usertoken.cpp:150)\".",
+      "token_hygiene": "The category DOES print token material, but only the constant 20-character ES256 JWT header prefix followed by a literal '...'. Measured: every printed fragment is exactly 23 chars long and identical across all occurrences. No key material and no signature is printed, so these lines are safe -- but a client should still not echo them verbatim.",
+      "cadence": "Expiry is issue + 3h; refresh is scheduled 5 minutes before expiry (10,500,000 ms). This is where auth churn is visible."
+    },
+    {
+      "id": "rm.http.transaction",
+      "lines_observed": 146,
+      "source": "src/xofm/libs/http/src/transaction.cpp",
+      "governs": "The OUTBOUND (client-side) HTTP transaction lifecycle -- the reMarkable-to-cloud direction. NOT to be confused with rm.usb.web, which is the inbound server.",
+      "shape": "\"Request failed: RequestId=<n> error='<qt error>' http=none url=<url>\" (finish, :319), \"Request failed: RequestId=<n> http=optional(400 Bad request) url=<url>\", and \"RequestId=<n>: transaction ended in <N>ms after following events:\" (:114) followed by indented Create/Send/Fail continuation lines.",
+      "evidence": "$ python3 <census> -> \"146  rm.http.transaction  src/xofm/libs/http/src/transaction.cpp\"; verbatim: \"rm-sync[486]: rm.http.transaction: Request failed: RequestId=1 error='Host not found error' http=none url=https://eu.tectonic.remarkable.com/discovery/v1/endpoints\".",
+      "critical_bias": "This category ONLY logs FAILURES. Grepping it yields a 100%-failure sample whether or not the cloud works. Do NOT infer 'cloud unreachable' from it. Outcome-logging siblings show the same endpoints succeeding: rm.synchronizer 'sync resolution: root hash (... server=Hash(...))' requires a successful authenticated cloud GET, rm.network.notifications logs 'Connected to notifications server', and rm.updates.betaprogram logs 'Request finished' 62 times against 4 network errors.",
+      "notes": "Every request carries a monotonic RequestId correlatable across rm.http.qt / rm.http.backend / rm.network.* / rm.libs.integrations / rm.updates.betaprogram, plus a duration and an event trace. The wrapped continuation lines are the source of the '(~Transaction' and empty-field extraction artifacts."
+    },
+    {
+      "id": "rm.http.qt",
+      "lines_observed": 22,
+      "source": "src/xofm/libs/http/src/qt-transaction.cpp:132 (function calculateReplyStatus)",
+      "governs": "The Qt-specific transport layer BENEATH rm.http.transaction. Surfaces raw QNetworkReply::NetworkError enum values keyed by the same RequestId.",
+      "shape": "'RequestId=<n>: Received QNetworkReply error code <n>'. Observed codes: 3 (HostNotFoundError) and 5 (OperationCanceledError).",
+      "evidence": "$ python3 <census> -> \"22  rm.http.qt  src/xofm/libs/http/src/qt-transaction.cpp\"; note only the xochitl-emitted lines carry the file/function suffix -- the rm-sync-emitted lines carry no source annotation at all.",
+      "notes": "This is the layer where a Qt-level CAUSE is visible, one hop below the url-bearing rm.http.transaction line with the same RequestId."
+    },
+    {
+      "id": "rm.http.backend",
+      "lines_observed": 44,
+      "source": "src/xofm/libs/http/src/backend.cpp",
+      "governs": "HTTP client backend SELECTION. Reveals a config-switchable dual implementation.",
+      "shape": "Two messages emitted as an adjacent pair: 'UseCurlHttpBackend=false from config (loadUseCurlBackendFromSettings ...)' and 'Using Qt HTTP backend (createDefaultBackend ...)'. Two builds are live in one window: :27/:63 on the older boots, :31/:67 on current.",
+      "evidence": "$ grep -F 'rm.http.backend' log | sed 's/.*rm\\.http\\.backend//' | sort | uniq -c | sort -rn -> \"12 : Using Qt HTTP backend / 12 : UseCurlHttpBackend=false from config / 8    Using Qt HTTP backend (createDefaultBackend .../backend.cpp:67) / 8    UseCurlHttpBackend=false from config (loadUseCurlBackendFromSettings .../backend.cpp:31) / 2    ...backend.cpp:63 / 2    ...backend.cpp:27\".",
+      "notes": "Either Qt (default, UseCurlHttpBackend=false) or libcurl. The pair fires ONCE PER BACKEND CONSTRUCTION, which is 1-4 times per process, so the line count is NOT a process-restart counter."
+    },
+    {
+      "id": "rm.http.manager",
+      "lines_observed": 2,
+      "source": "src/xofm/libs/http/src/manager.cpp:201 (function setupTransaction)",
+      "governs": "The HTTP manager that mints transactions and attaches auth providers.",
+      "shape": "'authenticated request without a provider (setupTransaction .../manager.cpp:201)' -- the only message observed in this window.",
+      "evidence": "$ python3 <census> -> \"2  rm.http.manager  src/xofm/libs/http/src/manager.cpp\".",
+      "notes": "An authenticated request issued while no credential provider is registered. Do NOT conclude this is the category's ONLY possible message -- the sibling categories in this same stack (rm.http.transaction 146, rm.http.backend 44) show the module is densely instrumented, so a 2-line sample cannot close the vocabulary."
+    },
+    {
+      "id": "rm.httplistener",
+      "lines_observed": 3,
+      "governs": "The INBOUND HTTP listener's BIND step -- the sibling of rm.usb.web one layer down.",
+      "shape": "'No valid hostaddress found'. No source path logged.",
+      "evidence": "$ python3 <shape census> -> \"### rm.httplistener  (3 lines, 1 shapes) / 3  No valid hostaddress found\".",
+      "critical_caveat": "This category is BLIND to the success path. The same HttpListener component logs its bind SUCCESS under category `default`, not rm.httplistener: \"xochitl[416]: 15:01:46.423 default   HttpListener: Listening on port 80\". So a category-scoped grep cannot establish that the bind step only ever fails. On the CURRENT boot rm.httplistener has ZERO occurrences and only the `default` success line is present; the 3 retained failures are from older-firmware boots. The failures are also NOT caused by the gadget being down -- usb0/usb1 were Link UP ~3.7 s before every one of them."
+    },
+    {
+      "id": "rm.light.front",
+      "lines_observed": 119,
+      "source": "src/xofm/modules/light/front/setup.cpp",
+      "governs": "The FRONT (screen) light: brightness 0-100 plus a separate 'extra brightness' boolean.",
+      "shape": "'front light module initialization: front light is 100 and extra brightness is false (setup ...:105)', 'Changing lights to 100 from stored settings (operator() ...:208)', 'Turning off lights (operator() ...:201)'.",
+      "evidence": "$ python3 <census> -> \"119  rm.light.front  src/xofm/modules/light/front/setup.cpp\"; per-shape from a sample: \"57 Turning off lights (operator() .../light/front/setup.cpp:201) / 55 Changing lights to 100 from stored settings (.../setup.cpp:208) / 6 front light module initialization: front light is 100 and extra brightness is false (setup .../setup.cpp:105)\".",
+      "notes": "'Turning off lights' is NOT a reliable asleep marker -- see the refutation. It marks the START of a ~19-minute idle light-sleep sequence, and the device stays reachable for tens of seconds afterward. rm.light.keyboard emits the byte-identical string ~1 ms later, so the bare string double-counts."
+    },
+    {
+      "id": "rm.light.keyboard",
+      "lines_observed": 113,
+      "source": "src/xofm/modules/light/back/setup.cpp",
+      "governs": "The Type Folio keyboard BACKLIGHT.",
+      "shape": "'Turning off lights (operator() .../light/back/setup.cpp:122)' and 'Changing lights to 100 from stored settings (.../setup.cpp:128)'.",
+      "evidence": "$ python3 <census> -> \"113  rm.light.keyboard  src/xofm/modules/light/back/setup.cpp\" (lowercase 'back' in the path).",
+      "naming_mismatch": "The category says 'keyboard' but the source directory is light/BACK. In this tree 'back light' means the keyboard light and 'front' means the screen.",
+      "caveat": "Its presence does NOT prove a Type Folio is attached. It emits at byte-identical timestamps to rm.light.front on every sleep/wake -- an unconditional module hook, not a hardware probe. It fired on 26 distinct days in this window while the string 'folio' appears on only 5, and the log contains no HID or physical-keyboard enumeration line at all."
+    },
+    {
+      "id": "rm.network.notifications",
+      "lines_observed": 113,
+      "source": "src/notifications/src/notifications.cpp",
+      "governs": "The persistent push/notification SOCKET to the cloud and its reconnect supervision -- distinct from the request/response rm.http.* path.",
+      "shape": "'Connected to notifications server (onStateChanged ...:220)', 'Notifications socket is OK: ConnectedState (checkIfShouldConnect ...:270)', '... ConnectingState'. Build cutover at 2026-05-09T18:40 shifted onStateChanged :210 -> :220 and checkIfShouldConnect :260 -> :270.",
+      "evidence": "$ python3 <census> -> \"113  rm.network.notifications  src/notifications/src/notifications.cpp\"; per-shape from a sample: \"60 Connected to notifications server (onStateChanged .../notifications.cpp:220) / 34 Notifications socket is OK: ConnectingState (checkIfShouldConnect .../notifications.cpp:270) / 6 ...:260 / 6 Notifications socket is OK: ConnectedState (...:270) / 6 Connected to notifications server (...:210)\".",
+      "caveats": "ConnectedState/ConnectingState are generic QAbstractSocket state names shared by QTcpSocket, QSslSocket and QLocalSocket, and NO host, port, scheme or URL appears in any of the 113 lines -- so this category alone does not prove the channel is a cloud WebSocket. It also is not one long-lived connection: 15 separate 'Connected to notifications server' events occurred in a ~7-hour span, and the supervising function is named checkIfShouldConnect, i.e. it POLLS the socket's own state."
+    },
+    {
+      "id": "rm.updates.betaprogram",
+      "lines_observed": 70,
+      "source": "src/updates/src/betaprogram.cpp",
+      "governs": "Beta-channel enrollment state, fetched from the cloud endpoint settings/v1/beta.",
+      "shape": "FOUR messages at five sites. 'Already ongoing request (getCloudState ...:109)'. 'Request finished. Was dispatched at: <ISO8601> (networkRequestFinished ...:283 or :288)' -- the DOMINANT message, 62 of 69 in a sample. 'Network error: RequestId=<n> Network error: 4 Token failure, Payload: (networkRequestFinished ...:290)'. 'Network error: RequestId=<n> Network error: 10 Unspecified network error, Payload: (networkRequestFinished ...:295)'.",
+      "evidence": "$ grep -F 'rm.updates.betaprogram' log | grep -o 'betaprogram\\.cpp:[0-9]*' | sort | uniq -c | sort -rn -> \"52 :288 / 10 :283 / 3 :109 / 2 :295 / 2 :290\"; shape census -> \"62 Request finished. Was dispatched at: <TS> / 3 Already ongoing request / 2 Network error: 4 Token failure / 2 Network error: 10 Unspecified network error\".",
+      "notes": "This category is NOT all offline failures: ~90% are neutral sub-second request completions, i.e. successful beta-state fetches. The two error MODES are distinct -- 'Token failure' is an auth failure, not an offline one."
+    },
+    {
+      "id": "rm.libs.integrations",
+      "lines_observed": 59,
+      "source": "src/xofm/libs/integrations/core/src/manager.cpp",
+      "governs": "Fetching the third-party integrations manifest from the cloud.",
+      "shape": "Three messages: 'Error on requesting integrations with https://eu.tectonic.remarkable.com/integrations/v2/instances: RequestId=<n> Network error: 10 Unspecified network error (operator() ...:83)', 'with body ' (operator() ...:84, note the trailing space), 'have N, received N integrations (integrationsReceived ...:106)'.",
+      "evidence": "$ grep -F 'rm.libs.integrations' log | sed 's/^.*rm\\.libs\\.integrations *//' | sort | uniq -c | sort -rn -> \"52 have 0, received 0 integrations (integrationsReceived /home/runner/work/xochitl/xochitl/src/xofm/libs/integrations/core/src/manager.cpp:106) / 3 with body  (operator() .../manager.cpp:84) / 3 Error on requesting integrations with https://eu.tectonic.remarkable.com/integrations/v2/instances: RequestId=2 Network error: 10 Unspecified network error (operator() .../manager.cpp:83)\".",
+      "notes": "Names the exact cloud endpoint and carries the RequestId back to rm.http.transaction. Zero integrations are configured on this device. This category SUPERSEDED rm.stp.impl (see below)."
+    },
+    {
+      "id": "rm.stp.impl",
+      "lines_observed": 6,
+      "source": "src/syncthirdparty/src/impl.cpp:75",
+      "governs": "stp = SYNC THIRD PARTY. The PREDECESSOR of rm.libs.integrations, not its counterpart.",
+      "shape": "'have 0, received 0 integrations (integrationsReceived .../src/syncthirdparty/src/impl.cpp:75)' -- the only message, and the only syncthirdparty emit site in the whole log.",
+      "evidence": "$ python3 <shape census> -> \"### rm.stp.impl  (6 lines, 1 shapes) / 6  have N, received N integrations (integrationsReceived /home/runner/work/xochitl/xochitl/src/syncthirdparty/src/impl.cpp:N)\".",
+      "supersession_proof": "Its last occurrence is 2026-05-09T18:40:21. The identical message resumes 43 seconds later under rm.libs.integrations from src/xofm/libs/integrations/core/src/manager.cpp:106, under a NEW pid, and continues for 3.5 months. ZERO pid overlap between the two categories -- no xochitl process ever emits both. Two halves of one live pipeline would co-emit in-process; these never do.",
+      "notes": "This is a rename across firmware, not a fetcher/consumer split. The provider guess (Dropbox / Google Drive / OneDrive) has no support in the log: those strings have zero hits, and the only integrations endpoint named anywhere is eu.tectonic.remarkable.com/integrations/v2/instances."
+    },
+    {
+      "id": "rm.documentlockmanager",
+      "lines_observed": 58,
+      "source": "src/entry/src/documentlockmanager.cpp",
+      "governs": "Write-locking a document while it is open, plus the sleep-to-upload handoff.",
+      "shape": "Exactly two messages: 'Opening document in unlocked mode: <uuid> (setDocument ...:54)' and 'Going to sleep, trigger upload timeout for doc <uuid> (setSleepState ...:99)'.",
+      "evidence": "$ python3 <census> -> \"58  rm.documentlockmanager  src/entry/src/documentlockmanager.cpp\"; site breakdown from a sample: \"52 setSleepState:99 / 6 setDocument:54\".",
+      "notes": "Documents open 'in unlocked mode', so the lock is advisory and tied to sleep state. Going to sleep TRIGGERS an upload timeout. But do NOT over-read that as 'sync only starts after the device sleeps': 12 rm.synchronizer 'running sync' events preceded the first sleep event of one measured day. What the log supports is narrower -- only the 'batch: N/1' runs cluster after sleep. And xochitl does use a real lock FILE elsewhere: 'Lock path=\"/tmp/library-enumeration.lock\"'."
+    },
+    {
+      "id": "rm.eventcache",
+      "lines_observed": 51,
+      "source": "src/xofm/modules/analytics/eventcache/eventdispatcher.cpp:103",
+      "governs": "The on-device ANALYTICS event cache and its dispatcher.",
+      "shape": "One message: 'Schema error, deleting entries (operator()<const http::Reply> .../eventdispatcher.cpp:103)'.",
+      "evidence": "$ python3 <census> -> \"51  rm.eventcache  src/xofm/modules/analytics/eventcache/eventdispatcher.cpp\".",
+      "correlation": "1:1 with the standing 400 from the analytics endpoint, 9-15 ms apart: every rm.eventcache line pairs with an 'rm.http.transaction Request failed: RequestId=<n> http=optional(400 Bad request) url=https://ping.remarkable.com/analytics/v2/events'. The 400 is the schema rejection that triggers the purge.",
+      "notes": "Not document data. A client can ignore it, but knowing this explains dozens of scary-looking lines. Its only message is destructive."
+    },
+    {
+      "id": "rm.batterymanager.suspenddelay",
+      "lines_observed": 37,
+      "source": "src/xofm/libs/batterymanager/src/suspenddelayer.cpp",
+      "governs": "Suspend DEFERRAL: components request a delay before autosuspend.",
+      "shape": "'PowerStateRm12x requests a delay of <N>ms (delay .../suspenddelayer.cpp)'. Observed ~23,500-24,740 ms.",
+      "evidence": "$ python3 <census> -> \"37  rm.batterymanager.suspenddelay  src/xofm/libs/batterymanager/src/suspenddelayer.cpp\" (after collapsing the phantom rm.batterymanager.suspenddelayPowerStateRm12x, 30-char name).",
+      "notes": "This is the category that tells you the device is deliberately NOT sleeping yet -- more reliable than the light-off line for that question."
+    },
+    {
+      "id": "rm.batterymanager.slumberinhibitor",
+      "lines_observed": 2,
+      "source": "src/xofm/libs/batterymanager/src/slumberinhibitor.cpp",
+      "governs": "The registry of things holding the device awake ('slumber' = autosuspend); garbage-collects stale inhibitors.",
+      "shape": "'erased N invalid slumber inhibitors (checkInhibitors .../slumberinhibitor.cpp)'.",
+      "evidence": "$ python3 <census> -> \"2  rm.batterymanager.slumberinhibitor  src/xofm/libs/batterymanager/src/slumberinhibitor.cpp\" (34-char name, so a naive parse reports 'rm.batterymanager.slumberinhibitorerased')."
+    },
+    {
+      "id": "rm.poweroff",
+      "lines_observed": 4,
+      "source": "src/xofm/libs/batterymanager/src/poweroff.cpp",
+      "governs": "Application-initiated shutdown/reboot, and it records WHY.",
+      "shape": "'Application requested shutdown: <human reason> Reason::<Enum> (shutdown .../poweroff.cpp)'. Observed: 'Software update Reason::Reboot' (2), 'Reboot button clicked Reason::Reboot' (1), 'Turn off button clicked Reason::Poweroff' (1).",
+      "evidence": "$ python3 <shape census> -> \"### rm.poweroff  (4 lines, 3 shapes) / 2  Application requested shutdown: Software update Reason::Reboot (shutdown /home/runner/work/xochitl/xochitl/src/xofm/libs/batterymanager/src/poweroff.cpp:N) / 1  ... Reboot button clicked Reason::Reboot ... / 1  ... Turn off button clicked Reason::Poweroff ...\".",
+      "notes": "Gives the Reason:: enum (Reboot, Poweroff) with a human string, so a client can distinguish a user power-off from an update reboot -- exactly the graceful-vs-not distinction that rm-apply-ota.service and boot-reason-check.service act on."
+    },
+    {
+      "id": "rm.marker.manager",
+      "lines_observed": 17,
+      "source": "src/xofm/libs/markermanager/src/markermanager.cpp",
+      "governs": "The stylus ('marker') subsystem: MCU + ASIC firmware versions and OTA firmware push to the pen.",
+      "shape": "'initialized MarkerManager with shippedMCUVersion \"<v>\", shippedASICVersion \"<v>\" (init ...:113)', 'Starting marker mcu firmware update timer (maybePrepareMcuUpdate ...:130)', 'attempting MCU update (startFirmwareUpdate ...:156)'.",
+      "evidence": "$ python3 <shape census> -> \"### rm.marker.manager  (17 lines, 3 shapes) / 12  initialized MarkerManager with shippedMCUVersion \\\"N.N.N\\\", shippedASICVersion \\\"N.N\\\" (init .../markermanager.cpp:N) / 3  Starting marker mcu firmware update timer (maybePrepareMcuUpdate .../markermanager.cpp:N) / 2  attempting MCU update (startFirmwareUpdate .../markermanager.cpp:N)\".",
+      "notes": "Emitted by xochitl, and the same code backs marker-manager.service (BusName=no.remarkable.marker). Firmware version bumped 1.1.71 -> 1.1.84 across the journal's span, so this is where pen-firmware drift is visible."
+    },
+    {
+      "id": "rm.filesystem",
+      "lines_observed": 11,
+      "source": "src/filesystem/src/file-system.cpp:67 (function readFile)",
+      "governs": "Low-level file IO failures in xochitl, with the exact path and Qt open-mode flags. A GENERIC failed-open channel, not a .pagedata channel.",
+      "shape": "THREE message forms, and the raw open() lines carry NO source location: (1) 'open( QFlags<File::OpenModeFlag>(Read) )  \"<path>\"  failed:  \"No such file or directory\"'; (2) 'file \\'<path>\\' could not be opened (readFile .../file-system.cpp:67)'; (3) 'open( QFlags<File::OpenModeFlag>(Read) )  \"<dir>\"  failed:  \"file to open is a directory\"'.",
+      "evidence": "$ grep -F 'rm.filesystem' log | grep -oE 'failed:  \"[^\"]*\"' | sort | uniq -c -> \"1 failed:  \\\"file to open is a directory\\\" / 2 failed:  \\\"No such file or directory\\\"\" in one 5-line sample; $ grep -F 'rm.filesystem' log | grep -c -F 'file-system.cpp' -> 2 of 5, i.e. only the readFile wrapper lines carry the source suffix.",
+      "notes": "Two errno classes and at least two consumers. The 'is a directory' case is the HTTP static handler serving GET /assets/, and the line immediately after it is 'rm.usb.web ERROR \"Unable to open file /usr/share/remarkable/webui/assets\"'. The 'No such file' cases are missing .pagedata. Only the FAILURE path is logged -- no success line exists -- so this category cannot by itself establish that a missing .pagedata is tolerated."
+    },
+    {
+      "id": "xofm.modules.search",
+      "lines_observed": 12,
+      "source": "src/xofm/libs/search/cloud/src/sqlite_search_system.cpp",
+      "governs": "The on-device SEARCH index, implemented as a SQLite search system under a 'cloud' search library.",
+      "shape": "Two construction-time messages, one pair per xochitl start: 'IndexSettings got enabled (operator() ...:123)' and 'Retrieval is initially RetrievalIntent::GenerationNotLoaded (SqliteSearchSystem ...:160)'.",
+      "evidence": "$ python3 <census> -> \"12  xofm.modules.search  src/xofm/libs/search/cloud/src/sqlite_search_system.cpp\" (6 of each message across 6 boots).",
+      "caveats": "These two lines are construction-time only: no indexing event, no query, no row count, and NO database FILENAME is ever logged. `grep -c 'rm-search-index'` over the whole log returns 0, and `grep -ci 'handwrit|myscript|text recognition'` returns 0. So this category CANNOT be used to prove the data-dir .db is a handwriting index, nor to infer HWR-backed retrieval from the word 'Generation'. The filename in the directory listing is what establishes that. The evidence holds identically whether the search subsystem indexes anything or not."
+    },
+    {
+      "id": "rm.search.indexsettings",
+      "lines_observed": 7,
+      "source": "src/xofm/libs/search/cloud/src/index_settings.cpp",
+      "governs": "The CLOUD-side control plane for the on-device handwriting index -- whether the index is ENABLED.",
+      "shape": "'request in progress RequestId=<n> (sendEnable ...:154)' and 'error Action::Check: RequestId=<n> Network error: 10 Unspecified network error (handleEnableReply ...:200)'. Driven by the searchIndexEnableTimer in rm.sys.timer.",
+      "evidence": "$ python3 <census> -> \"7  rm.search.indexsettings  src/xofm/libs/search/cloud/src/index_settings.cpp\"; the paired timer firing appears as \"rm.sys.timer  Type::Normal timer searchIndexEnableTimer timed out (operator() .../libs/timer/src/timer.cpp:27)\".",
+      "consequence": "The local SQLite search index is a SERVER-TOGGLED feature: enablement is gated on a cloud round-trip (Action::Check / sendEnable). Offline you cannot confirm it is enabled, only read what it already holds. No rm.search.* category logs the indexing itself and the db filename never appears in the journal, so the /log.txt oracle CANNOT be used to probe the search index. The source paths do reveal the module layout: src/xofm/libs/search with a cloud/ subtree."
+    },
+    {
+      "id": "rm.entryfile.documentcontentfile",
+      "lines_observed": 12,
+      "source": "src/entryfile/src/helper-functions.cpp (line 53 on older builds, 54 on current; function storeLockFilesInTemp)",
+      "governs": "Reading and writing the .content sidecar for a document entry.",
+      "shape": "'Lock in temp location'. Emitted by BOTH processes, 6 lines each: rm-sync emits it in format B with no source suffix, xochitl emits it in format A with the function and file:line suffix.",
+      "evidence": "$ python3 <census> -> \"12  rm.entryfile.documentcontentfile  src/entryfile/src/helper-functions.cpp\"; process split measured -> \"6 rm-sync / 6 xochitl\"; verbatim xochitl line: \"xochitl[416]: 15:01:47.569 rm.entryfile.documentcontentfileLock in temp location (storeLockFilesInTemp /home/runner/work/xochitl/xochitl/src/entryfile/src/helper-functions.cpp:54)\".",
+      "notes": "The lock is taken on a TEMP path -- the same write-to-temp-then-rename discipline as rm.scenefile. A client must expect .content to be replaced atomically, not mutated in place. 32-char name, so a naive parse reports 'rm.entryfile.documentcontentfileLock'."
+    },
+    {
+      "id": "rm.document.entry",
+      "lines_observed": 1,
+      "source": "src/entry/src/document.cpp (line 1278 on current build, 1280 on an older one; function setFormatVersion)",
+      "governs": "The document ENTRY model (the .metadata/.content pair), distinct from rm.docworker which handles page data.",
+      "shape": "'Updating format version to: 2 (setFormatVersion .../src/entry/src/document.cpp:1278)'.",
+      "evidence": "$ python3 <census> -> \"1  rm.document.entry  src/entry/src/document.cpp\"; verbatim: \"2026-08-28T15:12:40.938458+00:00 imx8mm-ferrari xochitl[416]: 15:12:40.938 rm.document.entry        Updating format version to: 2 (setFormatVersion /home/runner/work/xochitl/xochitl/src/entry/src/document.cpp:1278)\".",
+      "notes": "In-place migration of the entry format version to 2 -- a schema bump a client parsing .content must tolerate. This '2' is the CONTENT formatVersion, not the '6' page version from rm.docworker. Treat this as a one-shot migration record: it appears once per window, twice at most across two build variants."
+    },
+    {
+      "id": "rm.library.loader",
+      "lines_observed": 6,
+      "source": "src/xofm/libs/library/src/loadworker.cpp (line 144 on firmware 3.27.x, 148 on legacy 3.25.1.1)",
+      "governs": "The background worker that scans the xochitl data dir and builds the in-memory library.",
+      "shape": "'loaded in <N>ms, path=/home/root/.local/share/remarkable/xochitl/. (loadLibrary .../loadworker.cpp:144)' -- note the trailing '/.' on the path. One line per xochitl start.",
+      "evidence": "$ python3 <shape census> -> \"### rm.library.loader  (6 lines, 1 shapes) / 6  loaded in Nms, path=/home/root/.local/share/remarkable/xochitl/. (loadLibrary /home/runner/work/xochitl/xochitl/src/xofm/libs/library/src/loadworker.cpp:N)\"; site split across builds -> \":148\" on the two 3.25.1.1 boots, \":144\" on all four 3.27.x boots including both 3.27.3.0 boots.",
+      "notes": "Confirms the canonical data-dir path and gives the whole-library load cost. Current-build (:144) samples: 182, 183, 194, 204 ms for a 201-entry / 42-document library. The :148 samples (164, 173 ms) are a different binary and should not be pooled with them."
+    },
+    {
+      "id": "rm.library.ext.open",
+      "lines_observed": 5,
+      "source": "src/library/src/extensions/open.cpp:29",
+      "governs": "The library 'open' EXTENSION -- the action of opening an entity by UUID.",
+      "shape": "'EntityOpen::open: EntityId{<uuid>} (open .../src/library/src/extensions/open.cpp:29)'.",
+      "evidence": "$ python3 <shape census> -> \"### rm.library.ext.open  (5 lines, 1 shapes) / 5  EntityOpen::open: EntityId{<uuid>} (open /home/runner/work/xochitl/xochitl/src/library/src/extensions/open.cpp:N)\".",
+      "notes": "Two source trees exist and are distinct: src/library/ (product) versus src/xofm/libs/library/ (framework). The 'EntityId{}' wrapper and the extensions/ directory show the library is an extensible entity model, not a flat file list. This category is a STRICT SUBSET of document-open traffic, not a 1:1 leg of a three-category trace: every ext.open line is followed ~55-70 ms later by rm.docworker and rm.documentlockmanager lines, but the reverse fails -- opens occur with no ext.open line at all, and rm.docworker sees 5 distinct document UUIDs where ext.open sees 2."
+    },
+    {
+      "id": "rm.library.view",
+      "lines_observed": 8,
+      "governs": "The library UI's view state (current folder, navigation).",
+      "shape": "'Current directory deleted, moving to toplevel'. No source path logged.",
+      "evidence": "$ python3 <shape census> -> \"### rm.library.view  (8 lines, 1 shapes) / 8  Current directory deleted, moving to toplevel\".",
+      "notes": "This is a UI NAVIGATION fallback, not a .metadata reparenting rule. Do not read it as 'an entry whose parent UUID does not resolve is reparented to toplevel' -- that stronger claim came from a bare rm.library line that has rotated out of the window and could not be re-verified."
+    },
+    {
+      "id": "rm.mdm.module",
+      "lines_observed": 6,
+      "source": "src/xofm/modules/mdm/setup.cpp",
+      "governs": "xochitl's MDM module bring-up.",
+      "shape": "'Initializing dbus with bustype system (setup .../modules/mdm/setup.cpp)'. One line per xochitl start.",
+      "evidence": "$ python3 <census> -> \"6  rm.mdm.module  src/xofm/modules/mdm/setup.cpp\".",
+      "notes": "Confirms the mobile-device-management surface is on the SYSTEM bus, consistent with com.remarkable.devicepolicy appearing in the system-bus inventory."
+    },
+    {
+      "id": "rm.mdm.dbus-adaptor",
+      "lines_observed": 6,
+      "source": "src/xofm/modules/mdm/adaptor.cpp:37",
+      "governs": "xochitl's D-Bus ADAPTOR toward the MDM agent -- the client side of com.remarkable.devicepolicy. Queries enrollment state at startup.",
+      "shape": "'Initiating fetch of enrolled state (checkEnrolledState .../modules/mdm/adaptor.cpp:37)'.",
+      "evidence": "$ python3 <census> -> \"6  rm.mdm.dbus-adaptor  src/xofm/modules/mdm/adaptor.cpp\".",
+      "notes": "The ONLY category on the device containing a HYPHEN. A category regex of [a-z0-9._]+ silently truncates this to 'rm.mdm.dbus'."
+    },
+    {
+      "id": "rm.modules.mdm.dbus.policyagent",
+      "lines_observed": 28,
+      "source": "src/xofm/modules/mdm/policyagent.cpp:57",
+      "governs": "The policy AGENT that calls GetPolicies over D-Bus.",
+      "shape": "'GetPolicies returned 0 policies (getPolicies .../modules/mdm/policyagent.cpp:57)'.",
+      "evidence": "$ python3 <census> -> \"28  rm.modules.mdm.dbus.policyagent  src/xofm/modules/mdm/policyagent.cpp\" (31-char name, so a naive parse reports '...policyagentGetPolicies').",
+      "notes": "Names an actual method on the devicepolicy interface -- GetPolicies -- discovered from logs without invoking anything. Returns 0: device is unenrolled. Note that modules/mdm/ and modules/devicepolicy/ are two DISTINCT source directories, so these are two subsystems, not one renamed."
+    },
+    {
+      "id": "rm.modules.mdm.policymanager",
+      "lines_observed": 22,
+      "source": "src/xofm/modules/devicepolicy/devicepolicymanager.cpp:110 (lowercase 'devicepolicy')",
+      "governs": "Applying MDM policies locally.",
+      "shape": "'Set policy state false on PolicyName::<Name> (operator()<xofm::libs::devicepolicy::PolicyName, std::weak_ptr<xofm::libs::devicepolicy::IPolicy> > .../devicepolicymanager.cpp:110)'.",
+      "policy_names": {"BlockDeveloperMode": 6, "BlockRetail": 6, "BlockSSH": 6, "SoftwareAutoInstall": 4},
+      "evidence": "$ grep -F 'rm.modules.mdm.policymanager' log | grep -o 'PolicyName::[A-Za-z]*' | sort | uniq -c -> \"6 PolicyName::BlockDeveloperMode / 6 PolicyName::BlockRetail / 6 PolicyName::BlockSSH / 4 PolicyName::SoftwareAutoInstall\"; $ python3 <census> -> \"22  rm.modules.mdm.policymanager  src/xofm/modules/devicepolicy/devicepolicymanager.cpp\"; all 22 lines say 'state false', zero say 'true'.",
+      "notes": "The richest structural leak in the whole log: it exposes the PolicyName enum AND the C++ template signature (xofm::libs::devicepolicy::PolicyName / IPolicy). BlockSSH=false is the policy-level reason SSH is permitted, complementing the secboot ExecCondition. 28-char name, so a naive parse reports '...policymanagerSet'. The 2 oldest boots emit only 3 policies (no SoftwareAutoInstall); the 4 later boots emit 4."
+    },
+    {
+      "id": "rm.user.module",
+      "lines_observed": 6,
+      "source": "src/xofm/modules/user/userauth/setup.cpp:39",
+      "governs": "User-auth module setup and REQUEST SIGNING mechanism selection.",
+      "shape": "\"Signing mechanism 'pkcs11' is not available, we are in unlocked state. Using 'none' instead. (signingMechanism .../userauth/setup.cpp:39)\". One line per xochitl start.",
+      "evidence": "$ python3 <census> -> \"6  rm.user.module  src/xofm/modules/user/userauth/setup.cpp\".",
+      "caveat": "The 'unlocked state' referent is NOT stated by the firmware. The string 'secboot' has ZERO hits in the whole log, and so does 'pcscd'. Meanwhile keystore.service successfully initialises OP-TEE PKCS11 device- and user-tokens 3.9 seconds EARLIER in the same boot, so the secure-element signer demonstrably exists. The only other producer of the word 'unlocked' is mdm-agent reading MDM device state from sysfs ('Device state sysfs: <unlocked', 'Device state is: Unlocked'). Do not assert a secboot causal link from this line."
+    },
+    {
+      "id": "rm.user.auth.cli",
+      "lines_observed": 6,
+      "source": "src/xofm/modules/user/userauth/cli.cpp:278",
+      "governs": "The user-authenticator's configuration record. The single most identity-dense line in /log.txt.",
+      "shape": "\"User-authenticator configured with 'Config{.deviceId = <SERIAL, REDACTED>, .deviceType = remarkable-ferrari, .env = prod, .signingMechanism = none, .releaseVersion = <IMG_VERSION>}' (configure .../userauth/cli.cpp:278)\".",
+      "evidence": "$ python3 <census> -> \"6  rm.user.auth.cli  src/xofm/modules/user/userauth/cli.cpp\"; the 6 lines span releaseVersion 3.25.1.1 (2), 3.27.1.0 (3), 3.27.3.0 (1), all at cli.cpp:278.",
+      "sensitivity": "This line carries the device SERIAL in cleartext. REDACTED here. A client parsing /log.txt must treat it as sensitive.",
+      "notes": "Shows env='prod', signingMechanism='none', deviceType='remarkable-ferrari', and makes the upgrade path 3.25.1.1 -> 3.27.1.0 -> 3.27.3.0 visible. It is NOT an INDEPENDENT corroboration of IMG_VERSION: releaseVersion is xochitl's compiled-in constant from the same firmware image that wrote /etc/os-release."
+    },
+    {
+      "id": "rm.localization.language",
+      "lines_observed": 6,
+      "source": "src/xofm/libs/localization/src/languagesettings.cpp:49",
+      "governs": "UI language / translation activation.",
+      "shape": "Two variants at the SAME line: 'Activated translation: en (setLanguage .../languagesettings.cpp:49)' and '... (setLanguageCode .../languagesettings.cpp:49)'.",
+      "evidence": "$ grep -F 'rm.localization.language' log | sed 's/^.*rm\\.localization\\.language *//' | sort | uniq -c -> \"2  Activated translation: en (setLanguage /home/runner/work/xochitl/xochitl/src/xofm/libs/localization/src/languagesettings.cpp:49) / 4  Activated translation: en (setLanguageCode .../languagesettings.cpp:49)\".",
+      "notes": "Device locale is 'en' -- relevant to OCR language selection and to any client parsing localized UI strings."
+    },
+    {
+      "id": "rm.epaperkeyboardhandler",
+      "lines_observed": 24,
+      "governs": "Keymap selection for the physical-keyboard path. Sibling of rm.epaperevdevtouchscreenhandler. No source path logged.",
+      "shape": "'No keymap set by QT settings or firmware, defaulting to US.' -- the only message, 4 emissions per xochitl start.",
+      "evidence": "$ python3 <shape census> -> \"### rm.epaperkeyboardhandler  (24 lines, 1 shapes) / 24  No keymap set by QT settings or firmware, defaulting to US.\"; per-pid split -> 4 per xochitl start across 6 starts.",
+      "caveat": "It fires unconditionally ~10 ms into boot, while systemd is still mounting the encrypted /home, before any input device is enumerated or any user interaction. It therefore says NOTHING about whether a physical keyboard is attached, and nothing about how typed text lands in a document."
+    },
+    {
+      "id": "rm.crashuploader.helpers",
+      "lines_observed": 6,
+      "governs": "The crashuploader daemon's helper routines (unit crashuploader.service, ExecStart=/usr/bin/crashuploader --path /home/root/). Format B, emitted as 'crashuploader[<pid>]: rm.crashuploader.helpers: <msg>'.",
+      "shape": "'Failed to open \"/usr/share/remarkable/update.conf\"' -- the only message. Exactly one line per boot.",
+      "evidence": "$ python3 <shape census> -> \"### rm.crashuploader.helpers  (6 lines, 1 shapes) / 6  Failed to open \\\"/usr/share/remarkable/update.conf\\\"\"; $ ssh remarkable 'ls -l /usr/share/remarkable/update.conf' -> \"No such file or directory\"; unit re-verified: $ systemctl show crashuploader.service -> \"Type=simple|Restart=on-failure|MainPID=479|ExecStart={ path=/usr/bin/crashuploader ; argv[]=/usr/bin/crashuploader --path /home/root/ ; pid=479 }|LoadState=loaded|ActiveState=active|SubState=running|UnitFileState=enabled\".",
+      "notes": "/usr/share/remarkable/update.conf does not exist on this public build, so the crash uploader cannot tag reports with update-channel info. Benign but permanent -- worth knowing so it is not mistaken for a new fault. The count equals the retained boot count, so it moves with the journal window."
+    },
+    {
+      "id": "rm.sync.service",
+      "lines_observed": 6,
+      "governs": "The rm-sync daemon's service lifecycle. Format B, 'rm-sync[486]: rm.sync.service: <msg>'.",
+      "shape": "'starting Synchronizer thread, priority IdlePriority' -- the only message, one per xochitl start.",
+      "evidence": "$ python3 <shape census> -> \"### rm.sync.service  (6 lines, 1 shapes) / 6  starting Synchronizer thread, priority IdlePriority\".",
+      "notes": "THE NAME COLLISION RESOLVED: 'rm.sync.service' is a LOGGER CATEGORY; the systemd unit is 'rm-sync.service' with a hyphen. It corroborates the unit's Nice=19 from the other side -- the Synchronizer thread runs at Qt IdlePriority so sync never starves the UI. Its line count pairs 1:1 with xofm.core.launcher's xochitl launches, consistent with BindsTo=xochitl.service."
+    },
+    {
+      "id": "xofm.core.launcher",
+      "lines_observed": 6,
+      "governs": "Process launch and argv. Format B, 'xochitl[<pid>]: xofm.core.launcher: <msg>'.",
+      "shape": "'Running with args=[\"--system\"]' -- the only message, and the FIRST xochitl line of every boot.",
+      "evidence": "$ python3 <shape census> -> \"### xofm.core.launcher  (6 lines, 1 shapes) / 6  Running with args=[\\\"--system\\\"]\"; per-boot check -> it is xochitl line 1 in all 6 boots, and boot markers count 6, so the correspondence is 1:1.",
+      "notes": "The cleanest per-boot delimiter when slicing /log.txt into sessions. It CORROBORATES xochitl.service's ExecStart argv but does not independently confirm it -- xochitl is echoing the argv it received, which would look identical under a drop-in override. Note PIDs recur across boots (416 appears twice), so PID is not a restart key."
+    },
+    {
+      "id": "xofm.modules.devicereporter",
+      "lines_observed": 6,
+      "source": "src/xofm/modules/devicereporter/setup.cpp",
+      "governs": "The module that reports device state/telemetry upstream.",
+      "shape": "'DeviceReporter enabled (setup .../modules/devicereporter/setup.cpp)'.",
+      "evidence": "$ python3 <census> -> \"6  xofm.modules.devicereporter  src/xofm/modules/devicereporter/setup.cpp\" (27-char name, so a naive parse reports '...devicereporterDeviceReporter')."
+    },
+    {
+      "id": "xofm.bundles.papertablet",
+      "lines_observed": 4,
+      "source": "src/xofm/bundles/papertablet/common/src/rmxxxlauncher.cpp",
+      "governs": "The papertablet application BUNDLE's teardown. One of only four xofm.* categories.",
+      "shape": "'quit: <reason> (deinit .../rmxxxlauncher.cpp)'. Observed reasons: 'Reboot button clicked', 'Software update', 'Turn off button clicked'.",
+      "evidence": "$ python3 <census> -> \"4  xofm.bundles.papertablet  src/xofm/bundles/papertablet/common/src/rmxxxlauncher.cpp\".",
+      "architecture_leak": "Reveals xochitl's structure: 'xofm' is the FRAMEWORK, a 'bundle' (papertablet) composes modules for a product family, and rmxxxlauncher is the launcher (the xxx being a device-model wildcard, i.e. one launcher across reMarkable models). Its quit reasons mirror rm.poweroff 1:1 -- app-level teardown paired with power-level shutdown."
+    },
+    {
+      "id": "rm.modules.reopennotification",
+      "lines_observed": 1,
+      "source": "src/xofm/modules/homescreen/setup.cpp",
+      "governs": "The homescreen's 'reopen last document?' prompt and its timeout.",
+      "shape": "'Reopen notification timed out (operator() .../modules/homescreen/setup.cpp)'.",
+      "evidence": "$ python3 <census> -> \"1  rm.modules.reopennotification  src/xofm/modules/homescreen/setup.cpp\" (29-char name, so a naive parse reports '...reopennotificationReopen')."
+    },
+    {
+      "id": "non-rm-categories",
+      "lines_observed": 307,
+      "governs": "Two non-reMarkable logger categories share the same 25-column field.",
+      "categories": {
+        "qt.network.http2": "152 lines -- Qt's own HTTP/2 stack",
+        "default": "155 lines -- Qt's uncategorized channel. Carries real content that no rm.* category covers, notably 'HttpListener: Listening on port 80' (the web server bind SUCCESS), 'HttpConnectionHandler (0x...): thread started', 'Factory: unknown key \\'\\'', and QML engine errors of the form 'qrc:/qml/device/view/experimental/Experimental.qml:76: ReferenceError: Values is not defined'"
+      },
+      "evidence": "$ python3 <census script> -> \"non-rm/xofm categories: {'default': 155, 'qt.network.http2': 152}\".",
+      "extraction_artifacts": "Two more values appear in the category column and are NOT categories: an EMPTY field (the indented Create/Send/Fail continuation lines of rm.http.transaction's 'transaction ended ... after following events:' message) and '(~Transaction' (a wrapped continuation of that same message from src/xofm/libs/http/src/transaction.cpp:114). A column-position parser must handle multi-line messages.",
+      "notes": "There is NO 'qml' logger category. Qt routes uncategorized QML console and engine output to 'default'. The string 'qml' appears in only 6 lines of the whole journal, every one inside a qrc: resource path in a 'default'-category message."
+    }
+  ],
+  "refuted": [
+    {
+      "claim": "50 distinct rm.*/xofm.* logger categories.",
+      "observation": "49 in this window. The missing one is bare `rm.library`, whose single line ('Trying to create collection with invalid parent, defaulting to toplevel', dated 2026-04-29) has rotated out of the 50 MB journal window -- $ grep -oE ' rm\\.library[a-z.]*' log5.txt | sort -u now returns only rm.library.ext.open, rm.library.loader, rm.library.view, and the strings 'invalid parent' and 'defaulting to toplevel' have zero hits.",
+      "correction": "49 categories observable at 2026-08-28T23:00Z. The category SET is itself window-dependent, because a category with one lifetime occurrence disappears when its boot rotates out. The stronger, load-bearing claim that DID survive -- 57 raw tokens collapse to 47 in format A via 9 collision groups producing 13 phantom names, and rm.tmp is not a category -- is unchanged."
+    },
+    {
+      "claim": "The category column is padded to 24 characters, so names longer than 24 run into the message.",
+      "observation": "The field is 25 columns. Measured at the boundary: rm.epaperkeyboardhandler is exactly 24 chars and IS followed by one space; rm.network.authentication is exactly 25 chars and is followed by ZERO spaces. Every category of length <=24 sums to exactly 25 with its padding.",
+      "correction": "Field width 25. The run-in threshold is >=25 chars, not >24. This matters: rm.network.authentication (25) is a real collision and a 24-column parser would miss it."
+    },
+    {
+      "claim": "Named per-category line counts, e.g. rm.batterymanager 1741, rm.docworker 916, rm.sys.timer 1144, rm.eventcache 62, rm.light.front 139, rm.light.keyboard 131, rm.usb.web 126, rm.epaperkeyboardhandler 32, rm.stp.impl 18, rm.libs.integrations 55, rm.updates.betaprogram 84, rm.network.usertoken 190, rm.network.notifications 133, rm.documentlockmanager 70, rm.filesystem 5, rm.scenefile 319, rm.docworker 916, rm.http.backend 56, rm.http.qt 29, rm.http.manager 4, rm.httplistener 5, rm.crashuploader.helpers 8, xofm.core.launcher 8, xofm.modules.search 16, rm.user.module 8, rm.user.auth.cli 8, rm.localization.language 8, rm.library.loader 8, rm.library.ext.open 6, rm.document.entry 3, rm.entryfile.documentcontentfile 16, rm.modules.mdm.policymanager 28, rm.sync.service 8.",
+      "observation": "Essentially every one of these is off, and NONE of them is a firmware property. Measured this window: rm.batterymanager 1600, rm.docworker 1397, rm.sys.timer 880, rm.eventcache 51, rm.light.front 119, rm.light.keyboard 113, rm.usb.web 174, rm.epaperkeyboardhandler 24, rm.stp.impl 6, rm.libs.integrations 59, rm.updates.betaprogram 70, rm.network.usertoken 144, rm.network.notifications 113, rm.documentlockmanager 58, rm.filesystem 11, rm.scenefile 322, rm.http.backend 44, rm.http.qt 22, rm.http.manager 2, rm.httplistener 3, rm.crashuploader.helpers 6, xofm.core.launcher 6, xofm.modules.search 12, rm.user.module 6, rm.user.auth.cli 6, rm.localization.language 6, rm.library.loader 6, rm.library.ext.open 5, rm.document.entry 1, rm.entryfile.documentcontentfile 12, rm.modules.mdm.policymanager 22, rm.sync.service 6.",
+      "correction": "Line counts are rolling-window observations, not spec constants. Several categories emit a FIXED number of lines PER BOOT (xofm.core.launcher 1, rm.crashuploader.helpers 1, rm.library.loader 1, rm.user.auth.cli 1, rm.epaperkeyboardhandler 4, xofm.modules.search 2), so their counts move in lockstep with retained boots and can never be stable. Some of the original figures were also cross-contaminated between adjacent categories (28 was rm.modules.mdm.dbus.policyagent's count, not rm.modules.mdm.policymanager's). Cite counts with a timestamp; cite names, sources and message shapes as the durable facts."
+    },
+    {
+      "claim": "rm.sys.timer message form is 'Type::Normal timer <name> timed out', with four timer names: entryUploadTimer, markerSleepDebounceTimer, calendarUpdateTimer, jsonReporter.",
+      "observation": "Type:: is a two-valued ENUM, not the literal 'Normal', and Type::Rtc is the MAJORITY (542 of 874 in a measured sample, 62%). Nine distinct timer names exist, not four, and the loudest single timer -- Type::Rtc sleepDelayTimer at 428 lines, 49% of the whole category -- is absent from the list, along with lockUploadTimer, lightSleepTimer, searchIndexEnableTimer and mcuFirmwareUpdateTimer.",
+      "correction": "'Type::{Normal|Rtc} timer <name> timed out (operator() .../timer.cpp:27)'. The RTC half is the power/sleep scheduling, i.e. the half a client actually needs. Source file and line 27 and 'third-loudest' all verified."
+    },
+    {
+      "claim": "rm.light.front's 'Turning off lights' is a reliable sleep marker -- the cheapest awake/asleep signal in the log after rm.batterymanager.",
+      "observation": "It is not. After the last 'Turning off lights' at 22:08:30, with no intervening light-on line, the device accepted two SSH logins, spun up three HTTP connection handler threads, and served the /log.txt fetch itself through 22:09:05 -- 35 seconds later. rm.batterymanager.suspenddelay logged 'PowerStateRm12x requests a delay of 24740ms' at 22:08:42, i.e. suspend was still explicitly deferred. The event is an idle-timer step: on-to-off deltas measured 19:00 exactly, four times.",
+      "correction": "It marks the START of a ~19-minute idle light-sleep sequence, not the moment the device becomes unreachable. And the bare string is ambiguous: rm.light.keyboard emits the identical text ~1 ms later, so the string double-counts. For 'is it about to sleep', prefer login1's PrepareForSleep(b) signal, or rm.batterymanager.suspenddelay."
+    },
+    {
+      "claim": "rm.stp.impl is the consumer half of a live pipeline whose fetcher half is rm.libs.integrations, and it governs Dropbox / Google Drive / OneDrive class integrations.",
+      "observation": "It is a dead PREDECESSOR, renamed across firmware. Its last line is 2026-05-09T18:40:21; the identical message resumes 43 seconds later under rm.libs.integrations from a different source file, under a NEW pid, and runs for 3.5 months. ZERO pid overlap: no xochitl process ever emits both. Two halves of one pipeline would co-emit in-process. src/syncthirdparty/src/impl.cpp:75 is the ONLY syncthirdparty emit site in 9.7 MB, and a live subsystem would have more than one. Provider attribution has no support: 'dropbox', 'google drive', 'gdrive', 'onedrive' all have zero hits.",
+      "correction": "See claim rm.stp.impl. Only 'zero integrations configured' survives."
+    },
+    {
+      "claim": "rm.httplistener's only logged message is the bind failure, and it is what you would see if the usb gadget interface has not come up.",
+      "observation": "A category-scoped grep is BLIND to the success path, which the same component logs under category `default`: 'HttpListener: Listening on port 80'. On the current boot rm.httplistener has ZERO occurrences and only the default success line is present; the 3 retained failures are older-firmware boots. The gadget theory also fails: systemd-networkd logged usb0 and usb1 'Link UP' ~3.7 seconds BEFORE every one of those failures, and usb-ether-once reported 'usbnet ready' on all 6 boots including the 3 that failed.",
+      "correction": "See claim rm.httplistener. The weaker true statement is that the few retained lines happen to be bind failures on older firmware."
+    },
+    {
+      "claim": "rm.filesystem: 5 lines, two message forms, every one a missing .pagedata -- which proves the firmware tolerates a missing .pagedata.",
+      "observation": "THREE message forms, not two: the third is '... failed: \"file to open is a directory\"'. Only 4 of 5 lines in the cited sample concerned .pagedata; the 5th was /usr/share/remarkable/webui/assets, i.e. the HTTP static handler, making this a GENERIC failed-open channel with two errno classes. Only 2 of the 5 carried the file-system.cpp:67 suffix -- the raw open() lines carry no source location at all. And the tolerance conclusion is unsupported by these lines: no success path is logged, so nothing here distinguishes tolerated-absence from unnoticed-absence.",
+      "correction": "See claim rm.filesystem. The .pagedata-is-optional conclusion is true, but it is established by the .metadata/.content census (2 of 42), not by this category."
+    },
+    {
+      "claim": "xofm.modules.search is the strongest evidence that the one .db in the data dir is a search index, and 'RetrievalIntent::GenerationNotLoaded' plus a 'Generation' concept implies handwriting-recognition-backed retrieval.",
+      "observation": "The two lines are construction-time only and name no file. 'rm-search-index' has ZERO hits in the whole log; the only '.db' strings anywhere are the logger category names rm.mdm.db and rm.modules.mdm.db; and 'handwrit|myscript|text recognition' has zero hits. The evidence holds identically whether the subsystem indexes anything or not.",
+      "correction": "The filename rm-search-index.db in the directory listing establishes that, plus the on-device FTS5 schema read (see filesystem.json). This category establishes only that xochitl constructs a SqliteSearchSystem per start and flips an IndexSettings flag."
+    },
+    {
+      "claim": "rm.user.module ties the software stack to hardware state: because secboot='unlocked' the pkcs11 signer is unavailable and the device falls back to 'none'. The firmware states the causal link itself. Explains why pcscd.service is disabled while pcscd.socket listens.",
+      "observation": "The firmware states no such link. 'secboot' and 'secure boot' have ZERO hits in the log, and so does 'pcscd'. The hardware story is contradicted: keystore.service successfully initialises OP-TEE PKCS11 device- and user-tokens 3.9 seconds earlier in the same boot, so the secure-element signer exists. The only other producer of 'unlocked' is mdm-agent reading MDM device state from sysfs.",
+      "correction": "The weaker supportable statement: xochitl's userauth setup logs once per start that it fell back to signing mechanism 'none' after seeing an 'unlocked' state whose referent it never names. The provider actually in use is OP-TEE, not PC/SC. Also the message ends '(signingMechanism <path>:39)' with a line number, not '[signingMechanism]'."
+    },
+    {
+      "claim": "rm.documentlockmanager shows that a document's sync only STARTS after the device sleeps.",
+      "observation": "Contradicted. On one measured day 12 rm.synchronizer 'running sync' events (14:58:19 through 17:23:29) preceded the day's first sleep-to-upload event at 17:42:32. Additionally xochitl DOES use a real lock file elsewhere, 'Lock path=\"/tmp/library-enumeration.lock\"', so 'the lock is advisory, not a flock' is unestablished as a general statement.",
+      "correction": "Sleep triggers an upload TIMEOUT, and only the 'batch: N/1' synchronizer runs cluster after sleep. Both message strings, both line numbers (54, 99) and the source file verified exact."
+    },
+    {
+      "claim": "rm.http.backend is logged twice per process start, so its line count is effectively a process-restart counter.",
+      "observation": "Per-pid emission is 2, 4 or 8 lines -- the backend is constructed 1-4 times per process. A 44-line sample maps to 10 distinct pids, and pids recur across boots.",
+      "correction": "The pair fires once per BACKEND CONSTRUCTION, not once per process start. Line count is not a restart counter. Source file, both messages and the dual Qt/curl finding all verified; line numbers are :31/:67 on current firmware, :27/:63 on the older boots."
+    },
+    {
+      "claim": "rm.light.keyboard's presence proves a Type Folio is attached to this device.",
+      "observation": "It does not. The category emits at byte-identical timestamps to rm.light.front on every sleep/wake -- an unconditional module hook, not a hardware probe. It fired on 26 distinct days in the window while 'folio' appears on only 5, and the log contains no HID or physical-keyboard enumeration line at all. The only folio signal is the cover magnet (RM_HWMON_WS_FOLIO_OPENED / 'Woke up with reason=FolioOpen'), which any folio trips.",
+      "correction": "It proves the back-light module is compiled in and hooked to sleep/wake. Source path is lowercase src/xofm/modules/light/back/setup.cpp; the category/directory naming mismatch is real and worth recording."
+    },
+    {
+      "claim": "Three non-rm/xofm logger categories share the column: qt.network.http2, default, and qml.",
+      "observation": "Two. There is no qml category: the string 'qml' occurs in only 6 lines of the entire journal, every one inside a qrc:/qml/... resource path within a `default`-category QML engine error. A bare 'qml' token never lands in the category column.",
+      "correction": "qt.network.http2 and default. The two extraction ARTIFACTS the claim also flagged (an empty field, and '(~Transaction' from transaction.cpp:114) are real and correctly identified as wrapped continuations."
+    },
+    {
+      "claim": "/log.txt is the live system journal byte-for-byte, start-aligned.",
+      "observation": "It is a REDACTION-FILTERED rendering. 407 lines replace MAC, BSSID and SSID values with the literal string '<redacted>', versus 0 such lines in journalctl output, and in 223 of them the redaction SWALLOWS the rest of the line (e.g. journal 'bssid=<mac> reason=3 locally_generated=1' becomes 'bssid<redacted>ated=1'). Scope: 381 wpa_supplicant lines, 24 kernel configfs-gadget MAC lines, 2 iw61x lines. It also renders at microsecond precision, i.e. `-o short-iso-precise`, not `-o short-iso`.",
+      "correction": "/log.txt is journal-DERIVED with a lossy wifi-identifier scrubber. Matched values are unrecoverable from it. The oracle itself is unaffected: 0 of the 174 rm.usb.web lines carry '<redacted>'. Also note /log.txt ships an undocumented header, Content-Disposition: attachment; filename=\"log-<request-time>.txt\"."
+    },
+    {
+      "claim": "The /log.txt parsing contract is two line formats: (A) xochitl padded, (B) other daemons 'category: msg'.",
+      "observation": "Those two cover only ~44% of the file. 42,785 of ~78,500 lines (54%) are `kernel:` lines with NO [pid] and NO category; the sleep-*.sh hook scripts likewise have no [pid]; 296 xochitl lines carry no HH:MM:SS.mmm prefix at all (e.g. 'xochitl[406]: xofm.core.launcher: Running with args=[\"--system\"]', 'xochitl[406]: debug: ...'); and '-- Boot <id> --' separators are bare.",
+      "correction": "Four formats. See the log_format block at the top of this file."
+    },
+    {
+      "claim": "rm.batterymanager is the second-loudest category.",
+      "observation": "It depends entirely on whether the rm-sync process's format-B lines are counted. Within the xochitl padded format it is #1 (1600 vs rm.docworker 1397). Across all emitters rm.synchronizer is #1 at 2592, making rm.batterymanager #2.",
+      "correction": "State the scope. #1 among xochitl-emitted categories; #2 device-wide behind rm.synchronizer. The source-file attribution (src/xofm/libs/batterymanager/src/batterymanager.cpp, 100% of lines) is exact."
+    },
+    {
+      "claim": "All cloud endpoint failures include https://eu.tectonic.remarkable.com/sync/v4/root at RequestId=102.",
+      "observation": "Neither exists. 'sync/v4' has zero hits anywhere in the journal; the only sync URL emitted is sync/v3/files/{sha256-hex}, and the cited RequestId=102 does not exist (the real line is RequestId=49). The endpoint list also omitted search/v1/settings, which fails identically.",
+      "correction": "Observed cloud URLs: eu.tectonic.remarkable.com/{discovery/v1/endpoints, settings/v1/beta, integrations/v2/instances, search/v1/settings, sync/v3/files/{sha256}} plus ping.remarkable.com/analytics/v2/events (standing 400) and the token host webapp-prod.cloud.remarkable.engineering. Separately, 'all cloud endpoints failing' is itself an artifact of rm.http.transaction's failure-only logging -- see that claim's critical_bias field."
+    }
+  ]
+}

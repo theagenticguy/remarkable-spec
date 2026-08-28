@@ -1,0 +1,302 @@
+{
+  "firmware": "3.27.3.0",
+  "measured_on_kernel": "6.12.49+git-imx8mm-ferrari-g68b95e858a0a",
+  "source": "read-only probe",
+  "measured_at": "2026-08-28T23:00:00Z",
+  "systemd_version": "255 (255.21^)",
+  "method": "`systemctl show`, `systemctl list-units --all`, `systemctl list-unit-files`, `systemctl list-dependencies`, `systemctl list-timers --all`, and `cat` of unit files and drop-ins. No unit was started, stopped, restarted, enabled, disabled, masked, or reloaded. No setting was changed.",
+  "counting_caveats": [
+    "`systemctl list-units --all --no-legend` prefixes 26 lines with a '●' or '○' marker glyph, which shifts awk fields by one. Every histogram in this file was computed after stripping the marker with `sed \"s/^[[:space:]]*●[[:space:]]*//; s/^[[:space:]]*//\"`. A verbatim awk over the unmarked output emits '26 ●' as a phantom unit type and 26 singleton '<unit> not-found inactive' state rows.",
+      "The non-device loaded-unit total is NOT stable. `dropbear@<seq>-<localip>:22-<peerip>:<port>.service` instances are created per SSH connection and linger briefly as inactive/dead, so the count is set by the observer's own probing. The stable figure is 234 non-device units plus N dropbear@ instances (N=3 at one sample, N=1 at another).",
+      "`journalctl --list-boots` prints an 'IDX BOOT ID FIRST ENTRY LAST ENTRY' header row even through a pipe, and systemd 255 here does not accept --no-legend for it. `| wc -l` therefore overcounts boots by exactly one."
+  ],
+  "claims": [
+    {
+      "id": "census:units",
+      "kind": "census",
+      "loaded_units_total": 321,
+      "device_units": 84,
+      "non_device_units": 237,
+      "non_device_stable": "234 + N dropbear@ per-connection instances (N=3 at this sample)",
+      "type_histogram_non_device": {"service": 120, "target": 53, "mount": 29, "socket": 15, "slice": 9, "timer": 4, "swap": 3, "path": 3, "scope": 1},
+      "state_histogram_all_units": {
+        "loaded active plugged": 83,
+        "loaded inactive dead": 81,
+        "loaded active exited": 38,
+        "loaded active active": 32,
+        "loaded active running": 31,
+        "not-found inactive dead": 26,
+        "loaded active mounted": 17,
+        "loaded active waiting": 5,
+        "loaded active listening": 5,
+        "loaded active elapsed": 2,
+        "loaded activating tentative": 1
+      },
+      "unit_files_total": 254,
+      "unit_file_type_histogram": {"service": 135, "target": 75, "socket": 16, "mount": 15, "timer": 6, "slice": 3, "path": 3, "swap": 1},
+      "evidence": "$ ssh remarkable 'systemctl list-units --all --no-pager --no-legend | wc -l' -> \"321\"; $ ... '| grep -c \"\\.device \"' -> \"84\"; $ ... '| sed \"s/^[[:space:]]*●[[:space:]]*//; s/^[[:space:]]*//\" | grep -v \"\\.device \" | awk \"{n=split(\\$1,a,\\\".\\\"); print a[n]}\" | sort | uniq -c | sort -rn' -> \"120 service / 53 target / 29 mount / 15 socket / 9 slice / 4 timer / 3 swap / 3 path / 1 scope\"; $ ... '| sed \"s/^[[:space:]]*●[[:space:]]*//; s/^[[:space:]]*//\" | awk \"{print \\$2\\\" \\\"\\$3\\\" \\\"\\$4}\" | sort | uniq -c | sort -rn' -> the 11-bucket state histogram above; $ ssh remarkable 'systemctl list-unit-files --no-pager --no-legend | wc -l' -> \"254\"; $ ... '| awk \"{n=split(\\$1,a,\\\".\\\"); print a[n]}\" | sort | uniq -c | sort -rn' -> \"135 service / 75 target / 16 socket / 15 mount / 6 timer / 3 slice / 3 path / 1 swap\"; $ ssh remarkable 'systemctl list-units --all --no-pager --no-legend | grep -c \"dropbear@\"' -> \"3\".",
+      "notes": "The 11-bucket state histogram covers ALL 321 units. The 83 'loaded active plugged' and 1 'loaded activating tentative' are the 84 device units."
+    },
+    {
+      "id": "census:not-found-units",
+      "kind": "census",
+      "shape": "26 units have LoadState=not-found. They are loaded as placeholders only because other units reference them in Conflicts=/OnFailure=/After=/Requires=. No unit file ships for any of them.",
+      "units": ["auditd.service", "collectd.service", "display-manager.service", "dropbear.service", "ntpd.service", "ntpdate.service", "plymouth-quit-wait.service", "plymouth-start.service", "remarkable-fail.service", "run-postinsts.service", "sntp.service", "syslog.service", "syslog.target", "systemd-quotacheck.service", "systemd-rfkill.socket", "systemd-timesyncd.service", "systemd-user-sessions.service", "var-lib-uboot.mount", "run-credentials-systemd\\x2dresolved.service.mount", "run-credentials-systemd\\x2dsysctl.service.mount", "run-credentials-systemd\\x2dsysusers.service.mount", "run-credentials-systemd\\x2dtmpfiles\\x2dclean.service.mount", "run-credentials-systemd\\x2dtmpfiles\\x2dsetup.service.mount", "run-credentials-systemd\\x2dtmpfiles\\x2dsetup\\x2ddev.service.mount", "run-credentials-systemd\\x2dtmpfiles\\x2dsetup\\x2ddev\\x2dearly.service.mount", "run-credentials-systemd\\x2dvconsole\\x2dsetup.service.mount"],
+      "evidence": "$ ssh remarkable 'systemctl list-units --all --no-pager --no-legend | grep \"not-found\" | awk \"{print \\$2}\" | sort' -> exactly the 26 names above.",
+      "notes": "Breakdown: 15 services, 9 mounts (8 run-credentials-* plus var-lib-uboot), 1 socket (systemd-rfkill.socket), 1 target (syslog.target). dropbear.service is here because all three dropbear sockets declare Conflicts=dropbear.service. remarkable-fail.service is here because xochitl.service names it in OnFailure=."
+    },
+    {
+      "id": "unit:xochitl.service",
+      "kind": "unit",
+      "shape": "Type=simple, loaded/active/running, UnitFileState=enabled, MainPID=416, ExecStart=/usr/bin/xochitl --system, Restart=on-failure, RestartMode=direct, WatchdogSec=60, NotifyAccess=all, StartLimitIntervalUSec=10min / StartLimitBurst=4, DefaultDependencies=no, JobTimeoutSec=60s, Environment=MALLOC_ARENA_MAX=8, BusName EMPTY.",
+      "definition_sources": ["/usr/lib/systemd/system/xochitl.service", "/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf"],
+      "on_failure": "emergency.target remarkable-fail.service -- TWO units, not one",
+      "evidence": "$ ssh remarkable 'systemctl show xochitl.service -p Id -p Type -p MainPID -p ExecStart -p Requires -p Wants -p Before -p After -p OnFailure -p DropInPaths -p RestartMode -p WatchdogUSec -p StartLimitIntervalUSec -p StartLimitBurst -p NotifyAccess -p DefaultDependencies -p UnitFileState -p ActiveState -p SubState --no-pager' -> \"Type=simple / RestartMode=direct / NotifyAccess=all / WatchdogUSec=1min / MainPID=416 / ExecStart={ path=/usr/bin/xochitl ; argv[]=/usr/bin/xochitl --system ; pid=416 } / Requires=dbus.socket dev-dri-card0.device system.slice / Wants=tee-supplicant.service rm-sync.service / Before=shutdown.target remarkable-enable-slumber.service rm-sync.service / After=data.mount systemd-journald.socket system.slice dbus.socket dev-dri-card0.device tee-supplicant.service / OnFailure=emergency.target remarkable-fail.service / ActiveState=active / SubState=running / DropInPaths=/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf / UnitFileState=enabled / DefaultDependencies=no / StartLimitIntervalUSec=10min / StartLimitBurst=4\"; $ ssh remarkable 'cat /usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf' -> \"[Unit] / Requires=dev-dri-card0.device / After=dev-dri-card0.device tee-supplicant.service / Wants=tee-supplicant.service / JobTimeoutSec=60s / OnFailure=emergency.target / [Service] / Environment=\\\"MALLOC_ARENA_MAX=8\\\" / RestartMode=direct\".",
+      "notes": "BusName is empty: xochitl is Type=simple, not Type=dbus, and owns no bus name of its own. It is also the HTTP server process. systemd 255 emits no BusName property line for this unit at all; the empty value is the absence of the field. Reading only FragmentPath and skipping DropInPaths yields a materially wrong unit definition -- the drop-in is where the second OnFailure target, RestartMode, JobTimeoutSec, the malloc tuning, and the DRM/TEE dependencies come from."
+    },
+    {
+      "id": "edges:xochitl-client-facing",
+      "kind": "edges",
+      "shape": "`systemctl list-dependencies xochitl.service` yields exactly FIVE forward edges, all active: dbus.socket, dev-dri-card0.device, rm-sync.service, system.slice, tee-supplicant.service. Reverse: rm-sync.service and multi-user.target (with graphical.target inactive beneath it). The tree is this shallow only because xochitl sets DefaultDependencies=no.",
+      "evidence": "$ ssh remarkable 'systemctl list-dependencies xochitl.service --no-pager' -> \"xochitl.service / ● ├─dbus.socket / ● ├─dev-dri-card0.device / ● ├─rm-sync.service / ● ├─system.slice / ● └─tee-supplicant.service\"; $ ssh remarkable 'systemctl list-dependencies xochitl.service --reverse --no-pager' -> \"xochitl.service / ● ├─rm-sync.service / ● └─multi-user.target / ○   └─graphical.target\".",
+      "edge_semantics": {
+        "dbus.socket": "Requires -- if D-Bus is down xochitl cannot start, so the com.remarkable/no.remarkable interfaces and xochitl live or die together",
+        "dev-dri-card0.device": "Requires (from the drop-in) -- if the DRM device vanishes xochitl stops, taking the USB web server with it, because the HTTP server is inside PID 416",
+        "tee-supplicant.service": "Wants + Before -- the OP-TEE secure element must be up first",
+        "rm-sync.service": "Wants + Before forward; PartOf/BindsTo in reverse, so it appears in BOTH trees",
+        "system.slice": "cgroup parent"
+      },
+      "consequence": "There is exactly ONE process a client's HTTP and D-Bus access both depend on, and no separate web-server unit to restart."
+    },
+    {
+      "id": "unit:rm-sync.service",
+      "kind": "unit",
+      "shape": "Type=simple (deliberately NOT dbus), loaded/active/running, enabled, MainPID=486, ExecStart=/usr/bin/rm-sync, BusName=no.remarkable.sync, Nice=19, PartOf + BindsTo = xochitl.service, Restart=on-failure, RestartForceExitStatus=SIGHUP SIGINT SIGTERM SIGPIPE, Environment=HOME=/home/root.",
+      "evidence": "$ ssh remarkable 'systemctl show rm-sync.service -p Type -p LoadState -p ActiveState -p SubState -p UnitFileState -p MainPID -p BusName -p Restart -p ExecStart --no-pager' -> \"Type=simple|Restart=on-failure|MainPID=486|BusName=no.remarkable.sync|ExecStart={ path=/usr/bin/rm-sync ; argv[]=/usr/bin/rm-sync ; pid=486 }|LoadState=loaded|ActiveState=active|SubState=running|UnitFileState=enabled\"; $ ssh remarkable 'cat /usr/lib/systemd/system/rm-sync.service' -> \"PartOf=xochitl.service / BindsTo=xochitl.service / # Do NOT make this dbus, until we review the crash handling, as disassociating from this busname will result in systemd killing sync for Type=dbus (by design) / # Type=dbus / Type=simple / BusName=no.remarkable.sync / Nice=19 / RestartForceExitStatus=SIGHUP SIGINT SIGTERM SIGPIPE / Environment=HOME=/home/root\".",
+      "notes": "NAME COLLISION: the systemd unit is `rm-sync.service`; `rm.sync.service` is a xochitl LOGGER CATEGORY (see subsystems.json). Both strings exist on the device and name different things. BindsTo=xochitl.service means killing xochitl kills sync, and a client cannot restart sync independently. Nice=19 is by design so sync yields to the UI; the log confirms it from the other side -- the Synchronizer thread runs at Qt IdlePriority. The commented-out Type=dbus and the reason for it are in the shipped unit file."
+    },
+    {
+      "id": "unit:reMarkable-dbus-services",
+      "kind": "unit",
+      "shape": "Three Type=dbus reMarkable services back the three reverse-DNS bus names. mdm-agent is the only always-restarted one.",
+      "units": {
+        "marker-manager.service": "Type=dbus, loaded/active/running, enabled, MainPID=481, BusName=no.remarkable.marker, ExecStart=/usr/bin/marker-manager 60 80 300 0 1800 0 3, Restart=on-failure, WatchdogUSec=8min, Description='Remarkable CSL Marker Manager'",
+        "mdm-agent.service": "Type=dbus, loaded/active/running, enabled, MainPID=482, BusName=com.remarkable.devicepolicy, ExecStart=/usr/bin/mdm-agent, Restart=always, Names includes the alias dbus-com.remarkable.devicepolicy.service",
+        "update-engine.service": "Type=dbus, loaded/active/running, enabled, MainPID=653, BusName=no.remarkable.update1, ExecStart=/usr/bin/fakeupdateengine_service, Restart=on-failure, Description='Fake Update Engine', Requires=swupdate.service"
+      },
+      "evidence": "$ ssh remarkable 'for u in marker-manager.service mdm-agent.service update-engine.service; do systemctl show $u -p Type -p LoadState -p ActiveState -p SubState -p UnitFileState -p MainPID -p BusName -p Restart -p ExecStart --no-pager | tr \"\\n\" \"|\"; echo; done' -> \"Type=dbus|Restart=on-failure|MainPID=481|BusName=no.remarkable.marker|ExecStart={ path=/usr/bin/marker-manager ; argv[]=/usr/bin/marker-manager 60 80 300 0 1800 0 3 ; pid=481 }|...enabled\" / \"Type=dbus|Restart=always|MainPID=482|BusName=com.remarkable.devicepolicy|ExecStart={ path=/usr/bin/mdm-agent ; ...; pid=482 }|...enabled\" / \"Type=dbus|Restart=on-failure|MainPID=653|BusName=no.remarkable.update1|ExecStart={ path=/usr/bin/fakeupdateengine_service ; ...; pid=653 }|...enabled\".",
+      "notes": "The OTA D-Bus API on this firmware is backed by a binary literally named `fake` with unit Description 'Fake Update Engine', consistent with BUILD_MODE_RM=public: it is a ChromeOS-update_engine-shaped SHIM fronting swupdate. The seven positional numeric args to marker-manager (60 80 300 0 1800 0 3) are timing/threshold parameters with no --flags. Marker = the stylus; CSL = capacitive stylus link."
+    },
+    {
+      "id": "edges:ssh-is-socket-activated-only",
+      "kind": "edges",
+      "shape": "There is NO persistent sshd or dropbear daemon. Three socket units listen on [::]:22 with Accept=yes, each scoped to one netdev by BindToDevice, and each SSH connection spawns a fresh dropbear instance in system-dropbear.slice.",
+      "sockets": {
+        "dropbear-usb0.socket": "loaded/active/listening, enabled, Listen=[::]:22 (Stream), Accept=yes, BindToDevice=usb0 (from drop-in), BindsTo=sys-subsystem-net-devices-usb0.device, Requires=usb-ether-once.service, Conflicts=dropbear.service, DefaultDependencies=no",
+        "dropbear-usb1.socket": "same shape with BindToDevice=usb1 -- this is the socket serving the session that produced this spec",
+        "dropbear-wlan.socket": "loaded/active/listening, enabled, BindToDevice=wlan0 declared in the BASE unit file (not the drop-in), Requires=sysinit.target system.slice only (no usb-ether-once), ConditionPathExists=/data/internal/rm_enable_ssh_wifi_marker via drop-in, ConditionResult=yes"
+      },
+      "evidence": "$ ssh remarkable 'for s in dropbear-usb0.socket dropbear-usb1.socket dropbear-wlan.socket; do systemctl show $s -p ActiveState -p SubState -p UnitFileState -p Listen -p Accept -p BindToDevice -p BindsTo -p Requires -p Conflicts -p DropInPaths -p ConditionResult --no-pager | tr \"\\n\" \"|\"; echo; done' -> usb0: \"BindToDevice=usb0|Accept=yes|Listen=[::]:22 (Stream)|Requires=system.slice sysinit.target usb-ether-once.service|BindsTo=sys-subsystem-net-devices-usb0.device|Conflicts=shutdown.target dropbear.service|ActiveState=active|SubState=listening|DropInPaths=/usr/lib/systemd/system/dropbear-usb0.socket.d/override.conf|UnitFileState=enabled|ConditionResult=yes\"; usb1 identical with usb1; wlan: \"BindToDevice=wlan0|Accept=yes|Listen=[::]:22 (Stream)|Requires=sysinit.target system.slice|BindsTo=sys-subsystem-net-devices-wlan0.device|...|ConditionResult=yes\". $ ssh remarkable 'systemctl show dropbear.service -p LoadState -p ActiveState -p SubState --no-pager' -> \"LoadState=not-found|ActiveState=inactive|SubState=dead\". $ ssh remarkable 'grep -c \" 0A \" /proc/net/tcp6' -> \"3\" (all three inodes owned by pid 1). $ ssh remarkable 'systemctl list-units \"dropbear@*\" --no-pager --no-legend' -> \"dropbear@2307-10.11.99.1:22-10.11.99.12:50788.service loaded active running SSH Per-Connection Server (10.11.99.12:50788)\".",
+      "notes": "usb0 and usb1 both listen on port 22 without collision precisely because BindToDevice scopes each listener to its own gadget interface. Wi-Fi SSH is gated on a zero-byte marker file: $ ssh remarkable 'ls -l /data/internal/rm_enable_ssh_wifi_marker' -> \"-rw-r--r-- 1 root root 0 Sep 25 2024\". Absent that file the wlan socket would not listen, so a client cannot assume SSH-over-Wi-Fi on an arbitrary device."
+    },
+    {
+      "id": "unit:dropbear@.service",
+      "kind": "unit",
+      "shape": "Template unit, UnitFileState=static. Instances named dropbear@<seq>-<localip>:22-<peerip>:<port>.service. Type=simple, StandardInput=socket, KillMode=process, Slice=system-dropbear.slice, ExecStart=-/usr/sbin/dropbear -G root -i -r ${DROPBEAR_ED25519KEY_DIR}/dropbear_ed25519_host_key $DROPBEAR_EXTRA_ARGS. Every instance is gated by an ExecCondition on the secure-boot fuse state.",
+      "gate": "ExecCondition=sh -c 'cat /sys/devices/platform/lpgpr/secboot /sys/devices/platform/lpgpr/facmode | grep -e unlocked -e on'",
+      "gate_state": "secboot=unlocked, facmode=off -> the grep matches on 'unlocked' -> ConditionResult=yes",
+      "evidence": "$ ssh remarkable 'cat /usr/lib/systemd/system/dropbear@.service.d/override.conf' -> \"[Service] / ExecCondition=sh -c 'cat /sys/devices/platform/lpgpr/secboot /sys/devices/platform/lpgpr/facmode | grep -e unlocked -e on'\"; $ ssh remarkable 'cat /sys/devices/platform/lpgpr/secboot; cat /sys/devices/platform/lpgpr/facmode' -> \"unlocked\" / \"off\"; $ ssh remarkable 'cat /usr/lib/systemd/system/dropbear@.service' -> \"Description=SSH Per-Connection Server / Wants=dropbearkey.service / Environment=\\\"DROPBEAR_ED25519KEY_DIR=/etc/dropbear\\\" / EnvironmentFile=-/etc/default/dropbear / ExecStart=-/usr/sbin/dropbear -G root -i -r ${DROPBEAR_ED25519KEY_DIR}/dropbear_ed25519_host_key $DROPBEAR_EXTRA_ARGS / ExecReload=/bin/kill -HUP $MAINPID / StandardInput=socket / KillMode=process\"; live instance shows ConditionResult=yes.",
+      "consequence": "On a secboot-LOCKED, non-factory device the instance would be skipped and SSH would silently fail even though the socket still listens. This is one of the two independent reasons SSH is reachable here (the other being the MDM BlockSSH=false policy). The effective ExecStart also picks up -B from /etc/default/dropbear via DROPBEAR_EXTRA_ARGS. dropbear-usb0@.service, dropbear-usb1@.service and dropbear-wlan@.service are all Alias symlinks to dropbear@.service."
+    },
+    {
+      "id": "edges:ssh-host-key-persistence",
+      "kind": "edges",
+      "shape": "/etc is VOLATILE on this device, so the SSH host key survives only because of a dedicated bind mount.",
+      "chain": "var-volatile-etc.service (active/exited, 'Bind mount volatile /etc') makes /etc an overlay -> etc-dropbear.mount (loaded/active/mounted, enabled, 'Bind mount homedir for persistent dropbear key storage', WantedBy=multi-user.target) persists /etc/dropbear -> dropbearkey.service (static, inactive/dead, 'SSH Host Key Generation') is a Wants= of dropbear@.service and stays inactive because the key already exists at /etc/dropbear/dropbear_ed25519_host_key.",
+      "evidence": "$ ssh remarkable 'grep -E \" / | /etc\" /proc/mounts' -> \"/dev/root / ext4 ro,relatime 0 0\" and \"overlay /etc overlay rw,relatime,lowerdir=/etc,upperdir=/var/volatile/etc,workdir=/var/volatile/.etc-work,uuid=on 0 0\"; $ ssh remarkable 'systemctl list-units --all' -> \"etc-dropbear.mount loaded active mounted Bind mount homedir for persistent dropbear key storage\", \"dropbearkey.service loaded inactive dead SSH Host Key Generation\", \"var-volatile-etc.service loaded active exited Bind mount volatile /etc\"; sockets declare '[Install] Also=dropbearkey.service'.",
+      "consequence": "Anything a client writes to /etc is lost on reboot unless it lands under a persistence bind mount. Without etc-dropbear.mount the host key would change every boot and every client would see a host-key-changed warning. Note also `/` itself is mounted READ-ONLY (ext4 ro,relatime)."
+    },
+    {
+      "id": "edges:encrypted-home-boot-chain",
+      "kind": "edges",
+      "shape": "tee-supplicant.service -> keystore.service -> homecryptor.service is the chain that unlocks the encrypted volume every read of the xochitl data dir depends on.",
+      "units": {
+        "tee-supplicant.service": "Type=notify, loaded/active/running, enabled, MainPID=371, ExecStart=/usr/sbin/tee-supplicant $OPTARGS, Restart=on-failure, RequiredBy=keystore.service, WantedBy=xochitl.service basic.target",
+        "keystore.service": "Type=oneshot, loaded/active/exited, enabled, ExecStart=/usr/sbin/keystore init (pid 411, exited 0), Requires=tee-supplicant.service, RequiredBy=homecryptor.service",
+        "homecryptor.service": "Type=oneshot, loaded/active/exited, enabled, ExecStart=/usr/sbin/homecryptor start (pid 428, exited 0), Requires=keystore.service, After=growpart-home.service, FragmentPath=/usr/lib/systemd/system/homecryptor.service",
+        "swapcryptor.service": "Type=oneshot, loaded/active/exited, enabled, ExecStart=/usr/sbin/swapcryptor start (pid 369, exited 0), WantedBy=multi-user.target -- does NOT Require keystore.service, so its key path is independent"
+      },
+      "evidence": "$ ssh remarkable 'for u in keystore.service homecryptor.service tee-supplicant.service; do systemctl show $u -p Type -p LoadState -p ActiveState -p SubState -p UnitFileState -p MainPID -p Restart -p ExecStart --no-pager | tr \"\\n\" \"|\"; echo; done' -> \"Type=oneshot|Restart=no|MainPID=0|ExecStart={ path=/usr/sbin/keystore ; argv[]=/usr/sbin/keystore init ; start_time=[Fri 2026-08-28 15:01:41 UTC] ; stop_time=[Fri 2026-08-28 15:01:42 UTC] ; pid=411 ; code=exited ; status=0 }|LoadState=loaded|ActiveState=active|SubState=exited|UnitFileState=enabled\" / homecryptor with '/usr/sbin/homecryptor start ; pid=428 ; code=exited ; status=0' / \"Type=notify|Restart=on-failure|MainPID=371|ExecStart={ path=/usr/sbin/tee-supplicant ; argv[]=/usr/sbin/tee-supplicant $OPTARGS ; pid=371 }|...running\".",
+      "corroboration": "The same boot logs the OP-TEE PKCS11 token init 3.9s before xochitl reports pkcs11 unavailable: keystore[411] -> \"Init device-token (OP-TEE PKCS11 TA - TEE UUID fc080c34-3c86-50e9-bc2b-89458d70cab4)...\" and \"device-token (0000000000000000): |loginRequired|secureLogin|userPinSet|hasRng|userPinToBeChanged|\". Three swap units are active simultaneously: dev-mapper-swap\\x2dencrypted\\x2ddisk.swap (via swapcryptor), dev-dm\\x2d1.swap, and dev-zram0.swap (via zram-swap.service, static).",
+      "consequence": "/home is dm-crypt. Everything a client reads under /home/root/.local/share/remarkable/xochitl lives on this encrypted volume, and so does the systemd journal."
+    },
+    {
+      "id": "edges:usb-gadget-brings-up-ssh-and-http",
+      "kind": "edges",
+      "shape": "usb-ether-once.service creates the CDC gadget functions. The dropbear USB sockets HARD-REQUIRE it; it requires nothing of them.",
+      "unit": "usb-ether-once.service -- Type=oneshot, RemainAfterExit=yes, loaded/active/exited, enabled, ExecStart=/usr/sbin/usb-ether-once, TimeoutStartSec=45",
+      "direction": "Requires=sysinit.target sys-kernel-config.mount system.slice. RequiredBy=dropbear-usb0.socket dropbear-usb1.socket. WantedBy=usb-gadget.target. Before=usb-gadget.target dropbear-usb0.socket shutdown.target dropbear-usb1.socket.",
+      "evidence": "$ ssh remarkable 'systemctl show usb-ether-once.service -p Requires -p RequiredBy -p WantedBy --no-pager' -> \"Requires=sysinit.target sys-kernel-config.mount system.slice / RequiredBy=dropbear-usb0.socket dropbear-usb1.socket / WantedBy=usb-gadget.target\"; the Requires=usb-ether-once.service edge lives in the socket DROP-INS at /usr/lib/systemd/system/dropbear-usb{0,1}.socket.d/override.conf, not in the socket fragments (whose own fragments carry no Requires= line at all).",
+      "consequence": "An active usb-ether-once does NOT imply the SSH sockets are up -- the requirement runs the other way. If a client sees no route to 10.11.99.1, inspect usb-ether-once AND the two socket units. usb-gadget.target is also loaded/active/active ('Hardware activated USB gadget')."
+    },
+    {
+      "id": "unit:swupdate-and-ota",
+      "kind": "unit",
+      "shape": "The real updater is swupdate, driven over UNIX sockets in /tmp. update-engine.service is only a D-Bus shim in front of it. A/B partition switch is deferred to a GRACEFUL reboot.",
+      "units": {
+        "swupdate.service": "Type=notify, loaded/active/running, enabled, MainPID=618, ExecStart=/usr/lib/swupdate/swupdate.sh, TriggeredBy=swupdate.socket, RequiredBy=update-engine.service, After=memfaultd.service",
+        "swupdate.socket": "loaded/active/running, enabled, Accept=no, TWO UNIX stream listeners: /tmp/sockinstctrl (install control) and /tmp/swupdateprog (progress feed), Triggers=swupdate.service",
+        "swupdate-progress.service": "unit file exists but disabled/disabled and NOT loaded",
+        "rm-apply-ota.service": "loaded/inactive/dead, enabled/enabled, 'Switch partitions if OTA update has been installed and device reboots gracefully'"
+      },
+      "evidence": "$ ssh remarkable 'for u in swupdate.service swupdate.socket; do systemctl show $u -p Type -p LoadState -p ActiveState -p SubState -p UnitFileState -p MainPID -p ExecStart --no-pager | tr \"\\n\" \"|\"; echo; done' -> \"Type=notify|Restart=no|MainPID=618|ExecStart={ path=/usr/lib/swupdate/swupdate.sh ; pid=618 }|LoadState=loaded|ActiveState=active|SubState=running|UnitFileState=enabled\" and \"LoadState=loaded|ActiveState=active|SubState=running|UnitFileState=enabled\"; prior session: 'Accept=no / Listen=/tmp/sockinstctrl (Stream) / Listen=/tmp/swupdateprog (Stream) / Triggers=swupdate.service'; $ systemctl list-unit-files -> \"swupdate-progress.service disabled disabled\".",
+      "consequence": "The update control/progress channel is a UNIX socket in /tmp, NOT TCP -- unreachable from a USB client. Progress is surfaced via the update-engine D-Bus shim instead, and that shim is a stub. The lpgpr sysfs node exposes the A/B state rm-apply-ota acts on: root_part, roota_errcnt, rootb_errcnt, swu_applied, swu_recovery, swu_status."
+    },
+    {
+      "id": "unit:memfault-telemetry-backbone",
+      "kind": "unit",
+      "shape": "Memfault is the whole telemetry backbone: the sink every metrics unit requires, ordered before swupdate so update events are attributable.",
+      "units": {
+        "memfaultd.service": "Type=forking, loaded/active/running, enabled, MainPID=591, ExecStart=/usr/bin/memfaultd --daemonize --config-file ${CONF_FILE}; Requires=memfault-project-key-monitor.path; RequiredBy=battery-status-metrics.{timer,service} and slumber-metrics.service; Before=memfault-attributes.service battery-status-metrics.service swupdate.service collectd.service; After=var-log-journal.mount boot-reason-check.service",
+        "memfault-project-key-monitor.path": "loaded/active/WAITING, enabled -- a hard Requires= of memfaultd; watches the project key file and restarts memfaultd when it changes. One of only 3 loaded .path units and the only non-systemd one",
+        "memfault-attributes.service": "loaded/active/exited, enabled, 'Set Attributes that shall be sent to Memfault'",
+        "remarkable-counter-metrics.service": "Type=simple, loaded/active/RUNNING, enabled, 'Report counter metrics to statsd endpoint'",
+        "slumber-metrics.service": "loaded/active/RUNNING, enabled, 'reMarkable Daemon for reporting slumber metrics'",
+        "battery-status-metrics.timer": "loaded/active/WAITING, enabled, next elapse 2026-08-29 00:00:00 UTC, triggers battery-status-metrics.service (static, inactive/dead)"
+      },
+      "evidence": "$ ssh remarkable 'systemctl show memfaultd.service -p Type -p LoadState -p ActiveState -p SubState -p UnitFileState -p MainPID -p ExecStart --no-pager | tr \"\\n\" \"|\"' -> \"Type=forking|Restart=on-failure|MainPID=591|ExecStart={ path=/usr/bin/memfaultd ; argv[]=/usr/bin/memfaultd --daemonize --config-file ${CONF_FILE} }|LoadState=loaded|ActiveState=active|SubState=running|UnitFileState=enabled\"; $ ssh remarkable 'systemctl list-timers --all --no-pager --no-legend' -> \"Sat 2026-08-29 00:00:00 UTC 45min - - battery-status-metrics.timer battery-status-metrics.service\".",
+      "listeners": "TWO loopback-only memfaultd listeners, per /etc/memfaultd.conf: TCP 127.0.0.1:8787 = http_server.bind_address, memfaultd's HTTP control endpoint (memfaultctl), inode 3738 owned by pid 591. UDP 127.0.0.1:8125 = metrics.statsd_server.bind_address, the actual statsd endpoint. remarkable-counter-metrics (pid 354) holds an ESTABLISHED UDP socket 127.0.0.1:59300 -> 127.0.0.1:8125 and its binary embeds the literal '127.0.0.1:8125' and 'src/reporter/memfault_statsd.rs'. Neither metrics service touches 8787.",
+      "listener_evidence": "$ ssh remarkable 'grep \" 0A \" /proc/net/tcp' -> \"   0: 0100007F:2253 00000000:0000 0A ... 3738 ...\" (0x2253 = 8787); prior session: $ grep -n -i -E \"bind|statsd|8787|8125\" /etc/memfaultd.conf -> \"14:  \\\"http_server\\\": { / 15:    \\\"bind_address\\\": \\\"127.0.0.1:8787\\\" / 156:    \\\"statsd_server\\\": { / 157:      \\\"bind_address\\\": \\\"127.0.0.1:8125\\\"\"; $ cat /proc/net/udp -> \"476: 0100007F:E7A4 0100007F:1FBD 01 ... 375\" (pid 354, remarkable-counter-metrics) and \"501: 0100007F:1FBD 00000000:0000 07 ... 3732\" (pid 591, memfaultd; 0x1FBD = 8125).",
+      "notes": "Both are loopback-only, so neither is reachable from a USB client."
+    },
+    {
+      "id": "unit:reMarkable-lifecycle-latches",
+      "kind": "unit",
+      "shape": "Several reMarkable units are RemainAfterExit-style latches: they hold 'active (exited)' with no ExecStart having run, purely so their ExecStop fires at shutdown.",
+      "units": {
+        "xochitl-shutdown.service": "Type=oneshot, loaded/active/exited, enabled, MainPID=0 AND ExecMainPID=0 -- no ExecStart ran. Conflicts=shutdown.target, Before=shutdown.target multi-user.target. Its ExecStop lets xochitl flush.",
+        "rm-reset-boot-count.service": "loaded/active/exited, enabled/enabled, 'reMarkable service for reseting boot count at shutdown', WantedBy=multi-user.target -- same pattern",
+        "boot-reason-check.service": "loaded/active/exited, enabled, 'Check faulty boot from suspend or hibernate'; a Wants= of memfaultd. Paired with boot-reason-check-shutdown.service (loaded/inactive/dead, 'Flag a graceful shutdown')",
+        "rm-sanity.service": "Type=simple, loaded/INACTIVE/dead, static -- it already RAN and exited 0 (ExecMainPID=769, start 15:03:09, stop 15:03:10). TriggeredBy=rm-sanity.timer, After=rm-emergency.service",
+        "rm-sanity.timer": "loaded/active/ELAPSED, enabled, 'Run Sanity Service 60s After Boot', last trigger 2026-08-28 15:03:09 UTC",
+        "remarkable-wakesrc-init.service": "Type=simple, loaded/inactive/dead, enabled, WantedBy=sysinit.target. It DID run this boot (ExecStart=/usr/sbin/remarkable-wakesrc-init, exited 0 in 173ms) and is dead only because it is Type=simple with no RemainAfterExit -- NOT because a condition skipped it (ConditionResult=yes, no Condition*/Assert* directives in the fragment, no drop-in)"
+      },
+      "evidence": "$ ssh remarkable 'for u in rm-sanity.service rm-sanity.timer xochitl-shutdown.service; do systemctl show $u -p Type -p LoadState -p ActiveState -p SubState -p UnitFileState -p MainPID -p ExecStart --no-pager | tr \"\\n\" \"|\"; echo; done' -> rm-sanity.service: \"Type=simple|Restart=no|MainPID=0|ExecStart={ path=/usr/sbin/rm-sanity.sh ; start_time=[Fri 2026-08-28 15:03:09 UTC] ; stop_time=[Fri 2026-08-28 15:03:10 UTC] ; pid=769 ; code=exited ; status=0 }|LoadState=loaded|ActiveState=inactive|SubState=dead|UnitFileState=static\"; rm-sanity.timer: \"LoadState=loaded|ActiveState=active|SubState=elapsed|UnitFileState=enabled\"; xochitl-shutdown: \"Type=oneshot|Restart=no|MainPID=0|BusName=|LoadState=loaded|ActiveState=active|SubState=exited|UnitFileState=enabled\".",
+      "consequence": "A client must NOT assume xochitl data is consistent until xochitl-shutdown.service has actually stopped. And 'inactive/dead' on a reMarkable oneshot-style unit is ambiguous by itself -- read ExecMainStatus, ExecMainStartTimestamp and ConditionResult before concluding it was skipped."
+    },
+    {
+      "id": "unit:failure-path",
+      "kind": "unit",
+      "shape": "xochitl's failure hook is HALF-wired, not dead. OnFailure names two units; one is missing, the other is a live reMarkable-specific override.",
+      "chain": "xochitl.service OnFailure=emergency.target remarkable-fail.service -> remarkable-fail.service is LoadState=not-found (LoadError=org.freedesktop.systemd1.NoSuchUnit, no file anywhere) -> emergency.target IS loaded from a reMarkable override at /etc/systemd/system/emergency.target with Requires=rm-emergency.service AllowIsolate=yes -> rm-emergency.service is loaded, static, inactive/dead, ExecStartPre=touch /tmp/rm-emergency, ExecStart=/usr/sbin/rm-emergency.sh (1259 bytes, present, executable).",
+      "evidence": "$ ssh remarkable 'cat /etc/systemd/system/emergency.target' -> \"# This target overrides the standard emergency.target provided by systemd / [Unit] / Description=Emergency Mode / Requires=rm-emergency.service / After=rm-emergency.service / AllowIsolate=yes\"; $ ssh remarkable 'systemctl show rm-emergency.service -p LoadState -p ExecStart --no-pager' -> \"ExecStart={ path=/usr/sbin/rm-emergency.sh ; argv[]=/usr/sbin/rm-emergency.sh ; pid=0 }\" and \"LoadState=loaded\"; $ ssh remarkable 'systemctl list-units --all --no-pager --no-legend | grep not-found' includes \"remarkable-fail.service\"; $ ssh remarkable 'find / -xdev -name \"*remarkable-fail*\"' -> no output.",
+      "consequence": "If xochitl exceeds StartLimitBurst=4 in 10min, systemd starts emergency.target -> rm-emergency.sh and logs a NoSuchUnit for the phantom second target. OnFailure ignores unloadable units, so the missing name is harmless. Do NOT conclude 'nothing runs to handle it'."
+    },
+    {
+      "id": "unit:mounts-and-volatility",
+      "kind": "unit",
+      "shape": "/ is read-only ext4. /etc, /var/cache, /var/lib, /var/spool, /var/srv are volatile bind mounts. Persistence for specific paths is granted by individual bind-mount units.",
+      "units": {
+        "data.mount": "UnitFileState=generated (from /etc/fstab, FragmentPath=/run/systemd/generator/data.mount), loaded/active/mounted at /data, What=/dev/mmcblk0p1, Type=ext4, Options=rw,relatime,sync,nodioread_nolock,nodelalloc,data=journal,x-systemd.makefs. RequiredBy=local-fs.target. xochitl.service is only ORDERED after it (After=), never Requires=.",
+        "home.mount": "loaded/active/mounted at /home, What=/dev/mapper/home-encrypted-disk. RequiredBy=memfault-project-key-monitor.path, etc-dropbear.mount, var-log-journal.mount, var-lib-bluetooth.mount, marker-manager.service, mdm-agent.service. WantedBy=etc-dropbear.mount, var-log-journal.mount, local-fs.target",
+        "var-log-journal.mount": "loaded/active/mounted, 'Bind mount homedir for persistent journal storage'; memfaultd is ordered After= it",
+        "etc-dropbear.mount": "loaded/active/mounted, enabled/enabled, 'Bind mount homedir for persistent dropbear key storage'",
+        "var-lib-bluetooth.mount": "loaded/active/mounted, bind mount for persistent Bluetooth pairing info",
+        "var-volatile-{etc,cache,lib,spool,srv}.service": "all loaded/active/exited -- these are what make those trees volatile"
+      },
+      "evidence": "$ ssh remarkable 'systemctl show home.mount -p What -p RequiredBy -p WantedBy --no-pager' -> \"What=/dev/mapper/home-encrypted-disk / RequiredBy=memfault-project-key-monitor.path etc-dropbear.mount var-log-journal.mount var-lib-bluetooth.mount marker-manager.service mdm-agent.service / WantedBy=etc-dropbear.mount var-log-journal.mount local-fs.target\"; $ ssh remarkable 'grep -E \" / | /etc\" /proc/mounts' -> \"/dev/root / ext4 ro,relatime 0 0\" and the /etc overlay line; $ ssh remarkable 'ls -l /data/internal/rm_enable_ssh_wifi_marker' -> \"-rw-r--r-- 1 root root 0 Sep 25 2024\".",
+      "notes": "/data holds device-scoped flags including the Wi-Fi-SSH marker. Also present and active/exited: dm-persist-create.service ('Persist storage device creation'), dm-early-uevent.service, remarkable-fs-check.service, growfs-home.service, growpart-home.service, plus systemd-makefs@ and systemd-fsck@ units for dev-mapper-persist and dev-mapper-home\\x2dencrypted\\x2ddisk."
+    },
+    {
+      "id": "unit:no-display-manager",
+      "kind": "unit",
+      "shape": "There is no display manager and no graphical.target in the boot path. default.target is an Alias to multi-user.target. xochitl IS the display stack, pulled in by multi-user.target and drawing straight to dev-dri-card0.device.",
+      "evidence": "$ ssh remarkable 'ls -l /etc/systemd/system/default.target' -> \"default.target -> /usr/lib/systemd/system/multi-user.target\"; $ ssh remarkable 'systemctl list-units --all' -> \"graphical.target loaded inactive dead Graphical Interface\", \"● display-manager.service not-found inactive dead\", \"● plymouth-start.service not-found\", \"● plymouth-quit-wait.service not-found\"; $ ssh remarkable 'systemctl list-dependencies xochitl.service --reverse --no-pager' -> graphical.target appears only as an inactive reverse-dependency artifact beneath multi-user.target.",
+      "notes": "A serial console IS live on ttymxc1 (serial-getty@ttymxc1.service loaded/active/running, plus getty@tty1.service) -- a third access path besides SSH and HTTP, and one NOT gated by the secboot ExecCondition that gates dropbear."
+    },
+    {
+      "id": "unit:time-and-network",
+      "kind": "unit",
+      "shape": "Time sync is chrony, not timesyncd. time-sync.target is INACTIVE. Networking is systemd-networkd + wpa_supplicant; Bluetooth is enabled but not running.",
+      "units": {
+        "chronyd.service": "loaded/active/RUNNING, enabled/enabled, 'NTP client/server'. systemd-timesyncd, ntpd, ntpdate and sntp are all NOT-FOUND. time-set.target and time-sync.target are both loaded/inactive/dead",
+        "systemd-networkd.service": "loaded/active/running, enabled, aliased dbus-org.freedesktop.network1.service; paired with systemd-networkd.socket (active/running) and systemd-network-generator.service (active/exited)",
+        "systemd-resolved.service": "loaded/active/running, aliased dbus-org.freedesktop.resolve1.service, listening on 127.0.0.53:53 and 127.0.0.54:53",
+        "wpa_supplicant.service": "loaded/active/RUNNING, enabled, aliased dbus-fi.w1.wpa_supplicant1.service; prepare_wifi.service (enabled) is inactive/dead",
+        "bluetooth.service": "loaded/INACTIVE/dead despite enabled/enabled; aliased dbus-org.bluez.service; var-lib-bluetooth.mount is active/mounted",
+        "pcscd.socket": "loaded/active/LISTENING, enabled/enabled; pcscd.service is indirect/disabled and inactive/dead",
+        "dhcp-role-from-devconfig.service": "loaded/inactive/dead, enabled/enabled, 'Set DHCP role as client or server as defined in devconfig'; sibling hostname-from-devconfig.service same state",
+        "zram-swap.service": "loaded/active/exited, static, 'Create compressed swap in memory using zram'; dev-zram0.swap active/active"
+      },
+      "evidence": "$ ssh remarkable 'systemctl list-units --all --no-pager --no-legend' rows quoted above; $ ssh remarkable 'grep \" 0A \" /proc/net/tcp' -> \"   2: 3600007F:0035 ...\" and \"   3: 3500007F:0035 ...\" (127.0.0.54:53 and 127.0.0.53:53, uid 996 systemd-resolve); $ ssh remarkable 'ls -l /etc/systemd/system/ | grep \"^l\" | grep dbus' -> the five dbus-* Alias symlinks including dbus-org.bluez.service -> bluetooth.service.",
+      "consequence": "With time-sync.target inactive and the cloud unreachable, the clock is NOT confirmed synced -- which matters for anything correlating .metadata lastModified timestamps. dhcp-role-from-devconfig explains why the tablet is DHCP SERVER on 10.11.99.1 and hands the host 10.11.99.12. org.bluez is present as a D-Bus-activatable name only; bluetoothd is not running, which is exactly why introspection-only discipline matters there. pcscd.socket armed with pcscd.service disabled explains the log line 'Signing mechanism pkcs11 is not available, we are in unlocked state. Using none instead.'"
+    },
+    {
+      "id": "census:timers",
+      "kind": "census",
+      "shape": "Only FOUR timers are loaded on the whole device.",
+      "timers": {
+        "battery-status-metrics.timer": "active/waiting, next elapse Sat 2026-08-29 00:00:00 UTC",
+        "systemd-tmpfiles-clean.timer": "active/waiting, next Sat 2026-08-29 17:47:31 UTC, last Fri 2026-08-28 15:17:13 UTC",
+        "remarkable-enable-slumber.timer": "active/elapsed, last Fri 2026-08-28 15:02:08 UTC -- 'Enable Slumber (Autosuspend) After System has Settled'; xochitl.service is Before= its service",
+        "rm-sanity.timer": "active/elapsed, last Fri 2026-08-28 15:03:09 UTC -- 'Run Sanity Service 60s After Boot'"
+      },
+      "evidence": "$ ssh remarkable 'systemctl list-timers --all --no-pager --no-legend' -> exactly the four rows above.",
+      "notes": "Directly relevant to 'has the tablet gone to sleep': autosuspend (slumber) is ARMED by remarkable-enable-slumber.timer once boot settles, and xochitl is ordered before it. There is NO `rm.sys.timer` systemd unit -- that string is a xochitl LOGGER CATEGORY (see subsystems.json). The reMarkable timer that actually exists is rm-sanity.timer."
+    },
+    {
+      "id": "unit:slices",
+      "kind": "unit",
+      "shape": "system-dropbear.slice (loaded/active/active, 'Slice /system/dropbear') is the cgroup containing every per-connection dropbear instance, giving a client one cgroup to watch for aggregate SSH resource use.",
+      "evidence": "$ ssh remarkable 'systemctl list-units --all' -> \"system-dropbear.slice loaded active active Slice /system/dropbear\"; live dropbear instance property Slice=system-dropbear.slice.",
+      "notes": "Other implicit slices present: system-getty, system-modprobe, system-serial-getty, system-systemd-fsck, system-systemd-makefs. 9 slice units total."
+    }
+  ],
+  "refuted": [
+    {
+      "claim": "320 loaded units total; 236 non-device; 119 service; 79 loaded/inactive/dead; and a 9-bucket state histogram.",
+      "observation": "Four of the stated integers do not reproduce. Measured: 321 total, 237 non-device, 120 service, 81 loaded/inactive/dead. Cause: dropbear@<pid>-<addr>:22-<addr>.service transient per-SSH-connection units, whose count is set by the observer's own probing (3 at this sample, 2 at the claim's sample). Worse, the claim's 9-bucket state histogram sums to 236, i.e. it is the state distribution of NON-DEVICE units only and silently drops all 84 device units (83 loaded/active/plugged, 1 loaded/activating/tentative). And both of its cited awk pipelines are field-shifted: 26 lines start with '●', so run verbatim they emit '26 ●' as a unit type and 26 singleton '<unit> not-found inactive' state rows -- the reported numbers cannot come from those commands.",
+      "correction": "See claim census:units. The stable restatement is 234 non-device units plus N dropbear@ instances, and an 11-bucket histogram over all 321. list-unit-files (254, and its full type breakdown) reproduces exactly."
+    },
+    {
+      "claim": "xochitl.service OnFailure=remarkable-fail.service, which does not exist, so the failure hook is a no-op and xochitl just stays dead.",
+      "observation": "The effective value is `OnFailure=emergency.target remarkable-fail.service` -- two units. The evidence read only FragmentPath and missed DropInPaths=/usr/lib/systemd/system/xochitl.service.d/xochitl-service-override.conf, which adds OnFailure=emergency.target. emergency.target IS loaded, from a reMarkable-specific override at /etc/systemd/system/emergency.target that Requires=rm-emergency.service, which is loaded and runs /usr/sbin/rm-emergency.sh (present, executable).",
+      "correction": "The hook is half-wired, not dead. See claim unit:failure-path. The same drop-in also supplies RestartMode=direct, JobTimeoutSec=60s, MALLOC_ARENA_MAX=8, Requires=dev-dri-card0.device and Wants=tee-supplicant.service -- all absent from the original shape. Separately, the quoted 'BusName=' line does not exist as such: systemd 255 emits no BusName property for this unit."
+    },
+    {
+      "claim": "usb-ether-once.service is a hard Requires= of both dropbear-usb0.socket and dropbear-usb1.socket.",
+      "observation": "The dependency direction is inverted. usb-ether-once.service's own Requires= is only sysinit.target, sys-kernel-config.mount, system.slice (its unit file declares just sys-kernel-config.mount). The sockets appear in RequiredBy=. The cited evidence -- the sockets showing Requires=...usb-ether-once.service -- establishes only the reverse fact, which holds whether or not the service requires the sockets.",
+      "correction": "RequiredBy=dropbear-usb0.socket dropbear-usb1.socket; WantedBy=usb-gadget.target. An active usb-ether-once does not imply the SSH sockets are up. Also: usb0 is the RNDIS function with NO IP and NO-CARRIER; 10.11.99.1/27 lives on usb1 (ECM) alone -- the 'usb0/usb1 CDC gadget' phrasing is imprecise."
+    },
+    {
+      "claim": "data.mount is a hard After= dependency of xochitl.service, so xochitl will not start before it is mounted.",
+      "observation": "After= is ORDERING only and systemd documents it as orthogonal to requirement dependencies. data.mount appears in neither Requires=, Requisite=, BindsTo=, nor RequiresMountsFor= on xochitl.service, and it is absent from xochitl's entire list-dependencies closure. With DefaultDependencies=no there is no local-fs.target backstop either. The only hard requirement on data.mount anywhere is local-fs.target.",
+      "correction": "Ordering only. If data.mount failed, xochitl.service would still start. Also: UnitFileState is the lowercase enum token `generated`, not `GENERATED`."
+    },
+    {
+      "claim": "home.mount is the required path for rm-sync.service, mdm-agent.service, marker-manager.service, crashuploader.service and rm-sanity.service.",
+      "observation": "Only two of the five. `systemctl show home.mount -p RequiredBy` -> \"memfault-project-key-monitor.path etc-dropbear.mount var-log-journal.mount var-lib-bluetooth.mount marker-manager.service mdm-agent.service\". rm-sync.service, crashuploader.service and rm-sanity.service each have Requires=sysinit.target system.slice with empty RequiresMountsFor= and only After=home.mount. The 'home.mount under local-fs.target' seen in list-dependencies is transitive, and local-fs.target only Wants= home.mount, so that evidence holds for nearly any post-sysinit unit.",
+      "correction": "Requires: marker-manager.service and mdm-agent.service (plus four bind-mount/path units the claim omitted). Ordering only: rm-sync, crashuploader, rm-sanity. If home.mount failed, the latter three would still start."
+    },
+    {
+      "claim": "remarkable-wakesrc-init.service is enabled but never ran this boot -- a condition gate skipped it.",
+      "observation": "It ran and succeeded. ConditionResult=yes, AssertResult=yes, InvocationID set, ExecMainStartTimestamp = ExecMainExitTimestamp = Fri 2026-08-28 15:01:41 UTC (this boot; uptime puts boot at ~15:02), Result=success, ExecMainStatus=0, and the journal shows 'Started Initialize wake-up sources' then 'Deactivated successfully' 173 ms later. The fragment contains ZERO Condition*/Assert* directives and has no drop-in directory, so no gate exists.",
+      "correction": "It is inactive/dead because it is Type=simple with no RemainAfterExit, not because it was skipped. The '○' glyph in list-dependencies means 'not active now', not 'never ran'. The listed shape strings (loaded/inactive/dead, enabled/enabled, that Description) are all exactly right."
+    },
+    {
+      "claim": "var-log-journal.mount is a bind mount, and 9 boots are retained spanning 2026-04-29 to now.",
+      "observation": "Only the Description says 'bind': What=/dev/mapper/home-encrypted-disk with Options=rw,relatime -- a device mount. And the boot arithmetic is off: `journalctl --list-boots | wc -l` returns 7 because systemd 255 prints a header row it cannot suppress here (--no-legend is unrecognized for that subcommand), so 7 lines = 6 boots, and the claim's cited 9 meant 8. The oldest retained entry is now 2026-05-07T15:07:45; the claimed 2026-04-29 start has rotated out.",
+      "correction": "6 boots retained at this sample. Retention is BYTE-capped, not boot-capped: journald.conf sets SystemMaxUse=50M / SystemKeepFree=20M and 47.5M is already in use, so the window is at its cap and rotating. Never pin a boot count or journal span as a firmware fact. The unit shape (loaded/active/mounted, that exact Description) and memfaultd's After= edge do reproduce."
+    },
+    {
+      "claim": "TCP 127.0.0.1:8787 is the statsd endpoint that remarkable-counter-metrics.service and slumber-metrics.service report to.",
+      "observation": "The listener fact is right (8787 LISTEN, inode 3738, owned by memfaultd pid 591, loopback-only) but the identification is wrong. /etc/memfaultd.conf assigns 8787 to `http_server.bind_address` -- memfaultd's HTTP control endpoint -- and `metrics.statsd_server.bind_address` to 127.0.0.1:8125. remarkable-counter-metrics (pid 354) holds an ESTABLISHED UDP socket to 127.0.0.1:8125 and its binary embeds '127.0.0.1:8125' plus 'src/reporter/memfault_statsd.rs'; it contains no reference to 8787. slumber-metrics references neither.",
+      "correction": "Two distinct loopback memfaultd listeners: TCP 8787 = HTTP control, UDP 8125 = statsd. See claim unit:memfault-telemetry-backbone."
+    },
+    {
+      "claim": "`rm.sync.service` and `rm.sys.timer` are systemd units.",
+      "observation": "Neither exists as a unit. The unit is `rm-sync.service` (hyphen), and `systemctl list-units --all | grep -iE 'rm[.-]sys|rm\\.sync'` returns nothing for the dotted forms. `rm.sync.service` and `rm.sys.timer` are xochitl LOGGER CATEGORIES.",
+      "correction": "See subsystems.json. The reMarkable timer that exists is rm-sanity.timer; only 4 timers are loaded device-wide."
+    }
+  ]
+}
