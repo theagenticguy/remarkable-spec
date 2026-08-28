@@ -1,0 +1,55 @@
+#  Strict type checking for the whole workspace.
+#
+#  ty is 0.0.x, so this file is pinned in lockstep with the exact `ty==0.0.66`
+#  in the root pyproject's dev group. Bumping one without the other is how a
+#  "passing" gate silently changes meaning.
+#
+#  Policy: every diagnostic is an error, and `error-on-warning` makes the tier
+#  distinction moot. That setting also earns its keep a second way -- ty reports
+#  an unrecognised rule name as `warning[unknown-rule]` rather than failing to
+#  parse, so without it a typo in the [rules] table below would silently
+#  disable that rule. With it, a typo fails the gate.
+
+[environment]
+python-version = "3.13"
+
+[src]
+respect-ignore-files = true
+include = ["packages", "tests"]
+exclude = [
+    "**/.venv",
+    "**/dist",
+    "**/build",
+    "docs/.repomix",
+]
+
+[terminal]
+error-on-warning = true
+
+[analysis]
+# Promote the strictness knobs ty ships off by default.
+strict-equality-semantics = true
+# `strict-literal-narrowing` is deliberately ABSENT, not forgotten. In ty 0.0.66
+# setting it alongside strict-equality-semantics fails config parsing with a
+# spurious `duplicate field \`strict-equality-semantics\`` -- the two names
+# collide in the deserializer. Either alone parses; both together do not.
+# Re-test on the next ty bump and add it back if fixed.
+# A `# type: ignore` must not be able to silence something this gate cares
+# about; ty's own `unused-ignore-comment` below keeps the escape hatch honest.
+respect-type-ignore-comments = true
+
+[rules]
+# Rules ty ships below error, promoted to error here. Every name below was
+# validated against ty 0.0.66 individually -- and the gate re-validates them on
+# every run, because an unrecognised name here emits warning[unknown-rule],
+# which error-on-warning turns into a failure.
+#
+# Note: `unknown-rule` is NOT itself settable (ty suggests `unknown-argument`
+# if you try). It is a diagnostic ty emits, not a rule you configure -- the
+# error-on-warning setting above is what gives it teeth.
+unused-ignore-comment = "error"
+redundant-cast = "error"
+possibly-unresolved-reference = "error"
+division-by-zero = "error"
+index-out-of-bounds = "error"
+invalid-key = "error"

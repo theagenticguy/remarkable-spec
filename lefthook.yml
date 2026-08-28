@@ -1,23 +1,46 @@
+#  Git hooks. Every command here is `mise run <task>` and nothing else.
+#
+#  That is the mechanism that keeps local checks and CI identical: mise.toml owns
+#  the command strings, this file owns only *when* they run, and
+#  .github/workflows/ci.yml calls the same tasks. Spelling a ruff invocation out
+#  here is how the old repo ended up with three ruff versions and a `mise
+#  typecheck` that ran a different tool than pyproject configured.
+#
+#  Tiering: pre-commit stays under a couple of seconds by scoping to changed
+#  code; pre-push runs the full gate.
+
 pre-commit:
   parallel: true
   commands:
     lint:
       glob: "*.{py,pyi}"
-      run: uvx ruff check --fix {staged_files}
+      run: mise run lint
       stage_fixed: true
     format:
       glob: "*.{py,pyi}"
-      run: uvx ruff format {staged_files}
+      run: mise run format
       stage_fixed: true
+    # Only the tests that reach the code you changed. testmon keeps a dependency
+    # map in .testmondata, so this is the fast lane -- the full suite is on push.
+    test-fast:
+      glob: "*.{py,pyi}"
+      run: mise run test-fast
+
+pre-push:
+  parallel: false
+  commands:
+    check:
+      run: mise run check
 
 commit-msg:
   commands:
     conventional:
       run: |
         msg=$(head -1 {1})
-        if ! echo "$msg" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?: .+'; then
+        if echo "$msg" | grep -qE '^(Merge|Revert|fixup!|squash!)'; then exit 0; fi
+        if ! echo "$msg" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .+'; then
           echo "ERROR: Commit message must follow Conventional Commits format"
-          echo "  <type>(<scope>): <subject>"
+          echo "  <type>(<scope>)[!]: <subject>"
           echo "  Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
           echo "  Got: $msg"
           exit 1

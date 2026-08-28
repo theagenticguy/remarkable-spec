@@ -1,0 +1,54 @@
+[project]
+name = "rmspec-cli"
+version = "0.2.0"
+description = "rmspec command line interface and the dishka composition root"
+readme = "README.md"
+authors = [
+    { name = "Laith Al-Saadoon", email = "9553966+theagenticguy@users.noreply.github.com" }
+]
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "rmspec-app",
+    "rmspec-device",
+    "rmspec-domain",
+    "rmspec-export",
+    "rmspec-formats",
+    "rmspec-ocr",
+    "rmspec-persistence",
+    "rmspec-render",
+    "cyclopts>=4.6.0",
+    "dishka>=1.10.1",
+    "pydantic-settings>=2.13.1",
+    "rich>=14.3.3",
+]
+
+[project.optional-dependencies]
+push = [
+    "markdown>=3.10.2",
+    "weasyprint>=68.1",
+]
+
+[project.scripts]
+rmspec = "rmspec.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11.12,<0.12.0"]
+build-backend = "uv_build"
+
+# PEP 420 namespace: distribution rmspec-cli ships the rmspec.cli subpackage,
+# so all nine members coexist under one `rmspec` namespace with no
+# rmspec/__init__.py to fight over.
+[tool.uv.build-backend]
+module-name = "rmspec.cli"
+namespace = true
+
+[tool.uv.sources]
+rmspec-app = { workspace = true }
+rmspec-device = { workspace = true }
+rmspec-domain = { workspace = true }
+rmspec-export = { workspace = true }
+rmspec-formats = { workspace = true }
+rmspec-ocr = { workspace = true }
+rmspec-persistence = { workspace = true }
+rmspec-render = { workspace = true }

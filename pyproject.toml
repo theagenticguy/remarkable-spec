@@ -1,76 +1,135 @@
+#  remarkable-spec workspace root.
+#
+#  This file is NOT a distribution. It is the uv workspace root and the single
+#  home for tool configuration shared by every member package. Commands live in
+#  mise.toml and nowhere else; lefthook.yml and .github/workflows/ci.yml both
+#  call mise tasks so the three can never drift.
+
 [project]
-name = "remarkable-spec"
-version = "0.1.0"
-description = "Python library and CLI for reMarkable tablet file formats, device access, and rendering"
-readme = "README.md"
-authors = [
-    { name = "Laith Al-Saadoon", email = "9553966+theagenticguy@users.noreply.github.com" }
-]
-license = "MIT"
-requires-python = ">=3.12"
-dependencies = [
-    "pydantic>=2.10.0",
-    "rmscene>=0.7.0,<0.8.0",
-    "cyclopts>=3.0.0",
-    "rich>=13.0.0",
-    "pydantic-settings>=2.13.1",
-    "pymupdf>=1.24.0",
-]
+name = "remarkable-spec-workspace"
+version = "0.2.0"
+description = "Workspace root for remarkable-spec. Not published."
+requires-python = ">=3.13"
+dependencies = []
 
-[project.scripts]
-rmspec = "remarkable_spec.cli:app"
+[tool.uv]
+package = false
 
-[project.optional-dependencies]
-render = [
-    "cairocffi>=1.7.0",
-    "cairosvg>=2.7.0",
-    "pillow>=10.0.0",
-]
-device = [
-    "paramiko>=3.4.0",
-    "httpx>=0.27.0",
-]
-push = [
-    "weasyprint>=62.0",
-    "markdown>=3.6",
-]
-aws = [
-    "boto3>=1.42.59",
-]
-all = [
-    "remarkable-spec[render,device,ocr,push,aws]",
-]
-ocr = [
-    "pyobjc-framework-quartz>=12.1",
-    "pyobjc-framework-vision>=12.1",
-]
+[tool.uv.workspace]
+members = ["packages/*"]
 
+# Exact pins, not floors. Every gate runs through `uv run`, so mise, lefthook and
+# CI resolve byte-identical tool versions. ty is 0.0.x -- a floor would let a
+# patch release change what "the type gate" means between two machines.
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
-    "ruff>=0.8",
-    "pyright>=1.1",
+    "ruff==0.16.5",
+    "ty==0.0.66",
+    "pytest==9.0.2",
+    "pytest-cov==7.1.0",
+    "pytest-xdist==3.8.0",
+    "pytest-testmon==2.2.0",
+    "pytest-randomly==4.1.0",
+    "hypothesis==6.165.10",
+    "syrupy==6.0.0",
+    "diff-cover==10.5.1",
 ]
 
-[build-system]
-requires = ["uv_build>=0.10.7,<0.11.0"]
-build-backend = "uv_build"
+# ─────────────────────────────── ruff ───────────────────────────────
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 99
+src = ["packages/*/src", "tests"]
+# The legacy single-distribution tree. It is being emptied into packages/ across
+# steps 2-6 of the restructure and deleted at the end, so linting it would report
+# 626 findings against code with a scheduled deletion date. The new tree under
+# packages/ and tests/ is linted at full strength, and
+# tests/architecture/ asserts that nothing new lands in src/.
+# ruff 0.16 formats Python code blocks embedded in Markdown. The docs/ tree is a
+# generated artifact whose "Shape: verbatim from path:LOC" blocks are validated by
+# string-equality against those exact source lines -- letting the formatter
+# de-indent them silently breaks the verbatim claim. docs/ has its own gate
+# (the citation validator), so ruff stays out of it entirely.
+extend-exclude = ["src/remarkable_spec", "docs"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+select = ["ALL"]
 ignore = [
-    "RUF022",  # __all__ sorted — we group by category instead
-    "N806",    # Vision/Quartz are module-level imports, not variables
+    # Formatter owns these; enabling them fights `ruff format`.
+    "COM812",  # missing trailing comma
+    "ISC001",  # implicitly concatenated string on one line
+    # Docstrings: we require them on public API (D1xx stay on) but not on every
+    # dunder, nested function, or __init__.
+    "D105",    # undocumented magic method
+    "D107",    # undocumented __init__ -- documented on the class instead
+    "D203",    # 1 blank line before class docstring (conflicts with D211)
+    "D213",    # multi-line summary on second line (conflicts with D212)
+    # We target one Python version and pin it in five places; a __future__
+    # import is still wanted for cheap annotations, so keep FA but drop the
+    # rule that objects to it.
+    "TD002",   # missing author in TODO -- this repo has no TODOs by policy
+    "TD003",   # missing issue link in TODO
+    "FIX002",  # line contains TODO
+    # Conflicts with the deliberate design: use cases take many collaborators
+    # via DI, which reads as "too many arguments" to a linter with no DI model.
+    "PLR0913", # too many arguments
+    # A per-file copyright header on 60+ files, in a repo with a LICENSE at the
+    # root and one author. Pure noise.
+    "CPY001",  # missing copyright notice
 ]
 
-[tool.pyright]
-pythonVersion = "3.12"
-typeCheckingMode = "standard"
+[tool.ruff.lint.per-file-ignores]
+# Tests may assert, use magic values, and touch private members of the unit
+# under test. They may also import sqlite3 to build fixtures for the
+# persistence contract tests.
+"tests/**" = ["S101", "PLR2004", "SLF001", "TID251", "D100", "D103", "D104", "ANN201", "INP001"]
+"packages/*/tests/**" = ["S101", "PLR2004", "SLF001", "TID251", "D100", "D103", "D104", "ANN201", "INP001"]
+# The one package allowed to speak SQL.
+"packages/rmspec-persistence/**" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+# The lint-level restatement of "no direct querying of DBs from application
+# layers". sqlite3 is unimportable everywhere except rmspec-persistence and
+# tests, both un-banned above.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"sqlite3".msg = "Go through a repository port from rmspec.domain.ports. Only rmspec-persistence may import sqlite3."
+"boto3".msg = "Go through LlmPort or OcrPort. Only rmspec-ocr may import boto3."
+"paramiko".msg = "Go through DevicePort. Only rmspec-device may import paramiko."
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.isort]
+known-first-party = ["rmspec"]
+
+# ─────────────────────────────── pytest ───────────────────────────────
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-v --tb=short"
+testpaths = ["tests", "packages"]
+addopts = "--strict-markers --strict-config -ra"
+markers = [
+    "hardware: requires an attached reMarkable tablet; deselected by default",
+    "slow: excluded from the pre-commit fast lane",
+]
+# Hardware tests never run unless explicitly selected -- they need the tablet.
+# Nothing in the default run may touch the network, AWS, or the device.
+filterwarnings = ["error"]
+
+# ─────────────────────────────── coverage ───────────────────────────────
+
+[tool.coverage.run]
+branch = true
+source = ["packages"]
+omit = ["*/tests/*", "*/__main__.py"]
+relative_files = true
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",           # Protocol method bodies
+    "if __name__ == .__main__.:",
+]

@@ -1,0 +1,36 @@
+[project]
+name = "rmspec-ocr"
+version = "0.2.0"
+description = "OCR and LLM adapters: Apple Vision, AWS Textract, Bedrock"
+readme = "README.md"
+authors = [
+    { name = "Laith Al-Saadoon", email = "9553966+theagenticguy@users.noreply.github.com" }
+]
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "rmspec-domain",
+    "boto3>=1.42.59",
+]
+
+[project.optional-dependencies]
+# Apple Vision is macOS-only. Without the marker, `uv sync --all-extras`
+# fails outright on a Linux CI runner.
+vision = [
+    "pyobjc-framework-quartz>=12.1; sys_platform == 'darwin'",
+    "pyobjc-framework-vision>=12.1; sys_platform == 'darwin'",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.12,<0.12.0"]
+build-backend = "uv_build"
+
+# PEP 420 namespace: distribution rmspec-ocr ships the rmspec.ocr subpackage,
+# so all nine members coexist under one `rmspec` namespace with no
+# rmspec/__init__.py to fight over.
+[tool.uv.build-backend]
+module-name = "rmspec.ocr"
+namespace = true
+
+[tool.uv.sources]
+rmspec-domain = { workspace = true }

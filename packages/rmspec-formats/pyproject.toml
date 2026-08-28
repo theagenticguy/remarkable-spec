@@ -1,0 +1,28 @@
+[project]
+name = "rmspec-formats"
+version = "0.2.0"
+description = "Parsers for reMarkable on-disk formats: v6 .rm, .metadata, .content, .pagedata"
+readme = "README.md"
+authors = [
+    { name = "Laith Al-Saadoon", email = "9553966+theagenticguy@users.noreply.github.com" }
+]
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "rmspec-domain",
+    "rmscene>=0.7.0,<0.8.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.12,<0.12.0"]
+build-backend = "uv_build"
+
+# PEP 420 namespace: distribution rmspec-formats ships the rmspec.formats subpackage,
+# so all nine members coexist under one `rmspec` namespace with no
+# rmspec/__init__.py to fight over.
+[tool.uv.build-backend]
+module-name = "rmspec.formats"
+namespace = true
+
+[tool.uv.sources]
+rmspec-domain = { workspace = true }

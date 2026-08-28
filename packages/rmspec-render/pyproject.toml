@@ -1,0 +1,27 @@
+[project]
+name = "rmspec-render"
+version = "0.2.0"
+description = "Pure stroke rendering: ten pen-physics models and SVG generation. No native deps"
+readme = "README.md"
+authors = [
+    { name = "Laith Al-Saadoon", email = "9553966+theagenticguy@users.noreply.github.com" }
+]
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "rmspec-domain",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.12,<0.12.0"]
+build-backend = "uv_build"
+
+# PEP 420 namespace: distribution rmspec-render ships the rmspec.render subpackage,
+# so all nine members coexist under one `rmspec` namespace with no
+# rmspec/__init__.py to fight over.
+[tool.uv.build-backend]
+module-name = "rmspec.render"
+namespace = true
+
+[tool.uv.sources]
+rmspec-domain = { workspace = true }

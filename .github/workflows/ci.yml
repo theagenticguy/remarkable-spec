@@ -1,0 +1,108 @@
+#  CI calls the same mise tasks lefthook calls locally. No command string is
+#  spelled out here -- if you need a new check, add it to mise.toml and both
+#  local hooks and CI pick it up. That is the only mechanism that keeps the three
+#  from drifting.
+#
+#  Deliberately absent: lefthook. It is a Go binary and a *local* hook runner
+#  only, so CI never installs it and this workflow never touches
+#  proxy.golang.org.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Fail rather than silently resolve a different version than the lockfile pins.
+  UV_FROZEN: "1"
+
+jobs:
+  check:
+    name: Gate (lint, format, types, arch, tests >=90%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # diff-cover needs the merge base to compute the changed line set.
+          fetch-depth: 0
+
+      # cairo and pango are the native libraries behind cairosvg/cairocffi and
+      # weasyprint. They are the only system packages this workspace needs, and
+      # only rmspec-export and the cli push extra use them.
+      - name: Install native libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0
+
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+
+      - name: Sync workspace
+        run: mise run install
+
+      # Printed so a reviewer can diff these against a local `mise run versions`
+      # -- the consistency claim is checkable, not asserted.
+      - name: Resolved tool versions
+        run: mise run versions
+
+      - name: Gate
+        run: mise run check
+
+      # New code may not dilute the ratio: total coverage >=90% is enforced by
+      # `mise run check`, and every changed line must be covered.
+      - name: Diff coverage
+        if: github.event_name == 'pull_request'
+        run: |
+          uv run diff-cover coverage.xml \
+            --compare-branch=origin/${{ github.base_ref }} \
+            --fail-under=100
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: warn
+
+  isolation:
+    name: Import isolation (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The claim under test: a pure package imports with none of the native or
+        # cloud dependencies installed. If rmspec-app can only be imported with
+        # cairo present, the ports are not doing their job.
+        package: [rmspec-domain, rmspec-app, rmspec-render, rmspec-persistence]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - name: Install only this package
+        run: uv sync --frozen --no-default-groups --package ${{ matrix.package }}
+      - name: Import it with nothing else present
+        run: |
+          module="rmspec.${PACKAGE#rmspec-}"
+          uv run --no-sync python -c "
+          import importlib, sys
+          importlib.import_module('${module}')
+          banned = {'cairocffi', 'cairosvg', 'PIL', 'fitz', 'boto3', 'paramiko', 'httpx', 'rmscene'}
+          leaked = banned & set(sys.modules)
+          if leaked:
+              raise SystemExit(f'{module} pulled in {sorted(leaked)}')
+          print(f'{module} imports clean')
+          "
+        env:
+          PACKAGE: ${{ matrix.package }}

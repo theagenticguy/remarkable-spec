@@ -1,0 +1,24 @@
+[project]
+name = "rmspec-domain"
+version = "0.2.0"
+description = "Pure domain model and ports for reMarkable file formats and devices"
+readme = "README.md"
+authors = [
+    { name = "Laith Al-Saadoon", email = "9553966+theagenticguy@users.noreply.github.com" }
+]
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.12.5",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.12,<0.12.0"]
+build-backend = "uv_build"
+
+# PEP 420 namespace: distribution rmspec-domain ships the rmspec.domain subpackage,
+# so all nine members coexist under one `rmspec` namespace with no
+# rmspec/__init__.py to fight over.
+[tool.uv.build-backend]
+module-name = "rmspec.domain"
+namespace = true

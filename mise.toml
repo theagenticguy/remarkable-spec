@@ -1,13 +1,76 @@
+#  The single source of truth for every command in this repository.
+#
+#  lefthook.yml and .github/workflows/ci.yml call `mise run <task>` and never
+#  spell a command out themselves. That is the mechanism, not a convention: it
+#  is why the three cannot drift the way `mise typecheck` and pyproject's old
+#  [tool.pyright] block did.
+#
+#  Every tool runs through `uv run`, so it resolves to the exact pin in the root
+#  pyproject's dev group -- never to whatever `uvx` happens to fetch.
+
 [tools]
-python = "3.12"
+python = "3.13"
 
 [env]
 _.python.venv = { path = ".venv", create = true }
 
-[tasks]
-install = "uv sync --all-extras"
-test = "uv run pytest"
-lint = "uvx ruff check src/ --fix"
-format = "uvx ruff format src/"
-typecheck = "uvx ty check src/"
-check = { depends = ["lint", "format", "typecheck"], description = "Run all checks" }
+[tasks.install]
+description = "Sync the workspace venv from the lockfile"
+run = "uv sync --all-packages --all-extras"
+
+[tasks.lint]
+description = "Ruff lint (autofix)"
+run = "uv run ruff check --fix ."
+
+[tasks.lint-check]
+description = "Ruff lint, no writes -- the CI form"
+run = "uv run ruff check ."
+
+[tasks.format]
+description = "Ruff format"
+run = "uv run ruff format ."
+
+[tasks.format-check]
+description = "Ruff format, no writes -- the CI form"
+run = "uv run ruff format --check ."
+
+[tasks.typecheck]
+description = "ty, strict: every rule an error, warnings fail too"
+run = "uv run ty check --error-on-warning"
+
+[tasks.arch]
+description = "Architecture invariants: import direction, port purity, secret redaction"
+run = "uv run pytest tests/architecture -q"
+
+[tasks.test-fast]
+description = "Only tests reaching changed code (testmon). The pre-commit lane."
+run = "uv run pytest --testmon -q -m 'not hardware'"
+
+[tasks.test]
+description = "Full suite, parallel, with a coverage report"
+run = "uv run pytest -n auto -m 'not hardware' --cov --cov-report=term-missing"
+
+[tasks.test-cov]
+description = "Full suite with the >=90% gate. The definition of done."
+run = "uv run pytest -n auto -m 'not hardware' --cov --cov-report=xml --cov-report=term-missing --cov-fail-under=90"
+
+[tasks.test-hardware]
+description = "Tests that need the tablet attached. Never runs in CI."
+run = "uv run pytest -m hardware -q"
+
+[tasks.spec-verify]
+description = "Re-probe the attached device and diff against the committed spec"
+run = "uv run rmspec-dev spec verify"
+
+[tasks.check]
+description = "Everything that must pass before a push"
+depends = ["lint-check", "format-check", "typecheck", "arch", "test-cov"]
+
+[tasks.versions]
+description = "Print resolved tool versions -- used to prove local and CI agree"
+run = """
+uv run python -V
+uv run ruff --version
+uv run ty --version
+uv run pytest --version
+"""

@@ -1,0 +1,29 @@
+[project]
+name = "rmspec-device"
+version = "0.2.0"
+description = "reMarkable device adapters: USB web API, SSH, and the read-only spec probe harness"
+readme = "README.md"
+authors = [
+    { name = "Laith Al-Saadoon", email = "9553966+theagenticguy@users.noreply.github.com" }
+]
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "rmspec-domain",
+    "httpx>=0.28.1",
+    "paramiko>=4.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.12,<0.12.0"]
+build-backend = "uv_build"
+
+# PEP 420 namespace: distribution rmspec-device ships the rmspec.device subpackage,
+# so all nine members coexist under one `rmspec` namespace with no
+# rmspec/__init__.py to fight over.
+[tool.uv.build-backend]
+module-name = "rmspec.device"
+namespace = true
+
+[tool.uv.sources]
+rmspec-domain = { workspace = true }
