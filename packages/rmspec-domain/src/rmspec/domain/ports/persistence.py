@@ -43,6 +43,13 @@ Errors named in the ``Raises`` sections, all defined in ``rmspec.domain.errors``
     An audit append did not land. The operation it describes may well have
     succeeded, which is why it is a distinct, single, user-visible degradation.
 
+One builtin is also declared, and it is not a store error: ``ValueError`` for an
+argument the caller got wrong before any store was touched -- today only a
+non-positive ``limit``. It is spelled out because an unspecified bound is where
+two adapters provably diverge: a bare list slice and a store-side row limit do
+not agree about a negative number, and the caller cannot be asked to know which
+one it is talking to.
+
 Domain models these ports depend on, all defined in ``rmspec.domain.models``
 ---------------------------------------------------------------------------
 ``SyncedDocument`` and ``SyncedPage`` are the tracked mirror of one tablet
@@ -57,10 +64,15 @@ log returns, adding the store-assigned ``sequence``.
 
 What deliberately has no port
 -----------------------------
-Comparison is not retrieval, so hash diffing is a pure domain function --
-``diff_page_hashes(stored, current) -> PageDiff`` -- not a store method. Behind a
-port, the rule for what counts as changed would live in every adapter, and the
-double and SQLite could disagree with only a contract test between them.
+Change detection gets no port method. Comparison is not retrieval:
+:meth:`DocumentSyncStore.pages` hands back the recorded page mirror and the use
+case compares those fingerprints against the ones it just computed from the
+device. Behind a port, the rule for what counts as changed would live in every
+adapter, and the double and SQLite could disagree with only a contract test
+between them. No pure helper is named here either -- whichever function subtracts
+the two sequences lives with its caller -- because this module must not promise a
+domain symbol that does not exist, and because what the port genuinely owes the
+caller is the stored side of that comparison, not a claim about who subtracts.
 
 Full-text search gets no port and no FTS5 table either. Extracted text is a fact
 about a page, so it lives on the page in this store, written by
@@ -81,6 +93,11 @@ double and the adapter directly and calls them, so no test needs ``isinstance``.
 
 Legacy surface that does not get a port
 ---------------------------------------
+``get_pages`` *is* ported, as :meth:`DocumentSyncStore.pages`. Without it the page
+mirror would be write-only: a pull could then detect a changed page only by
+re-reading and re-hashing every page's scene bytes, or by opening the database
+above the adapter layer, which is the defect this module exists to close.
+
 ``get_page``, ``get_all_ocr``, ``find_changed_pages``, ``put_ocr``, ``get_ocr``
 and ``migrate_ocr_sidecars`` have zero callers and are deleted, not ported --
 about a third of ``sync/db.py``. ``migrate_ocr_sidecars`` also cannot ever have
@@ -127,9 +144,13 @@ class DocumentSyncStore(Protocol):
     double rather than a second product adapter -- there is one single-user
     ``~/.remarkable-spec/sync.db`` and no second store is planned, so this port
     is justified by testability and by the ban on ``sqlite3`` above the adapter
-    layer, not by hypothetical swappability. The double keeps two dicts keyed by
-    document uuid and offers ``seed_unreadable`` so
-    ``StoredRecordUnreadableError`` is reachable in memory.
+    layer, not by hypothetical swappability. The double keeps three dicts keyed by
+    document uuid -- documents, pages, page text -- and offers
+    ``seed_unreadable(record_kind, doc_uuid)`` with one kind per reader, so
+    ``StoredRecordUnreadableError`` is reachable in memory for
+    :meth:`get_document`, :meth:`pages` and :meth:`page_texts` independently. A
+    single seam would make a ``PageText`` failure unreachable without also
+    poisoning the ``SyncedDocument`` the same test needs to read.
     """
 
     def record_document(
@@ -147,13 +168,21 @@ class DocumentSyncStore(Protocol):
         Recording is idempotent and replaces the document's page set, so
         replaying an interrupted pull converges.
 
+        Replacing the page set also discards recorded text for every page uuid the
+        new set omits. Text is a fact about a page, so it cannot outlive the page
+        it describes; stating it here is what stops a cascading relational schema
+        and a double holding two independent dicts from both passing while
+        disagreeing about whether :meth:`page_texts` still returns the departed
+        page. Text for a page uuid that survives the replacement is kept, even if
+        its ``page_index`` moved.
+
         Parameters
         ----------
         document
             The document to record, keyed by its uuid.
         pages
             The document's complete page set. Passing an empty sequence records
-            a document with no pages.
+            a document with no pages and discards all of its recorded text.
 
         Raises
         ------
@@ -209,6 +238,44 @@ class DocumentSyncStore(Protocol):
         """
         ...
 
+    def pages(self, doc_uuid: str, /) -> list[SyncedPage]:
+        """Return the recorded pages of one document, ordered by page index.
+
+        The read half of :meth:`record_document`. It exists so that
+        ``SyncedPage.rm_hash`` -- the fingerprint whose comparison is the whole
+        point of the mirror -- can actually be compared: the use case reads the
+        recorded pages here, computes the current fingerprints from the device, and
+        subtracts the two itself. Without this method the stored fingerprints are
+        write-only, and page-level change detection has to re-hash every page's
+        scene bytes on every pull or reach past the adapter layer into the
+        database.
+
+        The order is ``page_index`` ascending, tie-broken by page uuid, so it is
+        total and matches :meth:`page_texts`.
+
+        Parameters
+        ----------
+        doc_uuid
+            Uuid of the document whose recorded pages are wanted.
+
+        Returns
+        -------
+        list[SyncedPage]
+            The recorded pages in contract order; empty when the document is
+            untracked or was recorded with no pages. The empty list does not
+            distinguish those two cases, and it does not need to --
+            :meth:`get_document` answers that, and a caller that needs both facts
+            wants both calls rather than a sentinel from one.
+
+        Raises
+        ------
+        StoreUnavailableError
+            The store cannot be read.
+        StoredRecordUnreadableError
+            A stored payload cannot be reconstructed as a ``SyncedPage``.
+        """
+        ...
+
     def forget_document(self, doc_uuid: str, /) -> None:
         """Forget a document, its pages, and its page text.
 
@@ -235,9 +302,24 @@ class DocumentSyncStore(Protocol):
         Text arrives after the page does -- OCR runs as its own command, long
         after the pull that recorded the page -- so it is written per page rather
         than folded into :meth:`record_document`, which would have to rewrite the
-        whole page set to store one page's text. Keyed by the page identity
-        carried in ``page_text``, so re-running OCR overwrites rather than
-        accumulating.
+        whole page set to store one page's text.
+
+        The key is ``(page_text.doc_uuid, page_text.page_uuid)`` and nothing else;
+        ``page_index`` is payload. Re-running OCR therefore overwrites rather than
+        accumulating, and a page that moved within its document keeps the one text
+        row it has. Spelling the key out is what stops a double keying on the pair
+        and an adapter keying on the triple from both passing the same suite while
+        one of them grows a second row per page.
+
+        Text whose ``page_uuid`` is not in the document's recorded page set is not
+        stored, and the call still succeeds. An orphaned text row is not a
+        representable state -- see :meth:`record_document` -- and making the write
+        a no-op rather than an error is what keeps this reachable in the double: an
+        adapter enforcing the relationship in its schema could only report the
+        violation as ``StoreUnavailableError``, which is a lie about a store that
+        is working fine. The cost is explicit: text extracted for a page the mirror
+        no longer has is discarded, so a caller that cares reads :meth:`pages`
+        first.
 
         Parameters
         ----------
@@ -260,6 +342,11 @@ class DocumentSyncStore(Protocol):
         which is what keeps a query language out of this port and what lets
         search read text whose provenance no longer matches any current cache
         key -- a cache is an exact-key lookup and must never double as a browse.
+
+        Every returned entry names a page in the document's current recorded page
+        set: text is dropped when its page departs, so there is nothing orphaned to
+        filter and no need for the caller to intersect this result with
+        :meth:`pages`.
 
         Parameters
         ----------
@@ -314,12 +401,27 @@ class OcrCache(Protocol):
     the model id and DPI as non-key columns, which made exactly that stale hit
     representable.
 
-    Both methods are total: neither raises. A read fault is a miss, a write fault
-    is dropped after the adapter logs it, and a cache that cannot be opened at
-    all fails when it is constructed in the ``Scope.APP`` provider. That is
+    All three methods are total: none raises. A read fault is a miss, a write
+    fault is dropped after the adapter logs it, and a cache that cannot be opened
+    at all fails when it is constructed in the ``Scope.APP`` provider. That is
     sound because a miss only costs a recomputation, and it means the error
     parity rule -- every declared error must be raisable by the double -- holds
     trivially, with no unreachable ``except`` branch in the application layer.
+
+    A hit can be a partial page, and says so. An ``OcrArtifact`` carries
+    ``truncated``, so a completion the model cut short is stored with that fact
+    attached and :meth:`get` returns it unchanged rather than dropping it: the
+    caller re-decides from the flag exactly as it decided on the fresh path, and
+    the paid output is still there for a run that accepts it. Dropping truncated
+    artifacts at :meth:`put` instead would make ``truncated`` unrepresentable in
+    the store and re-pay the recognizers on every run of a page that will truncate
+    again. What the port does guarantee is that the flag survives the round trip;
+    a caller that ignores it gets a half page, and no key can protect it from
+    that.
+
+    Lookup happens after rendering. ``key.raster_digest`` is an input, so the page
+    must already be rendered and rasterized before a key exists: this cache saves
+    the recognizer and model calls, never the render.
 
     A separate Protocol from :class:`DiagramCache` rather than one generic
     ``ArtifactCache[K, V]``: two named ports are separately bindable, separately
@@ -335,7 +437,10 @@ class OcrCache(Protocol):
     ``NullOcrCache``, which makes ``--no-cache`` a binding rather than an ``if``
     inside a use case; ``InMemoryOcrCache`` in ``rmspec-persistence.testing``,
     a dict keyed by digest, contract-exact because the port declares no error it
-    cannot produce.
+    cannot produce. The double takes ``fail_reads`` and ``fail_writes`` flags and
+    counts its calls, because totality is otherwise unassertable: through this
+    port a swallowed fault and a genuine miss are the same ``None``, so only a
+    double that can be told to fault proves the swallow happened at all.
     """
 
     def get(self, key: OcrCacheKey, /) -> OcrArtifact | None:
@@ -349,14 +454,20 @@ class OcrCache(Protocol):
         Returns
         -------
         OcrArtifact | None
-            The cached artifact, or ``None`` on a miss or any read fault.
+            The cached artifact, or ``None`` on a miss or any read fault. A
+            returned artifact may have ``truncated`` set; that is a hit, not a
+            fault, and the caller decides whether to use it or recompute.
         """
         ...
 
     def put(self, key: OcrCacheKey, artifact: OcrArtifact, /) -> None:
         """Store an artifact under this key, overwriting any earlier entry.
 
-        Total and idempotent: storing the same key twice is not a conflict.
+        Total and idempotent: storing the same key twice is not a conflict, and a
+        write fault is swallowed after the adapter logs it rather than raised, so a
+        full disk costs the next run a recomputation instead of failing the command
+        that just did the work. Spelling the swallow out here is what keeps a
+        relational adapter and the double answering the same way.
 
         Parameters
         ----------
@@ -364,7 +475,38 @@ class OcrCache(Protocol):
             The complete cache key, stored alongside the artifact so an entry
             can never exist without the full provenance that produced it.
         artifact
-            The OCR result to cache.
+            The OCR result to cache. A truncated result is stored, with its
+            ``truncated`` flag, rather than silently discarded.
+        """
+        ...
+
+    def superseded(self, key: OcrCacheKey, /) -> OcrCacheKey | None:
+        """Return a stored key for the same page under other inputs, or ``None``.
+
+        A miss says "recompute"; this says why. The returned key has the same
+        ``page_hash`` as ``key`` and a different ``digest``, which means the page
+        itself did not change and something upstream of it did -- prompt, model,
+        renderer, DPI, recognizer set. It is the only way a caller can report
+        ``DegradationKind.CACHE_MISS_KEY_CHANGED`` rather than a bare miss, and
+        without it the key payload stored beside every artifact is write-only.
+
+        When several stored keys qualify, the one whose ``digest`` is greatest in
+        lexicographic order is returned. The order is arbitrary but declared, so
+        the double and the adapter cannot disagree. The result is diagnostic only:
+        it names provenance, never an artifact, so it can never become a fallback
+        that serves output produced under inputs the caller did not ask for.
+
+        Parameters
+        ----------
+        key
+            The key that missed. Only ``key.page_hash`` and ``key.digest`` are
+            used.
+
+        Returns
+        -------
+        OcrCacheKey | None
+            A stored key for the same page with a different digest; ``None`` when
+            there is none, when ``key`` itself is stored, or on any read fault.
         """
         ...
 
@@ -373,17 +515,32 @@ class DiagramCache(Protocol):
     """Memoize Mermaid diagram extraction under a fully-specified key.
 
     Same contract as :class:`OcrCache` -- exact ``key.digest`` lookup, no
-    fallback, both methods total -- over the diagram artifact type. See that
-    class for why the two are separate Protocols rather than one generic, and
-    why an unavailable cache fails at container composition instead of at a call
-    site.
+    fallback, all three methods total -- over the diagram artifact type. See that
+    class for why the two are separate Protocols rather than one generic, why an
+    unavailable cache fails at container composition instead of at a call site,
+    and why ``key.raster_digest`` means a lookup only ever saves the model call and
+    not the render.
+
+    One difference, and it is a precondition on the caller rather than a
+    difference in the methods: a ``DiagramArtifact`` has no ``truncated`` field,
+    so nothing on the hit path can tell a Mermaid body the model cut off at its
+    token limit from a complete one -- the non-empty check its validator runs
+    passes either way. The truncation is only knowable while the caller still
+    holds the ``VisionCompletion`` and its ``stop_reason``. So a truncated
+    extraction must not be stored: :meth:`put` is called only for a completion
+    that finished, and a partial diagram is reported and recomputed instead.
+    :class:`OcrCache` does not need this rule because its artifact carries the
+    flag and its reader can decide; here the alternative is a broken ``.mmd``
+    written from a hit, with no warning, for the life of the cache.
 
     Notes
     -----
     Scope.APP. Adapters: ``SqliteDiagramCache`` (the same implementation as the
     OCR cache, bound to a different table), ``NullDiagramCache`` for
     ``--no-cache``, and ``InMemoryDiagramCache`` in
-    ``rmspec-persistence.testing``.
+    ``rmspec-persistence.testing``, which takes the same ``fail_reads`` and
+    ``fail_writes`` seams as its OCR sibling so the swallowed-fault clauses below
+    are assertable rather than merely stated.
     """
 
     def get(self, key: DiagramCacheKey, /) -> DiagramArtifact | None:
@@ -397,21 +554,51 @@ class DiagramCache(Protocol):
         Returns
         -------
         DiagramArtifact | None
-            The cached artifact, or ``None`` on a miss or any read fault.
+            The cached artifact, or ``None`` on a miss or any read fault. A hit is
+            a complete extraction, because a truncated one is never stored.
         """
         ...
 
     def put(self, key: DiagramCacheKey, artifact: DiagramArtifact, /) -> None:
         """Store an artifact under this key, overwriting any earlier entry.
 
-        Total and idempotent: storing the same key twice is not a conflict.
+        Total and idempotent: storing the same key twice is not a conflict, and a
+        write fault is swallowed after the adapter logs it rather than raised, on
+        the same reasoning as :meth:`OcrCache.put`.
 
         Parameters
         ----------
         key
             The complete cache key, stored alongside the artifact.
         artifact
-            The diagram extraction to cache.
+            The diagram extraction to cache. It must come from a completion that
+            finished; see the class docstring for why a truncated extraction has
+            to be recomputed instead.
+        """
+        ...
+
+    def superseded(self, key: DiagramCacheKey, /) -> DiagramCacheKey | None:
+        """Return a stored key for the same page under other inputs, or ``None``.
+
+        Identical in meaning, ordering, and totality to
+        :meth:`OcrCache.superseded`: same ``page_hash``, different ``digest``,
+        greatest digest wins, diagnostic only. It is declared on both caches
+        because ``DegradationKind.CACHE_MISS_KEY_CHANGED`` is one member serving
+        both passes, and because the two ports are deliberately implemented by one
+        adapter class over two tables -- a method on only one of them would make
+        that claim false.
+
+        Parameters
+        ----------
+        key
+            The key that missed. Only ``key.page_hash`` and ``key.digest`` are
+            used.
+
+        Returns
+        -------
+        DiagramCacheKey | None
+            A stored key for the same page with a different digest; ``None`` when
+            there is none, when ``key`` itself is stored, or on any read fault.
         """
         ...
 
@@ -427,24 +614,43 @@ class SyncAuditLog(Protocol):
     operation would delete exactly the records worth keeping.
 
     Order is assigned by the store, not read off a clock. :meth:`append` returns
-    a strictly increasing sequence number and :meth:`recent` returns entries
-    carrying it, newest first. Wall-clock ordering was ambiguous three different
-    ways: entries written inside one pull share a timestamp, tests freeze the
-    clock, and the double, a file, and SQLite each broke the tie differently.
-    With a sequence, the contract test is ``recent()`` equals the appends
-    reversed, and it needs no clock at all.
+    the entry as it landed, carrying its sequence, and :meth:`recent` returns
+    those same values, newest first. Wall-clock ordering was ambiguous three
+    different ways: entries written inside one pull share a timestamp, tests
+    freeze the clock, and the double, a file, and SQLite each broke the tie
+    differently. With a sequence, the contract test is that ``recent()`` equals
+    what the appends returned, reversed, and it needs no clock at all.
+
+    What the sequence promises: it starts at 1, it strictly increases across
+    appends, and a value is never reused for the life of the store. What it does
+    not promise: contiguity. Gaps are allowed, so a retention pass may drop old
+    entries without renumbering, and no reader may treat ``sequence`` as a count
+    of what was ever written.
+
+    Nothing here prunes. An unbounded log is trimmed by the same persistence-local
+    maintenance that prunes the caches, constructed directly by the CLI, since
+    retention is not a use case; it must keep the no-reuse rule, which is why the
+    SQLite adapter allocates from a monotonic counter rather than from whatever
+    row identifier happens to be free.
 
     Notes
     -----
     Scope.APP. Adapters: ``SqliteSyncAuditLog``, which holds its own
     autocommit connection so it never contends with, or depends on, the store's
     writes; and ``InMemorySyncAuditLog`` in ``rmspec-persistence.testing``, a
-    list whose sequence is its length. The double is testing-only -- dry-run
-    paths get a null binding, not an audit log that silently discards history.
+    list that allocates one past the highest sequence it has ever handed out, and
+    offers ``seed_unreadable`` so ``StoredRecordUnreadableError`` is reachable in
+    memory. The double is testing-only -- dry-run paths get a null binding, not an
+    audit log that silently discards history.
     """
 
-    def append(self, entry: SyncAuditEntry, /) -> int:
-        """Append one entry and return the sequence number the store assigned.
+    def append(self, entry: SyncAuditEntry, /) -> RecordedSyncAuditEntry:
+        """Append one entry and return it as the store recorded it.
+
+        Returning the recorded entry rather than a bare sequence number means the
+        caller can echo exactly what landed, and the contract test compares
+        :meth:`recent` against these values instead of rebuilding what it expects
+        the log to have made of them.
 
         Parameters
         ----------
@@ -454,9 +660,9 @@ class SyncAuditLog(Protocol):
 
         Returns
         -------
-        int
-            The store-assigned sequence number: strictly increasing across
-            appends, starting at 1.
+        RecordedSyncAuditEntry
+            The appended entry with the store-assigned sequence: at least 1,
+            strictly greater than every sequence handed out before it.
 
         Raises
         ------
@@ -475,15 +681,21 @@ class SyncAuditLog(Protocol):
         a default here would be a display concern living in the domain. There is
         no document filter, because no command filters the history yet.
 
-        Unreadable stored entries are skipped by the adapter rather than raised
-        past this boundary; the count of skipped entries is reported through the
-        adapter's own diagnostics, so one damaged entry cannot make the whole
-        history unreadable.
+        An unreadable stored entry raises ``StoredRecordUnreadableError``, exactly
+        as it does for every other reader in this module. It is not skipped: the one
+        question a reader of an append-only log has to be able to answer is whether
+        the history it is holding is complete, and a silently short list cannot
+        answer it. Reporting the skip count through the adapter's own logger would
+        put the answer in the one place the application layer cannot read, which is
+        the guess-and-log that ``Degradation`` exists to replace -- and a
+        ``--strict`` run would then exit 0 over a partly destroyed log. Raising
+        keeps the damaged log loud and the readable prefix recoverable through a
+        smaller ``limit``.
 
         Parameters
         ----------
         limit
-            Maximum number of entries to return. Must be positive.
+            Maximum number of entries to return. Must be at least 1.
 
         Returns
         -------
@@ -492,7 +704,15 @@ class SyncAuditLog(Protocol):
 
         Raises
         ------
+        ValueError
+            ``limit`` is less than 1. Checked before the store is touched, because
+            a bare list slice and a store-side row limit disagree about a
+            non-positive bound: one drops the newest entry, another returns the
+            whole history.
         StoreUnavailableError
             The log cannot be read.
+        StoredRecordUnreadableError
+            A stored payload cannot be reconstructed as a
+            ``RecordedSyncAuditEntry``.
         """
         ...

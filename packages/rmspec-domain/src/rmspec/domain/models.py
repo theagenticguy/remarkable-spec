@@ -33,9 +33,16 @@ Not modelled here, on purpose
 - **Pen physics.** Widths and opacities are float arithmetic with one caller inside
   ``rmspec-render``; ``ports/render.py`` records why they get no port and no registry.
   :class:`PenType` is the wire enum and stops there.
-- **Wire spellings.** ``visibleName``, ``lastModified`` as a millisecond epoch, ``type`` as
-  ``"DocumentType"``: those, and the ``decode``-from-``bytes`` classmethods that read them,
-  stay in the formats adapter. The models are domain-facing.
+- **Scene wire spellings.** The v6 format's CRDT blocks, tagged items and sequence ids stay in
+  the formats adapter; what crosses into the domain is a :class:`Page` of :class:`Stroke`.
+  The *sidecar* spellings do live here, in exactly two places:
+  :meth:`DocumentMetadata.decode` and :meth:`DocumentLayout.decode` read ``visibleName``,
+  ``lastModified`` as a millisecond epoch and ``type`` as ``"DocumentType"``.
+  ``ports/formats.py`` declines a sidecar codec port on the grounds that this mapping needs
+  nothing but ``json`` and pydantic, both already legal here -- and one decoder in the domain
+  is the whole point: the legacy tree hand-mirrored the same field knowledge into
+  ``formats/metadata.py``, ``formats/content.py`` and two CLI bodies, which is how they came
+  to disagree.
 - **Errors.** They live in :mod:`rmspec.domain.errors` as one tree for the whole workspace.
   Nothing here imports them and nothing here raises one; a model refuses a bad value with
   ``ValueError`` from a validator, which the CLI maps once at its boundary.
@@ -44,7 +51,9 @@ Not modelled here, on purpose
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 from typing import Self
 
@@ -60,8 +69,10 @@ __all__ = [
     "Document",
     "DocumentId",
     "DocumentKind",
+    "DocumentLayout",
     "DocumentMetadata",
     "DocumentSummary",
+    "ExtraMetadata",
     "Layer",
     "OcrArtifact",
     "OcrCacheKey",
@@ -71,6 +82,7 @@ __all__ = [
     "PageDefect",
     "PageDefectCode",
     "PageId",
+    "PageOrientation",
     "PageText",
     "Palette",
     "PenColor",
@@ -88,6 +100,7 @@ __all__ = [
     "SyncedPage",
     "TextBlock",
     "TextProvenance",
+    "pen_from_wire",
 ]
 
 
@@ -102,6 +115,21 @@ _FIELD_SEPARATOR = b"\x1f"
 
 _ITEM_SEPARATOR = "\x1e"
 """Character separating the items of a component that is itself a sequence."""
+
+_MS_PER_SECOND = 1000
+"""Divisor turning the store's millisecond epoch into the seconds ``datetime`` wants."""
+
+_TRASH_PARENT = "trash"
+"""The value the store writes into ``parent`` for a trashed entry, in place of a folder."""
+
+_BOOLEAN_WORDS = {"true": True, "false": False}
+"""Spellings of a boolean this decoder accepts as text, since the store is not consistent."""
+
+_IDENTIFIER_PATTERN = r"^[0-9A-Za-z._-]+$"
+"""Characters a store identifier may use. No separator, so no identifier can traverse."""
+
+_IDENTIFIER_MAX_LENGTH = 64
+"""Longest identifier accepted. A uuid is 36; this leaves room without leaving a path."""
 
 
 def _digest(tag: bytes, parts: tuple[str, ...]) -> str:
@@ -129,6 +157,259 @@ def _digest(tag: bytes, parts: tuple[str, ...]) -> str:
     return hasher.hexdigest()
 
 
+# ──────────────────────── Sidecar json readers ────────────────────────
+#
+#  The narrowing readers the two ``decode`` classmethods are built from.
+#
+#  ``json.loads`` hands back ``Any``, and a model field is the wrong place to discover that a
+#  key held a list where a string belonged. Each reader below takes one untyped json value and
+#  returns one narrow domain value: a missing key (``None``) becomes the caller's stated
+#  default, a value of the wrong json type raises ``TypeError``, and a value of the right type
+#  that cannot be read raises ``ValueError``. That split is the same one ``int`` makes --
+#  ``int(None)`` is a ``TypeError`` and ``int("x")`` is a ``ValueError`` -- and it is what lets
+#  ``decode`` state both in one ``Raises`` section instead of leaking a pydantic
+#  ``ValidationError`` shaped by whichever field happened to be validated first.
+
+
+def _json_object(raw: bytes, /) -> dict[str, object]:
+    """Parse sidecar bytes into the members of one json object.
+
+    Parameters
+    ----------
+    raw
+        The sidecar's bytes, exactly as the store holds them.
+
+    Returns
+    -------
+    dict[str, object]
+        The object's members. Values stay untyped; the readers below narrow them.
+
+    Raises
+    ------
+    TypeError
+        If the payload is valid json that is not an object.
+    ValueError
+        If the payload is not valid json at all.
+    """
+    decoded: object = json.loads(raw)
+    if not isinstance(decoded, dict):
+        msg = f"expected a json object, got {type(decoded).__name__}"
+        raise TypeError(msg)
+    return {str(key): value for key, value in decoded.items()}
+
+
+def _string(value: object, /, *, default: str = "") -> str:
+    """Read a json string.
+
+    Parameters
+    ----------
+    value
+        The raw json value, or ``None`` when the key was absent.
+    default
+        What an absent key means.
+
+    Returns
+    -------
+    str
+        The string, or ``default``.
+
+    Raises
+    ------
+    TypeError
+        If the value is present and is not a json string.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value
+    msg = f"expected a json string, got {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _flag(value: object, /, *, default: bool = False) -> bool:
+    """Read a json boolean, tolerating the store's ``"true"`` spelling.
+
+    Parameters
+    ----------
+    value
+        The raw json value, or ``None`` when the key was absent.
+    default
+        What an absent key means.
+
+    Returns
+    -------
+    bool
+        The flag, or ``default``.
+
+    Raises
+    ------
+    TypeError
+        If the value is present and is neither a json boolean nor a boolean word.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        word = _BOOLEAN_WORDS.get(value.strip().lower())
+        if word is not None:
+            return word
+    msg = f"expected a json boolean, got {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _whole(value: object, /, *, default: int) -> int:
+    """Read a json integer, tolerating the store's quoted numbers.
+
+    Parameters
+    ----------
+    value
+        The raw json value, or ``None`` when the key was absent.
+    default
+        What an absent key means.
+
+    Returns
+    -------
+    int
+        The integer, or ``default``.
+
+    Raises
+    ------
+    TypeError
+        If the value is present and is not a json number or numeric string.
+    ValueError
+        If the value is a string that is not a number.
+    """
+    if value is None:
+        return default
+    if isinstance(value, int | float):
+        return int(value)
+    if isinstance(value, str):
+        return int(value.strip())
+    msg = f"expected a json integer, got {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _fraction(value: object, /, *, default: float) -> float:
+    """Read a json number as a float.
+
+    Parameters
+    ----------
+    value
+        The raw json value, or ``None`` when the key was absent.
+    default
+        What an absent key means.
+
+    Returns
+    -------
+    float
+        The number, or ``default``.
+
+    Raises
+    ------
+    TypeError
+        If the value is present and is not a json number or numeric string.
+    ValueError
+        If the value is a string that is not a number.
+    """
+    if value is None:
+        return default
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        return float(value.strip())
+    msg = f"expected a json number, got {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _moment(value: object, /) -> datetime | None:
+    """Read a millisecond epoch, which the store writes as a quoted number.
+
+    Parameters
+    ----------
+    value
+        The raw json value, or ``None`` when the key was absent.
+
+    Returns
+    -------
+    datetime | None
+        An aware UTC datetime, or ``None`` when the key was absent, null, or an empty string.
+        Zero is a real instant and is returned as one: the store writing ``"0"`` is different
+        from the store writing nothing.
+
+    Raises
+    ------
+    TypeError
+        If the value is present and is not a json number or numeric string.
+    ValueError
+        If the value is a string that is not a number.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        milliseconds = float(text)
+    elif isinstance(value, int | float):
+        milliseconds = float(value)
+    else:
+        msg = (
+            f"expected a millisecond epoch as a json string or number, got {type(value).__name__}"
+        )
+        raise TypeError(msg)
+    return datetime.fromtimestamp(milliseconds / _MS_PER_SECOND, tz=UTC)
+
+
+def _settings(value: object, /) -> dict[str, str]:
+    """Read the store's tool-settings object, which is opaque display data.
+
+    Every value is rendered with ``str`` rather than type-checked. These settings are
+    reMarkable-internal identifiers this workspace never branches on, so a firmware that writes
+    a number where it used to write a string should change what ``rmspec inspect content``
+    prints, not whether the document decodes.
+
+    Parameters
+    ----------
+    value
+        The raw json value, or ``None`` when the key was absent.
+
+    Returns
+    -------
+    dict[str, str]
+        The settings, or an empty mapping.
+
+    Raises
+    ------
+    TypeError
+        If the value is present and is not a json object.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return {str(key): str(item) for key, item in value.items()}
+    msg = f"expected a json object of tool settings, got {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _reject_dot_segment(uuid: str, /) -> None:
+    """Reject an identifier that is a filesystem dot segment rather than an identity.
+
+    Parameters
+    ----------
+    uuid
+        The identifier to check.
+
+    Raises
+    ------
+    ValueError
+        If every character is a dot -- ``"."``, ``".."``, and every longer run.
+    """
+    if set(uuid) <= {"."}:
+        msg = f"identifier {uuid!r} is a path segment, not an identity"
+        raise ValueError(msg)
+
+
 # ──────────────────────── Identity ────────────────────────
 #
 #  Document and page identity, as two types that cannot be swapped for one another.
@@ -144,6 +425,16 @@ def _digest(tag: bytes, parts: tuple[str, ...]) -> str:
 #  from the device no longer compares equal to the same identity read from a cache row. The
 #  domain therefore carries the identifier exactly as the store spelled it and never
 #  reformats it.
+#
+#  Opaque, but not unconstrained
+#  -----------------------------
+#  ``UUID`` parsing was also the legacy tree's de-facto sanitizer. A persistence adapter joins
+#  these identifiers into ``{doc}/{page}.rm``, so accepting ``".."`` or ``"a/b"`` as an identity
+#  would put path traversal in a value object. Both fields therefore carry a charset pattern, a
+#  length bound and a validator refusing dot segments -- enough that an identifier cannot name
+#  anything but a leaf, without pinning the domain to one identifier *format* the way ``UUID``
+#  did. ``DocumentMetadata.parent_uuid`` is deliberately *not* constrained this way: the store
+#  writes ``"trash"`` there, and a parent is compared and displayed, never joined into a path.
 
 
 class DocumentId(BaseModel, frozen=True, extra="forbid"):
@@ -153,11 +444,29 @@ class DocumentId(BaseModel, frozen=True, extra="forbid"):
     ``DocumentRepository`` double is a dict keyed by this type.
     """
 
-    uuid: str = Field(min_length=1)
-    """The document's identifier, verbatim as the store spelled it."""
+    uuid: str = Field(min_length=1, max_length=_IDENTIFIER_MAX_LENGTH, pattern=_IDENTIFIER_PATTERN)
+    """The document's identifier, verbatim as the store spelled it -- no separators, no dot
+    segments, so a store may join it into a path without sanitising it first."""
 
     def __str__(self) -> str:
         return self.uuid
+
+    @model_validator(mode="after")
+    def _check_not_a_dot_segment(self) -> Self:
+        """Reject an identifier made only of dots.
+
+        Returns
+        -------
+        DocumentId
+            The validated model.
+
+        Raises
+        ------
+        ValueError
+            If the identifier is ``"."``, ``".."``, or any longer run of dots.
+        """
+        _reject_dot_segment(self.uuid)
+        return self
 
 
 class PageId(BaseModel, frozen=True, extra="forbid"):
@@ -167,11 +476,29 @@ class PageId(BaseModel, frozen=True, extra="forbid"):
     different; the difference is which argument position each belongs in.
     """
 
-    uuid: str = Field(min_length=1)
-    """The page's identifier, verbatim as the store spelled it."""
+    uuid: str = Field(min_length=1, max_length=_IDENTIFIER_MAX_LENGTH, pattern=_IDENTIFIER_PATTERN)
+    """The page's identifier, verbatim as the store spelled it -- constrained exactly as
+    :attr:`DocumentId.uuid` is, and for the same reason."""
 
     def __str__(self) -> str:
         return self.uuid
+
+    @model_validator(mode="after")
+    def _check_not_a_dot_segment(self) -> Self:
+        """Reject an identifier made only of dots.
+
+        Returns
+        -------
+        PageId
+            The validated model.
+
+        Raises
+        ------
+        ValueError
+            If the identifier is ``"."``, ``".."``, or any longer run of dots.
+        """
+        _reject_dot_segment(self.uuid)
+        return self
 
 
 # ──────────────────────── Colour and palettes ────────────────────────
@@ -229,6 +556,15 @@ class Rgb(BaseModel, frozen=True, extra="forbid"):
     Constrained rather than merely annotated: a channel outside 0-255 is refused at
     construction, so no renderer has to clamp and no export has to explain a wrapped
     channel.
+
+    Obligation this puts on adapters
+    --------------------------------
+    The bounds are new -- the legacy ``RGB`` accepted ``r=300`` and rendered it as a malformed
+    eight-character hex string. Every field, default and unit is otherwise unchanged, so the
+    tightening is the whole delta and it is kept. An adapter that builds a colour from parsed
+    bytes or from user input therefore owes a clamp, or a mapping to a typed domain error:
+    letting pydantic's ``ValidationError`` escape mid-render turns one bad palette entry into a
+    stack trace rather than a message.
     """
 
     r: int = Field(ge=0, le=255)
@@ -465,6 +801,34 @@ _CANONICAL: dict[PenType, PenType] = {
     PenType.HIGHLIGHTER_2: PenType.HIGHLIGHTER_1,
 }
 
+#: Every wire tool id and the member it names, for the total lookup below.
+_WIRE_PENS: dict[int, PenType] = {member.value: member for member in PenType}
+
+
+def pen_from_wire(value: int, /) -> PenType | None:
+    """Return the pen a scene file's tool id names, or ``None`` when no member has that id.
+
+    The int-tolerant entry point the legacy ``PenType.is_eraser(6)`` and
+    ``PenType.is_highlighter(99)`` classmethods provided, as one total function rather than
+    three int-taking classmethods on the enum. Those are gone on purpose -- classification
+    belongs to a member, and ``PenType(99).is_highlighter`` cannot be reached -- but a codec
+    still meets raw bytes, and it must not have to catch ``ValueError`` from ``PenType(value)``
+    to find out whether it may construct a :class:`Stroke`. On ``None`` a codec substitutes a
+    known tool and records :attr:`PageDefectCode.UNKNOWN_PEN_SUBSTITUTED`, so an unknown wire id
+    is a defect on one page rather than a failed decode of the document.
+
+    Parameters
+    ----------
+    value
+        The tool id exactly as the scene file wrote it.
+
+    Returns
+    -------
+    PenType | None
+        The member with that id, or ``None`` when this domain does not know it.
+    """
+    return _WIRE_PENS.get(value)
+
 
 # ──────────────────────── Screen geometry ────────────────────────
 #
@@ -625,7 +989,17 @@ class Stroke(BaseModel, frozen=True, extra="forbid"):
     """One continuous mark: the tool, its colour and thickness, and its samples.
 
     A stroke with no points is legal and means a single tap. It is not the same thing as an
-    absent stroke, which is why ``pen_type`` and ``color`` are required even here.
+    absent stroke, which is why :attr:`pen` and :attr:`color` are required even here.
+
+    Renamed and narrowed from the legacy model, deliberately
+    -------------------------------------------------------
+    The field is :attr:`pen`, not ``pen_type``: its type is :class:`PenType`, so the suffix
+    restated the annotation. The legacy ``is_eraser`` and ``is_highlighter`` methods are gone
+    from here and live on :class:`PenType` instead -- one classification per tool rather than
+    one per stroke -- and :attr:`Stroke.pen.is_eraser <PenType.is_eraser>` reproduces the old
+    truth table for every one of the eighteen members. The model is also frozen where the legacy
+    one was mutable, and ``points`` is a tuple: nothing mutated a stroke in place, and a rendered
+    stroke that can be edited afterwards is a cache key that stops meaning anything.
     """
 
     pen: PenType
@@ -728,6 +1102,15 @@ class TextBlock(BaseModel, frozen=True, extra="forbid"):
     The tablet stores text as a CRDT sequence; this is its flattened reading, with paragraph
     breaks as newlines. Nothing above the formats adapter has a use for the CRDT structure,
     and carrying it would put a sync algorithm in the domain.
+
+    Obligation this puts on a codec
+    -------------------------------
+    :attr:`width` is constrained ``> 0`` where the legacy model accepted zero and negative
+    widths and drew nothing from them. The tightening is kept, so a codec that meets a scene
+    text item whose width is not positive must skip the item and record
+    :attr:`PageDefectCode.ITEM_DROPPED` on the page it is assembling. It must never let the
+    resulting ``ValidationError`` escape mid-decode: one unreadable text box is a defect on one
+    page, not a failed document.
     """
 
     pos_x: float
@@ -825,6 +1208,40 @@ class PageContent(BaseModel, frozen=True, extra="forbid"):
         """
         return all(layer.is_empty for layer in self.visible_layers)
 
+    @property
+    def bounding_box(self) -> tuple[float, float, float, float] | None:
+        """Return the extent of every stroke this page would draw.
+
+        The replacement for the legacy ``Layer.bounding_box``, aggregated one level up so the
+        render adapter's viewport crop and the export adapter's page fit read the same number
+        instead of each folding per-stroke boxes their own way. Two legacy defects are fixed
+        rather than carried: that method ignored layer visibility, and it folded in the
+        ``(0, 0, 0, 0)`` a point-less stroke used to return, which pinned every page's extent to
+        the origin. This reads :attr:`visible_layers` and skips strokes with no samples, which
+        :attr:`Stroke.bounding_box` now reports as ``None``.
+
+        Returns
+        -------
+        tuple[float, float, float, float] | None
+            ``(x_min, y_min, x_max, y_max)`` in screen units, or ``None`` when no visible stroke
+            has a sample. Text blocks are not folded in: how tall one draws depends on the font
+            the export adapter picks, so including them would make this a guess.
+        """
+        boxes = [
+            box
+            for layer in self.visible_layers
+            for stroke in layer.strokes
+            if (box := stroke.bounding_box) is not None
+        ]
+        if not boxes:
+            return None
+        return (
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        )
+
 
 class Page(BaseModel, frozen=True, extra="forbid"):
     """One page of a document, as the store was able to produce it.
@@ -843,7 +1260,23 @@ class Page(BaseModel, frozen=True, extra="forbid"):
     """Zero-based position in the document, which is how a caller names "page 3"."""
 
     template_name: str | None = None
-    """The background template the store recorded, or ``None`` when it recorded none."""
+    """The background template the store recorded, or ``None`` when it recorded none.
+
+    ``None`` is the *only* spelling of "no template". The legacy tree had two more -- ``Page``
+    defaulted to ``""`` while ``PageRef`` defaulted to ``"Blank"`` -- so a caller had three
+    values to test, and two of them were strings no store ever wrote. Here ``"Blank"`` means the
+    store really did record a template named ``Blank``."""
+
+    pdf_page_index: int | None = Field(default=None, ge=0)
+    """Zero-based page of the source pdf this page annotates, or ``None`` when the store's
+    redirection map named none.
+
+    The legacy ``PageRef.redirect``, restored because without it the degradation is the only
+    reachable path: ``errors.py`` declares ``PDF_PAGE_INDEX_FALLBACK`` for "no entry in the
+    redirection map, so the page's position was used", and a background reader with nothing but
+    :attr:`index` can never *not* report it. Typed ``int``, not the legacy ``str | None``:
+    firmware 3.x writes the ``cPages`` entry's ``redir`` as an object whose ``value`` is an
+    integer page index, so the legacy annotation could only ever read ``None`` or raise."""
 
     content: PageContent | None = None
     """The decoded page, or ``None`` when it could not be decoded or was not there."""
@@ -942,10 +1375,13 @@ class Page(BaseModel, frozen=True, extra="forbid"):
 #  would have forced either a second call or an index-to-uuid guess in the app layer.
 #
 #  Field naming is domain-facing, not wire-facing. The store writes ``visibleName``,
-#  ``lastModified`` as a millisecond epoch in a json string, and ``type`` as
-#  ``"DocumentType"``; those spellings and coercions stay inside the formats adapter, which is
-#  also where the ``decode`` classmethods over ``bytes`` live that ``ports/formats.py`` chose
-#  instead of a sidecar codec port.
+#  ``lastModified`` as a millisecond epoch in a json string, and ``type`` as ``"DocumentType"``;
+#  the models below are spelled for their readers instead, and :meth:`DocumentMetadata.decode`
+#  is the single place the two vocabularies meet. That classmethod is what ``ports/formats.py``
+#  chose in place of a sidecar codec port -- "a decode classmethod over bytes" -- and it is a
+#  domain concern rather than an adapter one for the reason the module docstring gives: a mapping
+#  that needs only ``json`` and pydantic, written once, cannot drift the way the legacy tree's
+#  four hand-mirrored copies of it did.
 
 
 class DocumentKind(StrEnum):
@@ -971,6 +1407,288 @@ class SourceKind(StrEnum):
     EPUB = "epub"
 
 
+class PageOrientation(StrEnum):
+    """Which way up the store says a document's pages are.
+
+    A closed enum rather than the legacy free ``str``, because a renderer must branch on it.
+    Landscape rendering is unimplemented in this workspace; carrying the fact as a string is how
+    it would have stayed unimplementable without re-plumbing a model field, since a value nothing
+    can exhaustively match is a value nobody writes a branch for.
+    """
+
+    PORTRAIT = "portrait"
+    LANDSCAPE = "landscape"
+
+
+class ExtraMetadata(BaseModel, frozen=True, extra="forbid"):
+    """The tool state the store recorded for a document, restored when it is reopened.
+
+    Read from the ``.content`` sidecar's ``extraMetadata`` object: which tool was last used,
+    which pen variant, and the full bag of per-tool sizes and colours. The keys and values are
+    reMarkable-internal identifiers such as ``"Fineliner"`` and ``"FinelinerV2Size"``, and this
+    workspace never branches on any of them -- ``rmspec inspect content`` prints them, which is
+    the whole reason the model survives the move to the domain.
+
+    ``dict``, not ``Mapping``
+    -------------------------
+    :attr:`tool_settings` would read better as a ``Mapping``, but a ``collections.abc`` import
+    used only in annotations is one ruff moves into a ``TYPE_CHECKING`` block, where pydantic can
+    no longer resolve it -- the same mechanical constraint the module docstring records for
+    cross-module model imports. ``dict`` on a frozen model is what :attr:`Palette.inks` does for
+    the same reason: the value is never mutated, and nothing hands one of these out to be edited.
+    """
+
+    last_tool: str = ""
+    """Internal name of the last tool used, e.g. ``"Fineliner"``. Empty when unrecorded."""
+
+    last_pen: str = ""
+    """Internal name of the last pen variant used. Empty when unrecorded."""
+
+    tool_settings: dict[str, str] = Field(default_factory=dict)
+    """Every setting the sidecar carried, verbatim. Opaque: displayed, never parsed."""
+
+    @classmethod
+    def from_json(cls, data: dict[str, str], /) -> Self:
+        """Read one ``extraMetadata`` object.
+
+        Parameters
+        ----------
+        data
+            The ``extraMetadata`` members of a ``.content`` sidecar, with every value already
+            rendered as text -- see the sidecar readers at the top of this module.
+
+        Returns
+        -------
+        ExtraMetadata
+            The tool state, with every unrecorded field at its default and the whole bag kept.
+        """
+        return cls(
+            last_tool=_string(data.get("LastTool")),
+            last_pen=_string(data.get("LastPen")),
+            tool_settings=dict(data),
+        )
+
+
+class DocumentLayout(BaseModel, frozen=True, extra="forbid"):
+    """How the store says a document should be laid out, plus the tool state it recorded.
+
+    The half of the legacy ``ContentInfo`` that was not structure. Its structural half folded
+    correctly into the models around it -- ``file_type`` became
+    :attr:`DocumentMetadata.source`, ``page_refs`` became :attr:`Document.pages` plus
+    :attr:`Page.template_name`, ``page_count`` became :attr:`DocumentSummary.page_count` -- and
+    these fields are what was left with nowhere to go, every one of them printed by
+    ``rmspec inspect content``.
+
+    Closed where the domain branches, opaque where it echoes
+    -------------------------------------------------------
+    :attr:`orientation` is a closed enum because rendering must branch on it. The rest stay
+    strings and numbers: nothing in this workspace branches on a zoom mode or a font name, so
+    closing them would turn a firmware that adds one into a decode failure instead of a slightly
+    stale line of output. For the same reason :attr:`text_scale` and :attr:`custom_zoom_scale`
+    are unconstrained where most fields in this module are bounded -- refusing to open a document
+    because a cosmetic scale is odd trades a real capability for a validation that buys nothing.
+    """
+
+    format_version: int = Field(default=2, ge=0)
+    """The sidecar's own format version. ``2`` is current for firmware 3.x."""
+
+    orientation: PageOrientation = PageOrientation.PORTRAIT
+    """Which way up the pages are."""
+
+    margins: int = Field(default=125, ge=0)
+    """Margin in screen units used when reflowing pdf or epub text."""
+
+    font_name: str = ""
+    """Font the tablet renders epub text with. Empty means the tablet's default."""
+
+    line_height: int = -1
+    """Line height for reflowed text. ``-1`` is the store's spelling of "automatic", which is
+    why this field is not bounded below."""
+
+    text_scale: float = 1.0
+    """Scale factor for reflowed epub text."""
+
+    text_alignment: str = "justify"
+    """Alignment for reflowed epub text, e.g. ``"justify"``. Opaque: displayed, never matched."""
+
+    zoom_mode: str = "bestFit"
+    """Pdf zoom mode, e.g. ``"bestFit"``. Opaque: displayed, never matched."""
+
+    custom_zoom_scale: float = 1.0
+    """Scale used when :attr:`zoom_mode` is the store's custom setting."""
+
+    extra_metadata: ExtraMetadata = Field(default_factory=ExtraMetadata)
+    """The tool state the store recorded for this document."""
+
+    @classmethod
+    def decode(cls, raw: bytes, /) -> Self:
+        """Read the layout facts out of one ``.content`` sidecar.
+
+        Parameters
+        ----------
+        raw
+            The sidecar's bytes, exactly as the store holds them.
+
+        Returns
+        -------
+        DocumentLayout
+            The layout, with every unrecorded field at its default.
+
+        Raises
+        ------
+        TypeError
+            If the payload is not a json object, or a field carries a json type this decoder
+            does not accept.
+        ValueError
+            If the payload is not valid json, a numeric field is not a number, or
+            ``orientation`` is a spelling this domain does not know.
+        """
+        return cls.from_json(_json_object(raw))
+
+    @classmethod
+    def from_json(cls, data: dict[str, object], /) -> Self:
+        """Read the layout facts out of an already-parsed ``.content`` object.
+
+        Present so :meth:`DocumentMetadata.decode` can read one sidecar once and hand the same
+        members to both readers, instead of parsing the payload twice.
+
+        Parameters
+        ----------
+        data
+            The members of a ``.content`` sidecar.
+
+        Returns
+        -------
+        DocumentLayout
+            The layout, with every unrecorded field at its default.
+
+        Raises
+        ------
+        TypeError
+            If a field carries a json type this decoder does not accept.
+        ValueError
+            If a numeric field is not a number, or ``orientation`` is a spelling this domain
+            does not know.
+        """
+        settings = _settings(data.get("extraMetadata"))
+        return cls(
+            format_version=_whole(data.get("formatVersion"), default=2),
+            orientation=_orientation_from_wire(data.get("orientation")),
+            margins=_whole(data.get("margins"), default=125),
+            font_name=_string(data.get("fontName")),
+            line_height=_whole(data.get("lineHeight"), default=-1),
+            text_scale=_fraction(data.get("textScale"), default=1.0),
+            text_alignment=_string(data.get("textAlignment"), default="justify"),
+            zoom_mode=_string(data.get("zoomMode"), default="bestFit"),
+            custom_zoom_scale=_fraction(data.get("customZoomScale"), default=1.0),
+            extra_metadata=ExtraMetadata.from_json(settings),
+        )
+
+
+#: The store's ``type`` spellings, and the kind each one means.
+_WIRE_KINDS: dict[str, DocumentKind] = {
+    "DocumentType": DocumentKind.DOCUMENT,
+    "CollectionType": DocumentKind.COLLECTION,
+}
+
+#: What an absent ``type`` means, matching the legacy reader's default.
+_WIRE_KIND_DEFAULT = "DocumentType"
+
+#: The store's ``fileType`` spellings, and the source each one means.
+_WIRE_SOURCES: dict[str, SourceKind] = {member.value: member for member in SourceKind}
+
+#: The store's ``orientation`` spellings, and the orientation each one means.
+_WIRE_ORIENTATIONS: dict[str, PageOrientation] = {
+    member.value: member for member in PageOrientation
+}
+
+
+def _kind_from_wire(value: object, /) -> DocumentKind:
+    """Map the store's ``type`` field onto :class:`DocumentKind`.
+
+    Parameters
+    ----------
+    value
+        The raw ``type`` value, or ``None`` when the key was absent.
+
+    Returns
+    -------
+    DocumentKind
+        The kind that spelling means, or :attr:`DocumentKind.DOCUMENT` when absent.
+
+    Raises
+    ------
+    TypeError
+        If the value is present and is not a json string.
+    ValueError
+        If the spelling is neither of the two the store writes.
+    """
+    spelling = _string(value, default=_WIRE_KIND_DEFAULT)
+    kind = _WIRE_KINDS.get(spelling)
+    if kind is None:
+        msg = f"unknown document type {spelling!r}; expected one of {sorted(_WIRE_KINDS)}"
+        raise ValueError(msg)
+    return kind
+
+
+def _source_from_wire(value: object, /) -> SourceKind | None:
+    """Map the store's ``fileType`` field onto :class:`SourceKind`.
+
+    Parameters
+    ----------
+    value
+        The raw ``fileType`` value, or ``None`` when the key was absent.
+
+    Returns
+    -------
+    SourceKind | None
+        The source that spelling means, or ``None`` when the sidecar did not say.
+
+    Raises
+    ------
+    TypeError
+        If the value is present and is not a json string.
+    ValueError
+        If the spelling is none of the three the store writes.
+    """
+    if value is None:
+        return None
+    spelling = _string(value)
+    source = _WIRE_SOURCES.get(spelling)
+    if source is None:
+        msg = f"unknown file type {spelling!r}; expected one of {sorted(_WIRE_SOURCES)}"
+        raise ValueError(msg)
+    return source
+
+
+def _orientation_from_wire(value: object, /) -> PageOrientation:
+    """Map the store's ``orientation`` field onto :class:`PageOrientation`.
+
+    Parameters
+    ----------
+    value
+        The raw ``orientation`` value, or ``None`` when the key was absent.
+
+    Returns
+    -------
+    PageOrientation
+        The orientation that spelling means, or portrait when absent.
+
+    Raises
+    ------
+    TypeError
+        If the value is present and is not a json string.
+    ValueError
+        If the spelling is neither of the two the store writes.
+    """
+    spelling = _string(value, default=PageOrientation.PORTRAIT.value)
+    orientation = _WIRE_ORIENTATIONS.get(spelling)
+    if orientation is None:
+        msg = f"unknown orientation {spelling!r}; expected one of {sorted(_WIRE_ORIENTATIONS)}"
+        raise ValueError(msg)
+    return orientation
+
+
 class DocumentMetadata(BaseModel, frozen=True, extra="forbid"):
     """What the tablet UI knows about a document.
 
@@ -978,6 +1696,15 @@ class DocumentMetadata(BaseModel, frozen=True, extra="forbid"):
     datetime compares wrongly against anything read from another store, and the legacy tree
     carried the epoch integer as far as the sync database, where two rows written by two
     different code paths meant two different things.
+
+    One sentinel replaced by two fields
+    -----------------------------------
+    The legacy ``parent`` was one overloaded string: ``""`` meant the root, a uuid meant a
+    folder, and ``"trash"`` meant trashed -- while a separate ``deleted`` flag meant trashed
+    too. Here :attr:`parent_uuid` is a folder or ``None`` and :attr:`trashed` is a fact of its
+    own, defined as the *or* of both legacy spellings. That definition lives here, in the field
+    docstring and in :meth:`decode`, precisely so no adapter has to choose one of them and no
+    two adapters can choose differently.
     """
 
     visible_name: str
@@ -986,14 +1713,28 @@ class DocumentMetadata(BaseModel, frozen=True, extra="forbid"):
     kind: DocumentKind
     """Document or folder."""
 
-    source: SourceKind = SourceKind.NOTEBOOK
-    """What the document was made from."""
+    source: SourceKind | None = None
+    """What the document was made from, or ``None`` when the ``.content`` sidecar was not read or
+    did not say.
+
+    Not defaulted to :attr:`SourceKind.NOTEBOOK`, which is what the first pass at this model did:
+    the legacy ``ContentInfo.file_type`` was a *required* field, so defaulting it here turned an
+    unreadable content sidecar into a document that reads as a notebook -- and a pdf silently
+    reported as a notebook is an export with no background and no defect recorded anywhere.
+    ``None`` says "unknown", which is the truth in that case and is a state a caller can test."""
 
     parent_uuid: str | None = None
-    """Folder this entry sits in, or ``None`` at the root. An opaque identifier."""
+    """Folder this entry sits in, or ``None`` at the root and for a trashed entry.
+
+    An opaque identifier, and deliberately not constrained the way :class:`DocumentId` is: it is
+    compared and displayed, never joined into a path."""
 
     trashed: bool = False
-    """Whether the entry is in the trash. Trashed entries persist on the store."""
+    """Whether the entry is in the trash. Trashed entries persist on the store.
+
+    The *or* of the legacy ``parent == "trash"`` sentinel and the legacy ``deleted`` flag. Both
+    meant this, so reading either one alone -- as the legacy tree's two readers each did -- made
+    a trashed document look live."""
 
     pinned: bool = False
     """Whether the entry is pinned in the UI."""
@@ -1001,8 +1742,103 @@ class DocumentMetadata(BaseModel, frozen=True, extra="forbid"):
     last_modified: AwareDatetime | None = None
     """When the document last changed, or ``None`` when the store recorded nothing."""
 
+    last_opened: AwareDatetime | None = None
+    """When the document was last opened on the tablet, or ``None`` when the store recorded
+    nothing. Restored from the legacy model and re-typed like :attr:`last_modified`, because
+    ``rmspec inspect metadata`` prints it and did its own ``/1000`` epoch conversion to do so."""
+
     last_opened_page: int = Field(default=0, ge=0)
     """Zero-based index of the page the user last had open."""
+
+    version: int = Field(default=0, ge=0)
+    """The store's own metadata version counter, incremented on each sync. Printed by
+    ``rmspec inspect metadata``; never a cache key -- see :class:`OcrCacheKey` for why."""
+
+    synced: bool = False
+    """Whether the store believes this document has reached the reMarkable cloud."""
+
+    layout: DocumentLayout | None = None
+    """The ``.content`` sidecar's layout and tool facts, or ``None`` when it was not read."""
+
+    @classmethod
+    def decode(cls, raw: bytes, /, *, content: bytes | None = None) -> Self:
+        """Read a ``.metadata`` sidecar, and its ``.content`` sibling when the caller has it.
+
+        The one place the store's vocabulary becomes this one: ``visibleName``, ``lastModified``
+        as a millisecond epoch in a json *string*, ``type`` as ``"DocumentType"``, and the two
+        trash spellings. ``ports/formats.py`` declines a sidecar codec port on the grounds that
+        this belongs "on the domain models themselves (a decode classmethod over bytes)"; this is
+        that method, and it is testable without a filesystem because it takes ``bytes``.
+
+        Parameters
+        ----------
+        raw
+            The bytes of the document's ``.metadata`` sidecar.
+        content
+            The bytes of the document's ``.content`` sidecar, when the caller has them. Without
+            them :attr:`source` and :attr:`layout` stay ``None``, which is honest: those are the
+            facts that file owns.
+
+        Returns
+        -------
+        DocumentMetadata
+            The metadata, with every unrecorded field at its default.
+
+        Raises
+        ------
+        TypeError
+            If either payload is not a json object, or a field carries a json type this decoder
+            does not accept.
+        ValueError
+            If either payload is not valid json, a timestamp or number cannot be read, a
+            spelling is one this domain does not know, or a field constraint refuses a value.
+        """
+        return cls.from_json(
+            _json_object(raw),
+            content=None if content is None else _json_object(content),
+        )
+
+    @classmethod
+    def from_json(
+        cls, data: dict[str, object], /, *, content: dict[str, object] | None = None
+    ) -> Self:
+        """Read already-parsed sidecar members.
+
+        Parameters
+        ----------
+        data
+            The members of the document's ``.metadata`` sidecar.
+        content
+            The members of the document's ``.content`` sidecar, when the caller has them.
+
+        Returns
+        -------
+        DocumentMetadata
+            The metadata, with every unrecorded field at its default.
+
+        Raises
+        ------
+        TypeError
+            If a field carries a json type this decoder does not accept.
+        ValueError
+            If a timestamp or number cannot be read, a spelling is one this domain does not
+            know, or a field constraint refuses a value.
+        """
+        parent = _string(data.get("parent"))
+        return cls(
+            visible_name=_string(data.get("visibleName")),
+            kind=_kind_from_wire(data.get("type")),
+            source=None if content is None else _source_from_wire(content.get("fileType")),
+            parent_uuid=None if parent in {"", _TRASH_PARENT} else parent,
+            trashed=parent == _TRASH_PARENT or _flag(data.get("deleted")),
+            pinned=_flag(data.get("pinned")),
+            last_modified=_moment(data.get("lastModified")),
+            last_opened=_moment(data.get("lastOpened")),
+            last_opened_page=_whole(data.get("lastOpenedPage"), default=0),
+            version=_whole(data.get("version"), default=0),
+            synced=_flag(data.get("synced")),
+            layout=None if content is None else DocumentLayout.from_json(content),
+        )
 
 
 class DocumentSummary(BaseModel, frozen=True, extra="forbid"):
@@ -1041,6 +1877,23 @@ class Document(BaseModel, frozen=True, extra="forbid"):
     background page index in a PDF export are all positions in this tuple. An adapter that
     assembled pages out of order would otherwise produce a document that reads correctly and
     exports the wrong page.
+
+    The serialized shape changed, on purpose
+    ----------------------------------------
+    The legacy model exposed ``name``, ``is_notebook``, ``is_pdf``, ``is_epub``, ``is_folder`` and
+    ``is_trashed`` as ``@computed_field`` properties, so ``model_dump()`` emitted six keys this
+    one does not. They are not re-added, because every one was a one-line read of
+    :attr:`metadata` -- ``metadata.visible_name``, ``metadata.source is SourceKind.PDF``,
+    ``metadata.kind is DocumentKind.COLLECTION``, ``metadata.trashed`` -- and all of those fields
+    *are* dumped. No fact left the payload; only its duplicate spelling did, and with it the
+    chance of the two disagreeing. A ``--json`` command that owes callers the old keys derives
+    them at its own boundary, which is where an output contract belongs. :attr:`summary` and
+    :attr:`defective_pages` are plain properties and have never serialized.
+
+    Two legacy fields are folded rather than dropped: ``content`` became
+    :attr:`DocumentMetadata.layout` plus :attr:`DocumentMetadata.source`, and ``templates`` --
+    a parallel list indexed by page position -- became :attr:`Page.template_name`, so a template
+    can no longer be attributed to the wrong page by a list that is one element short.
     """
 
     doc_id: DocumentId

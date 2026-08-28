@@ -56,15 +56,37 @@ would re-derive that geometry and be asserted against its own wrong numbers. It 
 be a method here without a cycle: the underlay's target pixel box comes from the screen, and
 the viewport comes from the underlay.
 
+Typed text is a policy, and skipping it is observable
+-----------------------------------------------------
+``Layer.text_blocks`` is page content, and a page whose only content is one typed block used
+to render as a perfectly valid, blank-looking ``<svg>``: ``stroke_count`` was ``0``,
+``notices`` was empty, and the PNG, the PDF and both OCR paths downstream saw the words
+simply gone. ``TextBlock`` carries a position, a wrap width and a string but no typeface, and
+SVG has no auto-wrap, so *which* font lays it out is a decision -- the unowned-constant shape
+of the bare ``1.5`` thickness, one field over. Three members close it:
+
+- :class:`TextStyle`, a required member of :class:`RenderStyle`, owns the family, size and
+  line height at composition time, so the choice is explicit and :meth:`RenderStyle.digest`
+  covers it: changing the font misses the OCR cache instead of serving a stale row.
+- :attr:`RenderedPage.text_block_count` counts the blocks actually committed to the markup,
+  the way ``stroke_count`` counts strokes, so "drew the text" and "dropped the text" are
+  different values instead of the same one.
+- :attr:`RenderNoticeCode.TEXT_OMITTED` is what an adapter that will not lay out text has to
+  report. A font-metric-free SVG writer is a legitimate second adapter; one that drops a
+  block in silence is not, and :meth:`PageRenderer.render` states the obligation the shared
+  contract suite pins on every adapter and every double.
+
 Cache identity (defect 3)
 -------------------------
 :meth:`RenderStyle.digest` folds *everything* that changes a pixel -- thickness, padding,
-renderer revision, the screen, the palette's name **and** contents, and the background's
-markup and bytes -- into one hex string. That string is the render component of an
-``OcrCacheKey`` or ``DiagramCacheKey`` digest; the caller still folds in the source-file
-hash, the model id, the prompt version and the rasterization DPI, which travel with the
-pixels on the export slice's raster value. A DPI, palette or pen-formula change therefore
-mechanically misses instead of returning a valid-looking stale row.
+text family, size and line height, renderer revision, the screen, the palette's name **and**
+contents, and the background's markup and bytes -- into one hex string. Every component is a
+required parameter or field, including ``background``, so there is no way to spell a render
+identity that omits one. That string is the render component of an ``OcrCacheKey`` or
+``DiagramCacheKey`` digest; the caller still folds in the source-file hash, the model id, the
+prompt version and the rasterization DPI, which travel with the pixels on the export slice's
+raster value. A DPI, palette, font or pen-formula change therefore mechanically misses
+instead of returning a valid-looking stale row.
 
 :class:`RenderedPage` deliberately carries no digest of its own configuration. An identity
 the adapter echoes back is unfalsifiable -- every double echoes it correctly -- so key
@@ -86,16 +108,29 @@ Errors
 survives are reported as :attr:`RenderedPage.notices`, always as data, never gated by an
 ``on_degradation`` mode flag).
 
+Malformed template markup has exactly *one* exit channel, and it is
+``BackgroundUnreadable``. :class:`PageBackground` deliberately does not pre-screen
+``template_svg`` for a root tag: a substring validator would have made a CLI reading
+``--background`` receive a pydantic ``ValidationError`` for a file with no ``<svg`` in it and
+a typed ``BackgroundUnreadable`` for a file that has one but does not parse -- the same user
+mistake arriving at the same edge as two unrelated types, chosen by accident of which
+half-measure noticed first.
+
 Note for whoever writes ``ports/__init__.py``
 ---------------------------------------------
 This module may not import a sibling ports module, so three value objects here are
 deliberate twins: :class:`ImageMedia` (twin of the OCR and export copies) and
 :class:`PhysicalSize` (twin of the export copy) are field-for-field identical, and
-:class:`RenderedPage` is the export slice's ``SvgPage`` plus ``stroke_count`` and
-``notices``. Hoist one definition of each into a shared ``rmspec.domain.values`` module
-rather than re-exporting same-named classes -- and note that until that hoist happens, a
-use case has to convert this port's output before handing it to ``SvgRasterizer`` or
-``PdfComposer``, which is a conversion no type checker will ask for.
+:class:`RenderedPage` is the export slice's ``SvgPage`` plus ``stroke_count``,
+``text_block_count`` and ``notices``. Hoist one definition of each into a shared
+``rmspec.domain.values`` module rather than re-exporting same-named classes: while the twins
+stay separate, every export and OCR use case re-copies :attr:`RenderedPage.size` field by
+field into an ``SvgPage``, and a transposed ``width_mm``/``height_mm`` in that re-wrap type
+checks clean and silently rotates the page. The twins have already drifted once -- the export
+copy's PNG check enforced a 24-byte minimum header where the copy here checked only the
+8-byte signature, so bytes it rejected were accepted here; :func:`_check_image_signature`
+now enforces the same minimum, which is a fix that has to be made twice until the hoist
+lands.
 
 Domain models (``Page``, ``ScreenSpec``, ``Palette``) are imported for annotations only, as
 in ``ports/formats.py``: nothing in this module needs them at runtime.
@@ -123,6 +158,7 @@ __all__ = [
     "RenderNoticeCode",
     "RenderStyle",
     "RenderedPage",
+    "TextStyle",
 ]
 
 _FIELD_SEPARATOR = b"\x1f"
@@ -130,6 +166,9 @@ _FIELD_SEPARATOR = b"\x1f"
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 """First eight bytes of every PNG file."""
+
+_PNG_HEADER_LENGTH = 24
+"""Bytes in a PNG signature plus its mandatory ``IHDR`` chunk, header and CRC included."""
 
 _JPEG_SIGNATURE = b"\xff\xd8\xff"
 """Start-of-image marker of every JPEG file."""
@@ -167,7 +206,9 @@ def _check_image_signature(media: ImageMedia, data: bytes) -> None:
 
     A header check rather than a decode, but it is what stops a test double from passing
     ``b"AA=="`` as an underlay: any double that wants to exercise the placement path has to
-    supply bytes a real renderer would embed.
+    supply bytes a real renderer would embed. PNG additionally requires the signature *plus*
+    an ``IHDR``-sized remainder, matching the export slice's twin of this check byte for byte
+    -- an eight-byte-only test accepted underlays that port rejected.
 
     Parameters
     ----------
@@ -179,11 +220,15 @@ def _check_image_signature(media: ImageMedia, data: bytes) -> None:
     Raises
     ------
     ValueError
-        If ``data`` does not begin with ``media``'s signature.
+        If ``data`` does not begin with ``media``'s signature, or is too short to carry a
+        PNG header.
     """
-    signature = _PNG_SIGNATURE if media is ImageMedia.PNG else _JPEG_SIGNATURE
-    if not data.startswith(signature):
-        msg = f"data does not start with a {media.value} signature"
+    if media is ImageMedia.PNG:
+        if len(data) < _PNG_HEADER_LENGTH or not data.startswith(_PNG_SIGNATURE):
+            msg = "data does not start with a png signature and header"
+            raise ValueError(msg)
+    elif not data.startswith(_JPEG_SIGNATURE):
+        msg = "data does not start with a jpeg signature"
         raise ValueError(msg)
 
 
@@ -201,9 +246,9 @@ class ImageMedia(StrEnum):
 
 
 class RenderNoticeCode(StrEnum):
-    """A substitution the renderer made and survived, reported instead of hidden.
+    """A substitution or omission the renderer made and survived, reported instead of hidden.
 
-    Two members, because two things in the legacy renderer silently changed the output.
+    Three members, because three things in the legacy renderer silently changed the output.
     Anything the renderer cannot survive raises instead, so this enum stays closed and
     small: it is not a log level and it is not a warning channel.
     """
@@ -213,6 +258,15 @@ class RenderNoticeCode(StrEnum):
 
     UNDERLAY_RESCALED = "underlay_rescaled"
     """The underlay's native page size differed from the note page's and was fitted."""
+
+    TEXT_OMITTED = "text_omitted"
+    """A visible, non-empty typed text block was left out of the markup.
+
+    Mandatory for an adapter that does not lay out text, and the reason a text-only page can
+    never come back as a valid blank one. ``detail`` should say how many blocks were dropped
+    and why (no font metrics, unwrappable width), because the person reading it is deciding
+    whether to re-run with a different renderer before trusting the OCR.
+    """
 
 
 class PhysicalSize(BaseModel):
@@ -307,10 +361,17 @@ class PageBackground(BaseModel):
     edge accepted the ``--background`` argument, which is what keeps the filesystem, and
     therefore a "template not found" error, out of this port entirely.
 
+    ``template_svg`` is *not* pre-screened for a root tag. Well-formedness is decided in one
+    place, by the parser inside :meth:`PageRenderer.render`, which raises
+    ``BackgroundUnreadable``. A substring check here would have added a second exit channel
+    for one user mistake -- a pydantic ``ValidationError`` for markup with no ``<svg`` in it
+    and ``BackgroundUnreadable`` for markup that has one but still will not parse -- and the
+    edge reading ``--background`` would get whichever the accident of ordering produced.
+
     Attributes
     ----------
     template_svg
-        SVG markup to draw beneath the ink, or ``None``.
+        SVG markup to draw beneath the ink, or ``None``. Validity is the renderer's verdict.
     underlay
         Rasterized pixels to draw beneath the ink, or ``None``.
     """
@@ -322,7 +383,7 @@ class PageBackground(BaseModel):
 
     @model_validator(mode="after")
     def _check_something_present(self) -> Self:
-        """Reject an empty background and markup that is not SVG.
+        """Reject a background that carries nothing.
 
         Returns
         -------
@@ -332,13 +393,10 @@ class PageBackground(BaseModel):
         Raises
         ------
         ValueError
-            If both fields are ``None``, or if ``template_svg`` has no ``<svg>`` root.
+            If both fields are ``None``.
         """
         if self.template_svg is None and self.underlay is None:
             msg = "a background must carry template markup, an underlay, or both"
-            raise ValueError(msg)
-        if self.template_svg is not None and _SVG_ROOT_TAG not in self.template_svg:
-            msg = "template_svg must contain an <svg> root element"
             raise ValueError(msg)
         return self
 
@@ -362,6 +420,43 @@ class PageBackground(BaseModel):
         return hasher.hexdigest()
 
 
+class TextStyle(BaseModel):
+    """How typed text is set: the three numbers SVG cannot infer for itself.
+
+    ``TextBlock`` gives a corner, a wrap width and a string. Turning that into glyphs needs a
+    typeface, a size and a line height, and SVG has no auto-wrap, so an adapter that is not
+    handed them either invents them or drops the block. Both were happening: this value makes
+    the choice a composition-time decision :meth:`RenderStyle.digest` can see, the same
+    correction the ownerless ``1.5`` thickness constant got.
+
+    Pixels, not millimetres, unlike :class:`PhysicalSize`. ``TextBlock.pos_x``, ``pos_y`` and
+    ``width`` are in screen units, which are the SVG user units the ink is drawn in, so a size
+    in millimetres would have to be converted against the screen before it could be compared
+    with the box it has to fit -- an arithmetic step in the adapter that the unit exists to
+    remove. Millimetres remain correct for a page, which is a physical object.
+
+    ``family`` is a CSS font-family list, not a resolved font file: which concrete face a
+    generic name lands on is the rasterizer's business, and a domain that named a file would
+    be asserting a filesystem it cannot see. It is still digest-covered, so switching the list
+    invalidates a cached OCR row.
+
+    Attributes
+    ----------
+    family
+        CSS font-family list for typed text, most specific first.
+    size_px
+        Em size in screen units, the same units ``TextBlock`` positions are given in.
+    line_height
+        Baseline-to-baseline distance as a multiple of ``size_px``.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    family: str = Field(min_length=1)
+    size_px: float = Field(gt=0)
+    line_height: float = Field(gt=0)
+
+
 class RenderStyle(BaseModel):
     """The render policy chosen at composition, with no field defaulted.
 
@@ -369,12 +464,13 @@ class RenderStyle(BaseModel):
     ``EXPORT_PALETTE`` as in-module fallbacks on a Paper-Pro-only product, so every caller
     that omitted them rendered 1404x1872 geometry and every test that omitted them asserted
     the wrong ``x_shift``. Screen and palette are now required parameters of
-    :meth:`PageRenderer.render`, and the three policy numbers here are required fields, so
-    "forgot to pass it" is a construction error rather than a silently different picture.
+    :meth:`PageRenderer.render`, and every field here is required, so "forgot to pass it" is
+    a construction error rather than a silently different picture.
 
     ``thickness_scale`` in particular was a bare ``1.5`` with no owner: it is a calibration
     constant compensating on-screen against exported stroke weight, and it belongs to a
-    composition-time decision that :meth:`digest` can see.
+    composition-time decision that :meth:`digest` can see. ``text`` is the same correction
+    applied to the typeface, which had no owner at all because no adapter drew typed text.
 
     There is no ``dpi`` field. Rasterization resolution belongs to the port that rasterizes
     and travels with the pixels it produced; a second copy here would be a second source of
@@ -388,6 +484,9 @@ class RenderStyle(BaseModel):
     min_padding_mm
         Minimum margin kept around ink that falls outside the page box, before the viewport
         is widened.
+    text
+        Typeface, size and line height for ``Layer.text_blocks``. Required, because an
+        adapter handed no text policy is an adapter that invents one or drops the block.
     renderer_revision
         Opaque revision of the rendering rules in force -- bumped when a pen formula or the
         SVG structure changes. Data set in the composition root rather than a property on
@@ -399,6 +498,7 @@ class RenderStyle(BaseModel):
 
     thickness_scale: float = Field(gt=0)
     min_padding_mm: float = Field(ge=0)
+    text: TextStyle
     renderer_revision: str = Field(min_length=1)
 
     def digest(
@@ -406,7 +506,7 @@ class RenderStyle(BaseModel):
         *,
         screen: ScreenSpec,
         palette: Palette,
-        background: PageBackground | None = None,
+        background: PageBackground | None,
     ) -> str:
         """Return a digest over every input that changes a rendered pixel.
 
@@ -416,6 +516,13 @@ class RenderStyle(BaseModel):
         ink, which is how a palette or DPI change stops leaving a cached row valid-looking
         and wrong.
 
+        ``background`` has no default for the same reason, and it is the component that most
+        needed one removed. With ``background=None`` defaulted, ``digest(screen=s,
+        palette=p)`` type-checked and returned the bare-ink identity for a render that had a
+        template or an underlay drawn under it -- one silently omittable component inside a
+        totality claim, which is a stale row served as valid, i.e. defect 3 exactly. Pass
+        ``None`` explicitly to mean "no background"; there is no way to mean it by omission.
+
         Parameters
         ----------
         screen
@@ -423,7 +530,8 @@ class RenderStyle(BaseModel):
         palette
             The palette the ink was resolved through, name and contents.
         background
-            The background that was drawn beneath the ink, if any.
+            The background that was drawn beneath the ink, or ``None`` if there was none.
+            Required, stated rather than defaulted.
 
         Returns
         -------
@@ -456,8 +564,24 @@ class RenderedPage(BaseModel):
     the tests the one assertable artifact: ``ElementTree.fromstring(page.svg)`` is the whole
     setup, with no temporary directory and no ``.rm`` fixture.
 
-    ``stroke_count`` exists so a test can assert a page is not blank without parsing XML,
-    which is the assertion the legacy silent-return background path most needed.
+    ``stroke_count`` and ``text_block_count`` exist so a test can assert a page is not blank
+    without parsing XML, which is the assertion the legacy silent-return background path most
+    needed. They count *content of two kinds* because a page can hold either, and a single
+    stroke counter reported a text-only page as blank.
+
+    Nothing here is self-certifying, and the three counters plus ``size`` are the fields a
+    lying double would use if it could. They are constrained by arithmetic the caller already
+    knows, not by a validator this model can run, so the shared contract suite pins them
+    against the input page every adapter and every double is run over:
+
+    - ``size`` equals ``screen.width_mm``/``height_mm`` unless a ``VIEWPORT_EXPANDED`` notice
+      is present, in which case it is strictly greater in at least one dimension. Without
+      that pin, ``PhysicalSize(width_mm=1.0, height_mm=1.0)`` validates, which is the "fakes
+      lie" hole ``viewport_for`` was deleted for, one type along.
+    - ``stroke_count`` is at most ``page.stroke_count``, and is zero if and only if the page
+      has no strokes in any visible layer.
+    - ``text_block_count`` equals the number of visible non-empty text blocks on the page
+      unless a ``TEXT_OMITTED`` notice is present, in which case it is strictly fewer.
 
     Attributes
     ----------
@@ -471,10 +595,14 @@ class RenderedPage(BaseModel):
         The real-world size of the page this markup fills.
     stroke_count
         Number of strokes committed to the markup. Zero is legal: an empty page renders.
+    text_block_count
+        Number of typed text blocks committed to the markup. Zero on a page that has text
+        blocks is legal only alongside a ``TEXT_OMITTED`` notice, which is what stops a
+        text-only page from returning as a valid-looking blank one.
     notices
-        Substitutions the render survived, in the order they occurred. Always data: there is
-        no mode flag that turns a notice into an exception, because strictness is a
-        use-case decision and a flag would restore the silence notices exist to remove.
+        Substitutions and omissions the render survived, in the order they occurred. Always
+        data: there is no mode flag that turns a notice into an exception, because strictness
+        is a use-case decision and a flag would restore the silence notices exist to remove.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
@@ -483,6 +611,7 @@ class RenderedPage(BaseModel):
     svg: str = Field(min_length=1)
     size: PhysicalSize
     stroke_count: int = Field(ge=0)
+    text_block_count: int = Field(ge=0)
     notices: tuple[RenderNotice, ...] = ()
 
     @model_validator(mode="after")
@@ -526,8 +655,16 @@ class PageRenderer(Protocol):
 
     Notes
     -----
-    The rejected variants of this port were refuted on four points, each answered by
-    something absent from the signature above rather than by argument:
+    The rejected variants of this port were refuted on five points, each answered by
+    something present in or absent from the signature above rather than by argument:
+
+    - "``render`` cannot draw ``Layer.text_blocks``, and the signature gives no adapter a way
+      to say it didn't, so a text-only page comes back as a validator-passing blank ``<svg>``
+      and the words vanish from the PNG, the PDF and both OCR paths." Answered by three
+      additions: :class:`TextStyle` on :class:`RenderStyle` owns the font policy that was
+      unowned, :attr:`RenderedPage.text_block_count` makes drawing and dropping different
+      values, and :attr:`RenderNoticeCode.TEXT_OMITTED` makes dropping reportable. A
+      font-metric-free adapter is still implementable; a silent one is not.
 
     - "``svg: str`` names one adapter's serialization; a future PDF or Skia backend would
       write binary into a field called ``svg``." Answered by scope: the backends that carry
@@ -555,6 +692,17 @@ class PageRenderer(Protocol):
     ) -> RenderedPage:
         """Render ``page`` to SVG markup.
 
+        Ink and typed text are both content, and both have to be accounted for. For every
+        visible layer, an implementation draws the strokes, then draws ``layer.text_blocks``
+        over them using ``style.text``, and reports what it committed as
+        :attr:`RenderedPage.stroke_count` and :attr:`RenderedPage.text_block_count`. An
+        implementation that will not lay out text -- a writer with no font metrics is a
+        legitimate one -- must emit a single :attr:`RenderNoticeCode.TEXT_OMITTED` notice
+        naming how many blocks it left out. Returning ``text_block_count`` below the page's
+        visible non-empty block count with no such notice is a contract violation, not a
+        degraded render, and it is the one the shared contract suite exists to catch: it is
+        how a page of typed words became an indistinguishably blank one.
+
         Parameters
         ----------
         page
@@ -567,7 +715,7 @@ class PageRenderer(Protocol):
             validator, so no ink can silently render black and this method has no
             unknown-colour error.
         style
-            Thickness, padding and renderer revision.
+            Thickness, padding, text policy and renderer revision.
         background
             Template markup and/or a rasterized underlay to draw beneath the ink. ``None``
             means no background, which is the only way to express absence.
@@ -575,8 +723,8 @@ class PageRenderer(Protocol):
         Returns
         -------
         RenderedPage
-            The markup, the page's physical size, the stroke count and any notices. Its
-            ``page_ref`` must identify ``page``.
+            The markup, the page's physical size, the stroke and text-block counts, and any
+            notices. Its ``page_ref`` must identify ``page``.
 
         Raises
         ------
@@ -585,7 +733,9 @@ class PageRenderer(Protocol):
             legacy fallback substituted a fineliner: a plausible-looking page rendered with
             the wrong physics is indistinguishable from a correct one.
         BackgroundUnreadable
-            If ``background.template_svg`` will not parse. The legacy renderer returned
-            silently on a parse failure, so a background simply vanished from the output.
+            If ``background.template_svg`` will not parse -- including markup with no
+            ``<svg>`` root, which :class:`PageBackground` deliberately does not pre-screen, so
+            that one bad file produces one error type. The legacy renderer returned silently
+            on a parse failure, so a background simply vanished from the output.
         """
         ...

@@ -1,6 +1,6 @@
 """Ports for the formats slice: getting parsed reMarkable documents into the app layer.
 
-Two Protocols live here and nothing else:
+Two Protocols and one sentinel live here and nothing else:
 
 :class:`DocumentRepository`
     The app-facing altitude. Identity in, domain models out. Every use case that
@@ -10,6 +10,11 @@ Two Protocols live here and nothing else:
     to, so exactly one package in the system imports ``rmscene``. Kept as a
     separate port because ``rmspec inspect rm <path>`` decodes a user-supplied
     file that has no document identity and no xochitl root at all.
+:data:`ABSENT_ARTIFACT_FINGERPRINT`
+    The digest :meth:`DocumentRepository.page_fingerprint` returns for a page the
+    document claims but stores no scene artifact for, so a blank page of an
+    annotated PDF has a cache key like every other page instead of an exception
+    every caller has to special-case.
 
 Notes
 -----
@@ -21,7 +26,9 @@ blobs" would make the app layer sequence the xochitl on-disk algorithm: read
 ``.pagedata`` by index. That algorithm and the layout it encodes are firmware
 knowledge and stay inside the adapter. The adapter is therefore free to batch,
 to avoid N+1 round trips, and to decide which artifacts are required versus
-optional without any use case changing.
+optional without any use case changing. Decoding scene bytes is the one step it
+delegates rather than owns: a repository adapter calls :class:`PageCodec` instead
+of inlining a parser, so the parser stays bound at exactly one seam.
 
 **No sidecar codec port.** Decoding ``.metadata`` / ``.content`` / ``.pagedata``
 is ``json`` plus pydantic validation, and both are already legal inside this
@@ -47,14 +54,46 @@ supported-version set. A multi-version codec is a composite adapter that
 dispatches internally; the observed version is carried on the raised error, not
 returned for callers to compare against integers.
 
-**Failure altitude.** ``load`` and ``load_page`` raise only when the request
-cannot be answered at all: no such document, no such page, unreadable store,
-undecodable document-level metadata. A page that is present but degraded is a
-*value*: the returned page carries its defects, so "file absent", "page blank",
-and "page unparsable" are three distinct states rather than one silently empty
-layer list. Strict-versus-lenient handling is then an explicit policy on the use
-case reading ``defects``, never a hidden ``except Exception`` and never a
-policy argument threaded through this port.
+**Failure altitude.** An exception means the request cannot be answered at all:
+no such document, an unreadable store, document-level metadata that will not
+decode, or a page id the document does not claim. Everything the store *can*
+answer is a value on the returned page, and there are three such values rather
+than one silently empty layer list: a page with ink (content plus the defects
+accepted while decoding it), a page the document claims with no scene artifact
+stored (``content=None`` plus ``PageDefectCode.ARTIFACT_ABSENT``), and a page
+whose artifact is present but will not decode (``content=None`` plus
+``PageDefectCode.CONTENT_UNDECODABLE``). The two contentless states are the same
+values on the whole-document path and the single-page path, so
+:meth:`DocumentRepository.load_page` is a cheaper :meth:`DocumentRepository.load`
+for one page and never a different contract, and
+:meth:`DocumentRepository.page_fingerprint` keys an artifactless page instead of
+refusing it. Strict-versus-lenient handling is then an explicit policy on the use
+case reading ``defects``, never a hidden ``except Exception`` and never a policy
+argument threaded through this port.
+
+**One meaning for PageNotFound.** This narrows the error's own docstring in
+:mod:`rmspec.domain.errors`, which also lists "a claimed page whose artifact is
+absent": this port raises it for a page id the document does not claim, and never
+for a stored artifact that is missing. A page of an annotated PDF that was never
+written on is routine, not an error; its template is a fact only the store holds,
+so a caller handed an exception could neither fabricate the page nor recover
+without calling ``load`` and paying the whole-document decode that ``load_page``
+exists to avoid. The error's own ``page_count`` field fits the meaning that
+survives -- a page id outside what the document claims.
+
+**The codec is handed a label, not an identity.**
+:meth:`PageCodec.decode_page` takes the bytes plus a caller-supplied
+``page_ref``, used for exactly one purpose: filling the ``page_uuid`` field that
+``CorruptPageData`` and ``UnsupportedPageFormat`` both require. Without it no
+conforming codec could construct the errors it is documented to raise, and every
+implementation including the fake would pass ``page_uuid=""`` and render "page
+is not a decodable scene file". The label is required and has no default, so
+nothing is invented inside the port: a repository adapter passes the page uuid it
+already holds, and ``rmspec inspect rm <path>`` passes the path it read. The
+codec still performs no identity resolution -- it never looks the ref up, never
+validates it, and returns nothing derived from it. The error field is the
+narrower name of the two; widening it to ``page_ref`` is a change in
+:mod:`rmspec.domain.errors`, not here.
 
 **Scope is not a property of a port.** Whether an implementation is bound at
 ``Scope.APP`` (a local xochitl root: nothing to close) or ``Scope.REQUEST`` (a
@@ -80,9 +119,11 @@ names its errors from :mod:`rmspec.domain.errors`.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from rmspec.domain.models import (
         Document,
         DocumentId,
@@ -92,7 +133,18 @@ if TYPE_CHECKING:
         PageId,
     )
 
-__all__ = ["DocumentRepository", "PageCodec"]
+__all__ = ["ABSENT_ARTIFACT_FINGERPRINT", "DocumentRepository", "PageCodec"]
+
+ABSENT_ARTIFACT_FINGERPRINT: Final = "absent"
+"""Fingerprint of a page the document claims but stores no scene artifact for.
+
+Returned by :meth:`DocumentRepository.page_fingerprint` and
+:meth:`DocumentRepository.page_fingerprints` for that state, so every claimed page
+has a cache key. Deliberately not a hex digest: no content hash can collide with
+it, and a caller may compare against it to tell "nothing was ever drawn here"
+from "these bytes hashed to this". A cache row keyed on it stays valid for as long
+as the page has no artifact, and the fingerprint changes the moment one appears.
+"""
 
 
 class DocumentRepository(Protocol):
@@ -106,7 +158,24 @@ class DocumentRepository(Protocol):
     Notes
     -----
     A fake is a mapping of identity to prebuilt models; no byte fixture and no
-    second collaborator are needed to exercise a use case against it.
+    second collaborator are needed to exercise a use case against it. Three
+    branches of the contract are unreachable for a fake that is *only* a mapping
+    of page id to decoded page, so a fake needs a knob for each:
+
+    1. A page the summary claims with no stored artifact, so ``load_page``
+       returns the contentless ``ARTIFACT_ABSENT`` page and ``page_fingerprint``
+       returns :data:`ABSENT_ARTIFACT_FINGERPRINT`. This is the routine
+       annotated-PDF case, and a mapping keyed only on decoded pages cannot say
+       it: the page id must be present on the summary while its content is not.
+    2. Fingerprints held independently of page content, so a cache-hit or
+       cache-miss test is not tautological -- the same content with a changed
+       fingerprint, and changed content with the same fingerprint, are both
+       states a real store produces.
+    3. An "unavailable" switch, so ``DocumentStoreUnavailable`` is reachable
+       without deleting fixtures mid-test.
+
+    ``PageNotFound`` needs no knob: it is what asking for a page id the summary
+    does not list produces.
     """
 
     def list_documents(self) -> tuple[DocumentSummary, ...]:
@@ -134,6 +203,37 @@ class DocumentRepository(Protocol):
         """
         ...
 
+    def summary(self, doc_id: DocumentId, /) -> DocumentSummary:
+        """Summarise one document, without decoding any of its pages.
+
+        Present so that knowing one document's page order -- to address "page 3"
+        for :meth:`load_page`, or to iterate the pages of one document -- costs
+        one document's metadata rather than a walk of the whole store, and less
+        than ``load``, which decodes every page.
+
+        Parameters
+        ----------
+        doc_id
+            Identity of the document to summarise.
+
+        Returns
+        -------
+        DocumentSummary
+            The same summary :meth:`list_documents` would carry for this
+            document, with page identities in document order.
+
+        Raises
+        ------
+        DocumentNotFound
+            No document with this identity exists in the store.
+        MalformedDocument
+            Document-level metadata could not be decoded, so no page order can
+            be established.
+        DocumentStoreUnavailable
+            The store could not be reached or read at all.
+        """
+        ...
+
     def load(self, doc_id: DocumentId, /) -> Document:
         """Load one whole document, with every page decoded.
 
@@ -146,9 +246,10 @@ class DocumentRepository(Protocol):
         -------
         Document
             The assembled aggregate: metadata, ordered pages, and the defects
-            recorded for each page. Pages that are absent on the store and pages
-            that failed to decode are represented as such rather than as empty
-            ones.
+            recorded for each page. A page whose artifact is absent on the store
+            and a page whose artifact would not decode are both returned as
+            contentless pages carrying ``ARTIFACT_ABSENT`` or
+            ``CONTENT_UNDECODABLE``, never as empty ones.
 
         Raises
         ------
@@ -166,7 +267,8 @@ class DocumentRepository(Protocol):
         """Load a single page of a document.
 
         Present so that rendering or reading one page does not decode the whole
-        document.
+        document. It returns exactly the ``Page`` :meth:`load` would place at
+        this page id, so no caller has two code paths for one page.
 
         Parameters
         ----------
@@ -179,17 +281,33 @@ class DocumentRepository(Protocol):
         Returns
         -------
         Page
-            The page, including its template, its decoded content, and the
-            defects accepted while decoding it. A page with no strokes is
-            returned as an empty page; a page whose artifact is missing raises.
+            The page as the store can produce it: its template, its content when
+            there was an artifact that decoded, and the defects accepted on the
+            way. Three states, all values:
+
+            * ink present -- decoded ``content``, plus any defects the decode
+              accepted;
+            * claimed with no stored artifact -- ``content=None``,
+              ``template_name`` from the document's page data, and
+              ``ARTIFACT_ABSENT``. The blank page of an annotated PDF, and the
+              common case;
+            * artifact present but undecodable -- ``content=None`` and
+              ``CONTENT_UNDECODABLE``. The implementation translates
+              ``CorruptPageData`` and ``UnsupportedPageFormat`` from
+              :class:`PageCodec` into that defect; neither error leaves this
+              method.
 
         Raises
         ------
         DocumentNotFound
             No document with this identity exists in the store.
         PageNotFound
-            The document exists but claims no such page, or the page's artifact
-            is absent on the store.
+            The document exists and claims no page with this identity. Only that:
+            a claimed page with nothing stored for it is the contentless page
+            above, not this error.
+        MalformedDocument
+            Document-level metadata could not be decoded, so the page cannot be
+            resolved to an artifact and "claims no such page" cannot be decided.
         DocumentStoreUnavailable
             The store could not be reached or read at all.
         """
@@ -213,16 +331,63 @@ class DocumentRepository(Protocol):
         Returns
         -------
         str
-            Lowercase hex SHA-256 of the page's stored bytes, exactly as read,
-            before any decoding.
+            An opaque, non-empty token over the page's stored bytes as read,
+            before any decoding: it changes whenever those bytes change and never
+            changes while they do not. Lowercase hex SHA-256 of the bytes is the
+            obvious implementation; a store that can only offer an ETag or a
+            revision counter satisfies this too, which is why callers must treat
+            the value as opaque -- never parsed, never assumed to be a hash of a
+            particular length, and not comparable across implementations, so a
+            cache shared between stores keys on the store's identity as well.
+            :data:`ABSENT_ARTIFACT_FINGERPRINT` when the document claims the page
+            but stores no scene artifact for it.
 
         Raises
         ------
         DocumentNotFound
             No document with this identity exists in the store.
         PageNotFound
-            The document exists but claims no such page, or the page's artifact
-            is absent on the store.
+            The document exists and claims no page with this identity. A claimed
+            page with nothing stored for it returns
+            :data:`ABSENT_ARTIFACT_FINGERPRINT` instead.
+        MalformedDocument
+            Document-level metadata could not be decoded, so the page cannot be
+            resolved to an artifact.
+        DocumentStoreUnavailable
+            The store could not be reached or read at all.
+        """
+        ...
+
+    def page_fingerprints(self, doc_id: DocumentId, /) -> Mapping[PageId, str]:
+        """Fingerprint every page of one document in one pass.
+
+        Present because deciding what is already cached for a long document is
+        otherwise one store probe per page: a 200-page notebook asks 200 times
+        before any work starts. An implementation answers this from a single
+        directory listing or a single remote call, which is the batching freedom
+        the coarse repository exists to keep.
+
+        Parameters
+        ----------
+        doc_id
+            Identity of the document whose pages to fingerprint.
+
+        Returns
+        -------
+        Mapping[PageId, str]
+            One entry per page identity the document claims, in document order,
+            each value exactly what :meth:`page_fingerprint` would return for
+            that page -- :data:`ABSENT_ARTIFACT_FINGERPRINT` included. The keys
+            are the page identities on the document's summary, so a caller needs
+            no second call to align them.
+
+        Raises
+        ------
+        DocumentNotFound
+            No document with this identity exists in the store.
+        MalformedDocument
+            Document-level metadata could not be decoded, so the document's pages
+            cannot be enumerated.
         DocumentStoreUnavailable
             The store could not be reached or read at all.
         """
@@ -242,16 +407,27 @@ class PageCodec(Protocol):
     Implementations translate every parser failure into the domain error tree; no
     parser type, exception, or log record escapes. Version dispatch, if a second
     scene version ever needs it, is internal to a composite implementation --
-    this Protocol has exactly one method so a fake has exactly one behaviour.
+    this Protocol has exactly one method so a fake is one canned return value
+    plus a way to make it raise each of the two documented errors.
     """
 
-    def decode_page(self, raw: bytes, /) -> PageContent:
+    def decode_page(self, raw: bytes, page_ref: str, /) -> PageContent:
         """Decode complete scene bytes into layers, strokes, and text.
 
         Parameters
         ----------
         raw
             The entire, uninterpreted contents of one page's scene file.
+        page_ref
+            What to call these bytes when reporting a failure: the page uuid when
+            the caller holds one -- a repository adapter always does -- and the
+            path the user typed when no uuid exists, as for
+            ``rmspec inspect rm <path>``. Required and without a default, because
+            both errors below take the value as a mandatory field, and an
+            implementation that had to invent it would render "page  is not a
+            decodable scene file" for the one case this port exists to serve. It
+            is never resolved, never validated, and never reflected in the return
+            value; passing a different ref cannot change what is decoded.
 
         Returns
         -------
@@ -264,11 +440,11 @@ class PageCodec(Protocol):
         Raises
         ------
         UnsupportedPageFormat
-            The bytes are a scene file of a version this codec does not decode.
-            The observed version is carried on the error, so no caller compares
-            raw version numbers.
+            The bytes are a scene file of a version this codec does not decode,
+            reported against ``page_ref``. The observed version is carried on the
+            error, so no caller compares raw version numbers.
         CorruptPageData
-            The bytes are not a decodable scene file: truncated, malformed, or
-            structurally invalid.
+            The bytes are not a decodable scene file -- truncated, malformed, or
+            structurally invalid -- reported against ``page_ref``.
         """
         ...

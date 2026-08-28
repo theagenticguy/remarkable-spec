@@ -44,15 +44,59 @@ hand-bumped ``prompt_version`` for a reviewer to forget. ``VisionCompletion`` ec
 ``request_digest`` and ``model_fingerprint`` so a row can be written without re-deriving
 either, and a row whose echo disagrees with its key is detectable.
 
+Every echo is filled by the domain, not by the adapter: :meth:`VisionCompletion.answering`
+derives ``request_digest`` and ``model_fingerprint`` from the request and binding it is
+handed, and :meth:`Recognition.attributed` derives ``page_ref`` from the raster it read.
+An adapter or fake that hand-copies a key component can copy it wrongly exactly once and
+poison every row keyed on it, so no adapter is asked to.
+
+``Recognition.page_ref`` is a live-call echo and never a cached fact.
+``RasterImage.digest()`` deliberately excludes ``page_ref``, so one row is legitimately
+shared by two pages with identical pixels; when the app hydrates a stored reading it must
+re-stamp ``page_ref`` from the raster in hand (:meth:`Recognition.attributed` again) and
+must not trust a stored value, or a row written for page 3 is read back as page 7.
+
 Errors (named, not imported)
 ----------------------------
-The error tree lives in :mod:`rmspec.domain.errors`, which is authored after this module.
-This module names its errors in ``Raises`` sections only and imports nothing from it --
-not even under ``TYPE_CHECKING`` -- so the two files cannot deadlock on naming. Four LLM
-errors are enough because the CLI takes only two distinct actions (report-and-stop, or
-retry-once): ``ModelAccessDenied``, ``ModelThrottled``, ``ModelRejectedRequest``,
-``ModelResponseMalformed``. Recognition collapses to one: ``RecognitionFailed``, carrying
-``provider_id`` and ``retryable: bool``.
+The error tree lives in :mod:`rmspec.domain.errors`. This module names its errors in
+``Raises`` sections only and imports nothing from it -- not even under ``TYPE_CHECKING``
+-- so no port can be edited into depending on an error's constructor signature.
+
+``complete`` is the one port here with more than one plausible provider: Bedrock
+``invoke_model``, Anthropic's own endpoint over HTTP, a self-hosted Ollama or vLLM, an
+on-device binding. Two shape requirements follow, and they are requirements *on the error
+tree*, not preferences:
+
+1. No provider deployment axis may be a required constructor argument. A region is
+   ``boto3``'s ``region_name`` and nothing else has one, so a non-AWS adapter with a
+   genuine entitlement failure must pass ``region="n/a"`` and emit "not available to this
+   caller in n/a"; an app that reads ``exc.region`` back has imported AWS by another name.
+   Model identity for the app is :attr:`VisionLanguageModel.fingerprint` -- an
+   ``except`` block here reads only ``str(exc)``, ``exc.remediation`` and, where the error
+   publishes it, ``retryable``.
+2. Unreachability must be representable. A refused connection to a local daemon, a DNS
+   failure, a request timeout, HTTP 503/529, and Bedrock's own
+   ``ModelTimeoutException`` / ``ServiceUnavailableException`` / ``InternalServerException``
+   are none of: an entitlement problem, a rate limit, a rejected payload, or a body that
+   failed to parse. Without a name for them an adapter must either let
+   ``httpx.ConnectError`` cross the port -- the provider-exception leak this architecture
+   forbids -- or report a permanently unreachable endpoint as "throttled".
+
+So five model errors, not four: ``ModelUnavailable``, ``ModelAccessDenied``,
+``ModelThrottled``, ``ModelRejectedRequest``, ``ModelResponseMalformed``. The CLI still
+takes only two actions (report-and-stop, retry-once), because the retryable set is
+``ModelThrottled`` plus ``ModelUnavailable`` where the latter's ``retryable`` says so.
+``ModelUnavailable`` takes the shape the device slice already established for the same
+situation -- ``DeviceUnreachable(transport, endpoint, detail)`` -- since an unreachable
+endpoint is a house-wide failure mode, not a model-slice novelty.
+
+Follow-up this contract requires in :mod:`rmspec.domain.errors`, which cannot be made
+from this file: add ``ModelUnavailable``, and stop requiring ``region`` on
+``ModelAccessDenied``. Until both land, an adapter cannot satisfy the ``Raises`` clause of
+:meth:`VisionLanguageModel.complete` truthfully.
+
+Recognition collapses to one: ``RecognitionFailed``, carrying ``provider_id`` and
+``retryable: bool``.
 
 Availability is *not* a port error (defect 4)
 ---------------------------------------------
@@ -64,21 +108,32 @@ relocate the 27 legacy function-local ``ImportError`` raises. A degraded binding
 (recognizer omitted, null recognizer substituted) is likewise a wiring decision visible
 in the composition root, never something an adapter reaches from its own ``except``.
 
-Note for whoever writes ``ports/__init__.py``
----------------------------------------------
-:class:`RasterImage` is defined here because the OCR ports need it and this module may
-not import a sibling ports module. If the render or export slice defines an equivalent
-value object, hoist one definition into a shared ``rmspec.domain.values`` module rather
-than re-exporting two same-named classes.
+Required follow-up: hoist ``RasterImage``
+-----------------------------------------
+:class:`RasterImage` and :class:`ImageMedia` are defined here because the OCR ports need
+them and this module may not import a sibling ports module. ``ports/export.py`` now
+defines a field-for-field twin, and two nominal pydantic models is one too many:
+``SvgRasterizer.to_png``'s output is not assignable to :attr:`VisionRequest.images` or to
+:meth:`TextRecognizer.recognize`, and two ``digest`` bodies must stay byte-identical
+forever or identical pixels hash to two cache keys -- defect 3 reopened by hand-mirroring.
+Both classes must be hoisted into one ``rmspec.domain.values`` module that both port
+modules import; that edit spans two files and so is not made here.
+
+Until it lands, :meth:`RasterImage.from_raster` is the single sanctioned conversion. It is
+structural (:class:`PageRasterLike`), so any slice's twin satisfies it without this module
+importing that slice, and it goes through validation, so it cannot drop a check the way a
+``RasterImage(**other.model_dump())`` splat does. The shared adapter contract suite must
+assert ``RasterImage.from_raster(x).digest() == x.digest()`` for every producer ``x``: that
+one assertion is what catches drift between the two digest bodies.
 """
 
 from __future__ import annotations
 
 import hashlib
 from enum import StrEnum
-from typing import ClassVar, Protocol
+from typing import ClassVar, Final, Protocol, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _FIELD_SEPARATOR = b"\x1f"
 """Byte that separates digest components, so concatenation cannot be ambiguous."""
@@ -95,6 +150,13 @@ class ImageMedia(StrEnum):
 
     PNG = "png"
     JPEG = "jpeg"
+
+
+_MAGIC_BY_MEDIA: Final = {
+    ImageMedia.PNG: b"\x89PNG\r\n\x1a\n",
+    ImageMedia.JPEG: b"\xff\xd8\xff",
+}
+"""Leading bytes each encoding must start with, so ``media`` cannot restate a lie."""
 
 
 class ReasoningEffort(StrEnum):
@@ -132,6 +194,52 @@ class StopReason(StrEnum):
     REFUSAL = "refusal"
 
 
+class PageRasterLike(Protocol):
+    """Read-only structural view of an already-rendered raster produced by another slice.
+
+    Exists so :meth:`RasterImage.from_raster` can accept the export slice's field-for-field
+    twin -- and any later producer -- without this module importing a sibling ports module
+    and without the caller writing ``RasterImage(**other.model_dump())``, which copies the
+    fields while silently dropping whatever validators the destination declares.
+
+    All six members are read-only properties, which is what makes them covariant: the twin
+    types ``media`` as *its own* :class:`ImageMedia` enum, and a mutable attribute member
+    would be invariant and reject it. ``media`` is therefore typed ``str`` -- every
+    ``StrEnum`` member is one -- and :meth:`RasterImage.from_raster` converts by value, so
+    a producer whose encoding this slice does not know fails loudly at the boundary.
+    """
+
+    @property
+    def page_ref(self) -> str:
+        """Stable identity of the page these pixels depict."""
+        ...
+
+    @property
+    def media(self) -> str:
+        """Encoding of ``data``, as an :class:`ImageMedia` value."""
+        ...
+
+    @property
+    def data(self) -> bytes:
+        """Encoded image bytes."""
+        ...
+
+    @property
+    def width(self) -> int:
+        """Pixel width."""
+        ...
+
+    @property
+    def height(self) -> int:
+        """Pixel height."""
+        ...
+
+    @property
+    def render_dpi(self) -> int:
+        """Dots per inch the raster was rendered at."""
+        ...
+
+
 class RasterImage(BaseModel):
     """An already-rendered page raster, carried as bytes.
 
@@ -148,7 +256,7 @@ class RasterImage(BaseModel):
         owns fan-out and per-page cache hits, so calls are neither ordered nor one-to-one
         and a FIFO fake would happily return another page's text.
     media
-        Encoding of ``data``.
+        Encoding of ``data``, validated against ``data``'s leading magic bytes.
     data
         Encoded image bytes.
     width
@@ -167,6 +275,70 @@ class RasterImage(BaseModel):
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     render_dpi: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _check_media_header(self) -> Self:
+        """Reject bytes whose leading magic does not match the declared encoding.
+
+        Without this, :class:`ImageMedia` merely relocates the lie it was introduced to
+        stop: an adapter that trusted a ``Content-Type`` would set ``media`` from the wire
+        label and every consumer downstream -- including :meth:`digest`, which folds the
+        encoding in -- would inherit it.
+
+        Returns
+        -------
+        RasterImage
+            The validated model.
+
+        Raises
+        ------
+        ValueError
+            If ``data`` does not begin with ``media``'s magic bytes.
+        """
+        expected = _MAGIC_BY_MEDIA[self.media]
+        if not self.data.startswith(expected):
+            msg = (
+                f"declared media {self.media.value} but data starts with "
+                f"{self.data[: len(expected)]!r}, not {expected!r}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @classmethod
+    def from_raster(cls, source: PageRasterLike, /) -> Self:
+        """Adopt another slice's raster value object as this slice's.
+
+        The single sanctioned conversion while two twins exist -- see this module's
+        docstring, which requires both to be hoisted into one shared module. Structural in
+        its parameter, so the export slice's rasterizer output is accepted with no import
+        of that slice and no field-by-field splat at the call site.
+
+        Parameters
+        ----------
+        source
+            Any already-rendered raster: the export slice's twin, another
+            :class:`RasterImage`, or a fake exposing the same six members.
+
+        Returns
+        -------
+        RasterImage
+            An equal-valued raster of this slice's type. ``digest()`` is unchanged by the
+            conversion, which the shared contract suite asserts.
+
+        Raises
+        ------
+        ValueError
+            If ``source.media`` is not an encoding this slice knows, or if its bytes
+            disagree with it.
+        """
+        return cls(
+            page_ref=source.page_ref,
+            media=ImageMedia(source.media),
+            data=source.data,
+            width=source.width,
+            height=source.height,
+            render_dpi=source.render_dpi,
+        )
 
     def digest(self) -> str:
         """Return a stable content digest of these pixels and their scale.
@@ -312,9 +484,11 @@ class VisionCompletion(BaseModel):
         Why generation stopped. See :class:`StopReason` -- truncation and refusal arrive
         here, not as exceptions.
     request_digest
-        Echo of :meth:`VisionRequest.digest` for the request that produced this.
+        Echo of :meth:`VisionRequest.digest` for the request that produced this. Fill it
+        with :meth:`answering`, never by hand.
     model_fingerprint
-        Echo of :attr:`VisionLanguageModel.fingerprint` at the time of the call.
+        Echo of :attr:`VisionLanguageModel.fingerprint` at the time of the call. Fill it
+        with :meth:`answering`, never by hand.
     reasoning
         Latent reasoning text if the adapter produced any, else ``None`` -- including
         when a requested :class:`ReasoningEffort` could not be honoured.
@@ -330,6 +504,56 @@ class VisionCompletion(BaseModel):
     model_fingerprint: str = Field(min_length=1)
     reasoning: str | None = None
     usage: TokenUsage | None = None
+
+    @classmethod
+    def answering(
+        cls,
+        request: VisionRequest,
+        /,
+        *,
+        fingerprint: str,
+        text: str,
+        stop_reason: StopReason,
+        reasoning: str | None = None,
+        usage: TokenUsage | None = None,
+    ) -> Self:
+        """Build a completion whose echo fields are derived, not copied.
+
+        Both echoes are cache-key components (see this module's docstring). An adapter or
+        fake that fills them by hand can transpose them, stale-cache one of them, or copy
+        a digest from the previous call, and the row it writes then looks valid for input
+        that never produced it. Deriving them here removes the opportunity: the only
+        identity the caller supplies is its own :attr:`VisionLanguageModel.fingerprint`.
+
+        Parameters
+        ----------
+        request
+            The request that produced this answer; its :meth:`VisionRequest.digest` becomes
+            ``request_digest``.
+        fingerprint
+            The answering binding's :attr:`VisionLanguageModel.fingerprint`.
+        text
+            The model's answer, possibly empty.
+        stop_reason
+            Why generation stopped.
+        reasoning
+            Latent reasoning text if any was produced.
+        usage
+            Token accounting if the provider reported it.
+
+        Returns
+        -------
+        VisionCompletion
+            The completion, with ``request_digest`` and ``model_fingerprint`` filled.
+        """
+        return cls(
+            text=text,
+            stop_reason=stop_reason,
+            request_digest=request.digest(),
+            model_fingerprint=fingerprint,
+            reasoning=reasoning,
+            usage=usage,
+        )
 
     @property
     def is_complete(self) -> bool:
@@ -362,17 +586,28 @@ class Recognition(BaseModel):
     provider_id
         Echo of the recognizer's :attr:`TextRecognizer.provider_id`. Present so a
         partial-failure report can say which engine produced which reading, and so the
-        app can fold the surviving engines into the cache key.
+        app can fold the surviving engines into the cache key. This exact string is what
+        the app writes into the key -- see :attr:`TextRecognizer.provider_id`.
     page_ref
         Echo of :attr:`RasterImage.page_ref`, so a reading cannot be attributed to the
-        wrong page.
+        wrong page. A live-call fact only: :meth:`RasterImage.digest` excludes
+        ``page_ref``, so a cached row is legitimately shared by two pages with identical
+        pixels and a stored value may name a different slot than the one being read. The
+        app must re-stamp it from the raster in hand when hydrating a row --
+        :meth:`attributed` is that one call -- and must never trust a stored value.
     text
         Recognised text. Empty means the engine succeeded and found nothing; the app
         raises ``NoTextRecognized`` and skips the completion call rather than paying for
         a blank page.
     mean_confidence
-        Mean confidence normalised to ``0.0`` -- ``1.0``. Both existing engines already
-        report on that scale.
+        Mean per-character confidence over :attr:`text`, normalised to ``0.0`` -- ``1.0``:
+        character-weighted, not line-weighted, so one confident word on a page of noise
+        cannot outvote the noise. ``None`` when the engine reports no confidence signal at
+        all, which is the honest answer for a VLM-backed recognizer and for a blank
+        reading with nothing to be confident about. Required-and-float forced those cases
+        to fabricate ``0.0`` (reads as a garbage reading) or ``1.0`` (reads as a perfect
+        one); ``None`` matches ``OcrArtifact.mean_confidence`` in
+        :mod:`rmspec.domain.models`, which the app persists this into.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
@@ -380,7 +615,47 @@ class Recognition(BaseModel):
     provider_id: str = Field(min_length=1)
     page_ref: str = Field(min_length=1)
     text: str
-    mean_confidence: float = Field(ge=0.0, le=1.0)
+    mean_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @classmethod
+    def attributed(
+        cls,
+        image: PageRasterLike,
+        /,
+        *,
+        provider_id: str,
+        text: str,
+        mean_confidence: float | None = None,
+    ) -> Self:
+        """Build a reading whose page attribution is derived from the raster that was read.
+
+        ``page_ref`` is otherwise an unenforced echo: a recognizer -- or a fake -- could
+        return another page's slot and the app would cache one page's text under another.
+        Deriving it from the raster removes the opportunity, and gives the app a single
+        call for the re-stamp a hydrated cache row requires.
+
+        Parameters
+        ----------
+        image
+            The raster that was read; its ``page_ref`` becomes this reading's.
+        provider_id
+            The reading engine's :attr:`TextRecognizer.provider_id`.
+        text
+            Recognised text, possibly empty.
+        mean_confidence
+            Character-weighted mean confidence, or ``None`` when the engine reports none.
+
+        Returns
+        -------
+        Recognition
+            The reading, attributed to ``provider_id`` and to the raster's page.
+        """
+        return cls(
+            provider_id=provider_id,
+            page_ref=image.page_ref,
+            text=text,
+            mean_confidence=mean_confidence,
+        )
 
     @property
     def has_text(self) -> bool:
@@ -409,6 +684,14 @@ class VisionLanguageModel(Protocol):
     AWS by another name. Anything the app needs about model identity is folded into
     :attr:`fingerprint`.
 
+    That invariant was previously stated here and then broken by the ``Raises`` clause:
+    mandating ``ModelAccessDenied(model_id=..., region=...)`` obliged every adapter to
+    produce a region -- fabricated as ``"n/a"`` for anything but Bedrock -- and obliged the
+    app's handler to read it back off the exception. The clause below no longer mandates a
+    provider deployment axis, and it names the unreachable case that four errors could not
+    express; both requirements on the error tree are spelled out in this module's
+    docstring.
+
     Notes
     -----
     Not ``runtime_checkable``: nothing needs ``isinstance`` against it, and structural
@@ -423,6 +706,15 @@ class VisionLanguageModel(Protocol):
         adapter-fixed generation settings. Opaque on purpose: the app puts it in a cache
         key and compares it for equality, and never parses it, so an adapter can add a
         setting to its identity without the domain learning that the setting exists.
+
+        Contract, enforced by the shared adapter suite rather than by trust: this value
+        MUST change whenever the adapter changes what it sends for a given
+        :class:`VisionRequest` -- a different model, endpoint or API envelope, an injected
+        system scaffold, a changed fixed setting, a revised request-building body. Derive
+        it mechanically, by hashing those inputs together; a hand-written constant is the
+        one implementation that silently makes every stale row look fresh, which is defect
+        3 in its purest form. The suite asserts that two instances differing in any single
+        constructor argument return different fingerprints, which no constant can pass.
 
         Returns
         -------
@@ -440,33 +732,54 @@ class VisionLanguageModel(Protocol):
         Parameters
         ----------
         request
-            The request. Its images are already-rendered bytes; admissibility (count,
-            encoding, byte size) is a pure domain check the app runs first, so this
-            method never raises for an unusable image.
+            The request, carrying already-rendered image bytes. Per-binding ceilings --
+            image count, per-image bytes, pixel bounds, the model's own output-token
+            maximum -- are not published here and are not pre-checked by the domain: a
+            self-hosted binding cannot state them honestly, a published set would be a
+            second source of truth that drifts from the provider's real one, and
+            :attr:`fingerprint` is contractually opaque so nothing here could carry them.
+            A request the binding cannot accept therefore surfaces as
+            ``ModelRejectedRequest``, which is the same answer the provider gives. An app
+            that wants to avoid the round trip may pre-screen with its own policy; that is
+            app policy, not a port promise.
 
         Returns
         -------
         VisionCompletion
             The answer, with ``stop_reason`` reported as data. Truncation and refusal are
-            not exceptions -- see :class:`StopReason`.
+            not exceptions -- see :class:`StopReason`. Build it with
+            :meth:`VisionCompletion.answering` so the echoed cache-key components are
+            derived from ``request`` and :attr:`fingerprint` rather than copied.
 
         Raises
         ------
+        ModelUnavailable
+            The binding could not be reached or did not answer: refused connection to a
+            local daemon, DNS failure, request timeout, HTTP 503/529, or Bedrock's
+            ``ModelTimeoutException`` / ``ServiceUnavailableException`` /
+            ``InternalServerException``. Carries the endpoint tried and ``retryable``, so
+            the CLI's retry-once branch works without the app parsing prose. This is the
+            dominant failure of every HTTP-backed adapter, and naming it is what stops one
+            from either letting ``httpx.ConnectError`` cross the port or reporting an
+            outage as a throttle.
         ModelAccessDenied
             The caller is not entitled to this model. Distinct from a throttle because a
-            missing model grant is a permanent misconfiguration to report, while a
-            throttle is worth retrying; today both surface identically.
+            missing grant is a permanent misconfiguration to report, while a throttle is
+            worth retrying; today both surface identically. The deployment detail that
+            makes a grant fixable belongs in the error's ``remediation`` prose, which the
+            adapter authors, never in a required ``region`` argument only one provider can
+            supply.
         ModelThrottled
-            Rate or quota limit; retryable.
+            Rate or quota limit after the adapter's own retries; retryable.
         ModelRejectedRequest
             The provider rejected the request itself -- payload too large, unsupported
             image, budget above the model's ceiling. Note this is *not* a content
             refusal: a refusal is ``StopReason.REFUSAL`` on a successful completion.
         ModelResponseMalformed
-            A well-formed HTTP exchange whose body could not be read as a completion.
-            This is the one error that covers both latent legacy crashes: the reverse
-            scan for a text block falling through to index ``0`` when block ``0`` is a
-            reasoning block, and an empty content list.
+            A well-formed exchange whose body could not be read as a completion. This is
+            the one error that covers both latent legacy crashes: the reverse scan for a
+            text block falling through to index ``0`` when block ``0`` is a reasoning
+            block, and an empty content list.
         """
         ...
 
@@ -510,9 +823,15 @@ class TextRecognizer(Protocol):
 
     Notes
     -----
-    Concurrency is above this port. There is no timeout parameter: a timeout is either
-    adapter construction configuration or a use-case concern, and a value published here
-    would be unenforceable for an in-process engine and false for a blocking client.
+    One instance MUST tolerate concurrent :meth:`recognize` calls from several threads.
+    The app fans recognizers out; leaving thread-safety unstated would make that fan-out
+    undecidable and force the caller to guess whether to build one instance or one per
+    thread. An adapter holding a thread-hostile handle serialises internally -- a lock it
+    owns -- rather than exporting the constraint to every call site.
+
+    There is no timeout parameter: a timeout is either adapter construction configuration
+    or a use-case concern, and a value published here would be unenforceable for an
+    in-process engine and false for a blocking client.
     """
 
     @property
@@ -523,6 +842,12 @@ class TextRecognizer(Protocol):
         enumeration: a new engine must be a new adapter plus a container edit, never a
         domain edit. Engine revision is part of the slug, so bumping it invalidates cache
         rows that were produced by the older engine.
+
+        This exact string is what the app writes into the recognizer component of the cache
+        key. That component folds the *surviving* engines in **sorted** order -- binding
+        order, never completion order -- because a fan-out that finishes in a different
+        sequence on the next run would otherwise digest to a different key for identical
+        work and miss every row it wrote.
 
         Returns
         -------
@@ -537,13 +862,19 @@ class TextRecognizer(Protocol):
         Parameters
         ----------
         image
-            The rendered page. Bytes, never a path.
+            The rendered page. Bytes, never a path. Pixels that arrived from the export
+            slice's rasterizer are converted once with :meth:`RasterImage.from_raster` and
+            the result passed to every reader, so one page's bytes are described by one
+            value object.
 
         Returns
         -------
         Recognition
-            This engine's reading, attributed to :attr:`provider_id` and to the image's
-            ``page_ref``. A blank page is a successful empty reading, not an error.
+            This engine's reading, built with :meth:`Recognition.attributed` so it is
+            attributed to :attr:`provider_id` and to the image's own ``page_ref``. A blank
+            page is a successful empty reading -- ``text=""`` with
+            ``mean_confidence=None``, because there is nothing to be confident about --
+            not an error.
 
         Raises
         ------
