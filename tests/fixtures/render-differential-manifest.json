@@ -1,0 +1,293 @@
+{
+ "purpose": "Differential oracle for the step-3 render/export relocation. The new packages must reproduce every svg_sha256 byte-for-byte from the same rm_sha256.",
+ "produced_by": "legacy src/remarkable_spec at commit 14f1960",
+ "render_params": {
+  "thickness": 1.5,
+  "screen": "detect_screen(layers)",
+  "page_uuid": "UUID(int=0)"
+ },
+ "note": "Keyed by rm_sha256, never by path -- the source files are a personal backup outside the repo and are not committed. Rendered SVGs are not committed either.",
+ "count": 30,
+ "failures": [],
+ "entries": [
+  {
+   "rm_sha256": "e99ea1d3899310ca5a9d8dbdd24eaf9faa4599ba4a6ad0adaf47a02d3d2f4963",
+   "rm_bytes": 116622,
+   "layers": 1,
+   "strokes": 408,
+   "screen": "1620x2160",
+   "svg_sha256": "2ee5691d670b22ab88ab942db8e883f34a0e0b5d07774be507bcf50186595671",
+   "svg_bytes": 639327
+  },
+  {
+   "rm_sha256": "aa4bf02a04895a13f136e9748275d58092b756f2b6c0825a9e6da059de1edc07",
+   "rm_bytes": 76147,
+   "layers": 1,
+   "strokes": 221,
+   "screen": "1404x1872",
+   "svg_sha256": "b44df1ac678f1598b22ce4bb83e0e81638c7c676a190bc3848e8c1e11ac9721b",
+   "svg_bytes": 440767
+  },
+  {
+   "rm_sha256": "5b873d79068e91589cd64bd9856d8f33bae499a22c86d58ccccee9db12d56bc6",
+   "rm_bytes": 313,
+   "layers": 1,
+   "strokes": 0,
+   "screen": "1404x1872",
+   "svg_sha256": "422de376dd08e237a6aced34caca149e725abc93fe57f6e483c3ecd9da40e284",
+   "svg_bytes": 273
+  },
+  {
+   "rm_sha256": "6775bda9f8a1119facf042fced7aad280fb900c22d6fd421c7ea733612d1de9a",
+   "rm_bytes": 30078,
+   "layers": 1,
+   "strokes": 86,
+   "screen": "1404x1872",
+   "svg_sha256": "4a340e16801a751a3250ca7325992b3e42793784085e194566bb041755fea5de",
+   "svg_bytes": 160173
+  },
+  {
+   "rm_sha256": "bdadfcdc4e16258c44b61d45ef555f1f6ea93f610cf93b36d9cd991504ab09d1",
+   "rm_bytes": 87797,
+   "layers": 1,
+   "strokes": 209,
+   "screen": "1620x2160",
+   "svg_sha256": "0d8b09a48a29bb7a7d931324f12c60618f4d7e4af0db8069174f57d43e82526f",
+   "svg_bytes": 533897
+  },
+  {
+   "rm_sha256": "88667002a8c3c36bed6c6fba12c57bf3efdd78a6bce3eea9e48393cbb8c004ed",
+   "rm_bytes": 115028,
+   "layers": 1,
+   "strokes": 297,
+   "screen": "1620x2160",
+   "svg_sha256": "a0649493bf5289a71ed0e16138b100fd4854ae7eb803d8fc958eddc11a0b4a1e",
+   "svg_bytes": 691492
+  },
+  {
+   "rm_sha256": "c13aa3973ed87245ec567b7d6a72bbecd117786d25fa7a736d8fadfbd33491c5",
+   "rm_bytes": 4047747,
+   "layers": 1,
+   "strokes": 5060,
+   "screen": "1620x2160",
+   "svg_sha256": "980eddbf1710b482e0b005d17c350a7b911a68d13c987d2f36ab6285fd20b4c0",
+   "svg_bytes": 27994312
+  },
+  {
+   "rm_sha256": "120d5a0894a75e6ba1981deb29f25e279586163ce444524cb40584cdb33226be",
+   "rm_bytes": 956063,
+   "layers": 1,
+   "strokes": 2535,
+   "screen": "1620x2160",
+   "svg_sha256": "71fedbe74c046f0cbfea4a55d9af8b4fc4a27ca661224dafc47ff5f67b395948",
+   "svg_bytes": 5785987
+  },
+  {
+   "rm_sha256": "91a1a61e44b82e97e27b0edb41cc17d911382d9713cd486a54d67cadca0b30aa",
+   "rm_bytes": 1932397,
+   "layers": 1,
+   "strokes": 4079,
+   "screen": "1620x2160",
+   "svg_sha256": "7b334a997b421570d3669b1610d6bdd20d390a9994c7c78d5cf9938c2352c722",
+   "svg_bytes": 12099805
+  },
+  {
+   "rm_sha256": "ec8f2ccaef54d91daebab6cbd94873a897b6ed301296f252655dbca10281c262",
+   "rm_bytes": 132306,
+   "layers": 1,
+   "strokes": 309,
+   "screen": "1620x2160",
+   "svg_sha256": "1be7e69d21dcfa7cc1c6b48a2da9adc8b8310e0c30a1db8ad4c5d750875b352c",
+   "svg_bytes": 812048
+  },
+  {
+   "rm_sha256": "e3efd035a5b0cc00d89429b7d66826573db9455c1953dc2ec0647ba395fcb719",
+   "rm_bytes": 36611,
+   "layers": 1,
+   "strokes": 100,
+   "screen": "1404x1872",
+   "svg_sha256": "35acca6d9704703257682c0ea409f247285186e0a9ed050ae9385895dec53b93",
+   "svg_bytes": 211459
+  },
+  {
+   "rm_sha256": "f8cb2b3d11557a23344a1957be9b791a3547e478ed0424b3ee7358d5b07c8125",
+   "rm_bytes": 155605,
+   "layers": 1,
+   "strokes": 472,
+   "screen": "1620x2160",
+   "svg_sha256": "d790b1d600716d45f408df6a4107e6053ac2a320202ef737658287bd2db52c8f",
+   "svg_bytes": 894134
+  },
+  {
+   "rm_sha256": "629e91fb8876a0aece055267506136281c757d920063603d6213925ce967fc69",
+   "rm_bytes": 107441,
+   "layers": 1,
+   "strokes": 319,
+   "screen": "1620x2160",
+   "svg_sha256": "20feba0c6316283cebce5df007ca614f6c07ed64cf07d7502f1ef619c7a27309",
+   "svg_bytes": 617603
+  },
+  {
+   "rm_sha256": "1778ca298c4258c2007ee92c453a33585c91a2527af1ef2015601f4f0c6c342c",
+   "rm_bytes": 200456,
+   "layers": 1,
+   "strokes": 390,
+   "screen": "1620x2160",
+   "svg_sha256": "a21fbd2147b357ac0124a262d2241256c6a600eaad512e7e6b36a56c7be1242d",
+   "svg_bytes": 1428326
+  },
+  {
+   "rm_sha256": "3b6314519d0e7200a0e833cd323cafb94359e58de5cc635a928c683dab9552f9",
+   "rm_bytes": 358,
+   "layers": 1,
+   "strokes": 0,
+   "screen": "1404x1872",
+   "svg_sha256": "422de376dd08e237a6aced34caca149e725abc93fe57f6e483c3ecd9da40e284",
+   "svg_bytes": 273
+  },
+  {
+   "rm_sha256": "fd6dc493e20fac30d988ed01aab9831bdec8bc4a816e20e71180e114950f3936",
+   "rm_bytes": 78470,
+   "layers": 1,
+   "strokes": 222,
+   "screen": "1620x2160",
+   "svg_sha256": "75adda6eb43bf91c84d3b88df6c204f4d988ae87f7110dfe581fa407a0b6e806",
+   "svg_bytes": 461408
+  },
+  {
+   "rm_sha256": "0552c18d01c816015c40a18853f5c962fe4bdcb69898ad9e9dd2c44b0348684b",
+   "rm_bytes": 393737,
+   "layers": 1,
+   "strokes": 580,
+   "screen": "1620x2160",
+   "svg_sha256": "6153d408bec3beb87545956fc4f595ce532d26eb9895565f6f2c5a9652334344",
+   "svg_bytes": 2632627
+  },
+  {
+   "rm_sha256": "721e948a0cac30cf1269c969f968d73e0f322d21096525a164c81d7be52f4687",
+   "rm_bytes": 78332,
+   "layers": 1,
+   "strokes": 235,
+   "screen": "1620x2160",
+   "svg_sha256": "ad9aff3f82a4b0b0bc67fd0c47dbf6f73998894fdb7f1ce2f166be48017dc20f",
+   "svg_bytes": 448097
+  },
+  {
+   "rm_sha256": "ee21fdff8b20b2f177a63e4aec73661fc9d628fcceeb38d0eda654e011dd9273",
+   "rm_bytes": 339211,
+   "layers": 1,
+   "strokes": 820,
+   "screen": "1620x2160",
+   "svg_sha256": "5c874eda7a4e7569de951951db357ac3e6b50c3e86f10c2680d9b57fe3309257",
+   "svg_bytes": 2081040
+  },
+  {
+   "rm_sha256": "bff3331884baf524868b5bfe31dd2f35be8cce0c926b594f91e0d402812458ef",
+   "rm_bytes": 13301,
+   "layers": 1,
+   "strokes": 37,
+   "screen": "1620x2160",
+   "svg_sha256": "eda612269bb0a895e6d9dc53782bf3ada80f95ebdc863c5192dd6012f44090e9",
+   "svg_bytes": 75942
+  },
+  {
+   "rm_sha256": "20b7d2f37e12a60761a6e1fcacd4470af2980e06d1aa0ff35a3bf1515731e3f5",
+   "rm_bytes": 5379,
+   "layers": 1,
+   "strokes": 4,
+   "screen": "1620x2160",
+   "svg_sha256": "c1344fdaa07aa7f36c2b9699d995568192bd49b0fafb1e826088ecb4cf432b97",
+   "svg_bytes": 35016
+  },
+  {
+   "rm_sha256": "fd7bd2e184447ee1d299477a5058475f7a36623644afa378778db704ca31116b",
+   "rm_bytes": 9520,
+   "layers": 1,
+   "strokes": 30,
+   "screen": "1620x2160",
+   "svg_sha256": "c5147add5bdf2c4ca202313b22ce3fc7aeff5f04c99717c190a8538db6fcb090",
+   "svg_bytes": 52093
+  },
+  {
+   "rm_sha256": "1e51136ff14e05ded074c70c2cf618482fc107b9ffbc9c8ab07ddb435f34ad00",
+   "rm_bytes": 27787,
+   "layers": 1,
+   "strokes": 90,
+   "screen": "1620x2160",
+   "svg_sha256": "78e05a75a564eece4560e4af689ba6f77a69dbf1c91947ab2c8faaa7bb046ad5",
+   "svg_bytes": 154966
+  },
+  {
+   "rm_sha256": "fe5b8c4a5a0bd4747a4f47f4b2b0783bccf2ec31a50d72d8dcaf98204f3bcba4",
+   "rm_bytes": 25906,
+   "layers": 1,
+   "strokes": 81,
+   "screen": "1620x2160",
+   "svg_sha256": "d3c8807be688b4cc3e3c3d18da2d31480714c2e8b60ae690779ef36ad8942f6c",
+   "svg_bytes": 146443
+  },
+  {
+   "rm_sha256": "8bafca00612d69aae4d0487ad6aa13980b7731c83cdd08289052a21af693dd46",
+   "rm_bytes": 2901,
+   "layers": 1,
+   "strokes": 2,
+   "screen": "1404x1872",
+   "svg_sha256": "cf329c6af1146736a075a4e3f54cc4bf631b8abe8d24bd25ae14f404db7935ad",
+   "svg_bytes": 17418
+  },
+  {
+   "rm_sha256": "78d7554891339192425dd0705c5bfb2c3b1235eaf1a86d6c5f0d46c060408c70",
+   "rm_bytes": 66280,
+   "layers": 1,
+   "strokes": 112,
+   "screen": "1620x2160",
+   "svg_sha256": "f17d49a7a86b11aa08ec4b65f3ea48fb470a90e990939f17cdd85aebb1ef3125",
+   "svg_bytes": 436099
+  },
+  {
+   "rm_sha256": "4909970a812c3a2e4654b85554773c479787512736bd43440ed6ae5d09a8a39a",
+   "rm_bytes": 434,
+   "layers": 1,
+   "strokes": 0,
+   "screen": "1404x1872",
+   "svg_sha256": "422de376dd08e237a6aced34caca149e725abc93fe57f6e483c3ecd9da40e284",
+   "svg_bytes": 273
+  },
+  {
+   "rm_sha256": "696226f183919812417338c45ae15f55f1a9e3245453c231d068b64a076b0a16",
+   "rm_bytes": 51806,
+   "layers": 1,
+   "strokes": 99,
+   "screen": "1620x2160",
+   "svg_sha256": "b762b88d8de33c642538fa58d5264e9d604edb529031d77e3df8dc896164f11d",
+   "svg_bytes": 327427
+  },
+  {
+   "rm_sha256": "fe9228fb82bec9bce9bad1bfb92dbe5a4b5520821b32f1f24705d79a84e058fb",
+   "rm_bytes": 26064,
+   "layers": 1,
+   "strokes": 95,
+   "screen": "1620x2160",
+   "svg_sha256": "0b63287a24027e58254fa3b3c39c03501c37b682d8a22e509da3ec3f62c04416",
+   "svg_bytes": 139307
+  },
+  {
+   "rm_sha256": "e3907854704c045dadc5bebcd75b363c25ca5b33bf379d65a17858b2c9898822",
+   "rm_bytes": 553,
+   "layers": 1,
+   "strokes": 1,
+   "screen": "1620x2160",
+   "svg_sha256": "552a3bbc100ffc5d85e4261192194a56f011c2b699255375d418f600a1a719ba",
+   "svg_bytes": 642
+  }
+ ],
+ "empty_stub_class": {
+  "count": 62,
+  "of_total": 92,
+  "finding": "62 of 92 .rm files in the reference corpus are ZERO bytes -- the empty stubs written for unannotated pages of a PDF-backed document (legacy src/remarkable_spec/device/sync.py writes these). They are a NORMAL state, not corruption.",
+  "legacy_behaviour": "parse_rm_file raises a bare EOFError with an empty message. Two thirds of a real corpus therefore crashes any naive page loop, and the exception says nothing about why.",
+  "required_new_behaviour": "An empty stub must be a typed, expected outcome distinguishable from a truncated or malformed file -- a page with no ink, not a parse failure. A test must assert the distinction, because the OCR and render loops both iterate every page of a PDF-backed document and will meet this on most of them.",
+  "sample_header_of_a_valid_file": "reMarkable .lines file, version=6       "
+ },
+ "screen_detection_note": "detect_screen classified 23 of the 30 renderable pages as Paper Pro (1620x2160) and 7 as reMarkable 2 (1404x1872), from one device's backup. Either the corpus genuinely spans two device generations or the stroke-extent heuristic is misclassifying sparse pages. The relocated code must reproduce whichever answer the legacy code gave -- these hashes encode it -- but the heuristic itself is worth a separate look."
+}
