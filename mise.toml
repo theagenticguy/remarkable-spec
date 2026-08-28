@@ -48,11 +48,17 @@ run = "uv run pytest --testmon -q -m 'not hardware'"
 
 [tasks.test]
 description = "Full suite, parallel, with a coverage report"
-run = "uv run pytest -n auto -m 'not hardware' --cov --cov-report=term-missing"
+run = "uv run pytest -n auto -m 'not hardware' --cov=packages/rmspec-app/src/rmspec/app --cov=packages/rmspec-cli/src/rmspec/cli --cov=packages/rmspec-device/src/rmspec/device --cov=packages/rmspec-domain/src/rmspec/domain --cov=packages/rmspec-export/src/rmspec/export --cov=packages/rmspec-formats/src/rmspec/formats --cov=packages/rmspec-ocr/src/rmspec/ocr --cov=packages/rmspec-persistence/src/rmspec/persistence --cov=packages/rmspec-render/src/rmspec/render --cov-report=term-missing"
 
+# NOTE on the --cov flags: they must name each module directory explicitly.
+# `--cov`, `--cov=packages` and `--cov=rmspec` all silently measure only the nine
+# already-imported __init__.py files -- 18 statements at 100% -- because `rmspec`
+# is a PEP 420 namespace package with no single __file__ for coverage to walk.
+# That hole let 6,269 lines of untested source report as 100% covered.
+# tests/architecture/test_coverage_config.py asserts a flag exists per package.
 [tasks.test-cov]
 description = "Full suite with the >=90% gate. The definition of done."
-run = "uv run pytest -n auto -m 'not hardware' --cov --cov-report=xml --cov-report=term-missing --cov-fail-under=90"
+run = "uv run pytest -n auto -m 'not hardware' --cov=packages/rmspec-app/src/rmspec/app --cov=packages/rmspec-cli/src/rmspec/cli --cov=packages/rmspec-device/src/rmspec/device --cov=packages/rmspec-domain/src/rmspec/domain --cov=packages/rmspec-export/src/rmspec/export --cov=packages/rmspec-formats/src/rmspec/formats --cov=packages/rmspec-ocr/src/rmspec/ocr --cov=packages/rmspec-persistence/src/rmspec/persistence --cov=packages/rmspec-render/src/rmspec/render --cov-report=xml --cov-report=term-missing --cov-fail-under=90"
 
 [tasks.test-hardware]
 description = "Tests that need the tablet attached. Never runs in CI."

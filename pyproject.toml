@@ -122,6 +122,11 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
+# `--cov` with no value does NOT discover unexecuted files from this `source`
+# setting -- it silently reported 18 statements at 100% while 6,269 lines of
+# brand-new untested source sat next to it. The mise tasks therefore pass
+# `--cov=packages` explicitly; this stays as documentation of intent and for
+# anyone invoking coverage directly.
 source = ["packages"]
 omit = ["*/tests/*", "*/__main__.py"]
 relative_files = true

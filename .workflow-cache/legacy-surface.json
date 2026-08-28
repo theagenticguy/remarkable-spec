@@ -1,0 +1,1640 @@
+{
+ "cli/__init__.py": {
+  "loc": 72,
+  "items": [
+   {
+    "kind": "def",
+    "line": 61,
+    "sig": "_get_version() -> str",
+    "doc": "Get the package version."
+   }
+  ]
+ },
+ "cli/_resolve.py": {
+  "loc": 290,
+  "items": [
+   {
+    "kind": "def",
+    "line": 27,
+    "sig": "resolve_document(xochitl_dir, name, console) -> tuple[str, str, list[Path | None]] | None",
+    "doc": "Resolve a document name or UUID prefix to its .rm file paths."
+   },
+   {
+    "kind": "class",
+    "line": 105,
+    "sig": "_DocInfo()",
+    "doc": "",
+    "members": [
+     "__init__(doc_uuid, visible_name, last_modified, page_uuids) -> None  #L108"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 121,
+    "sig": "_pick_best(matches, name, xochitl_dir, console) -> tuple[str, str, list[Path | None]] | None",
+    "doc": "Pick the best match from a list and return (uuid, name, rm_files)."
+   },
+   {
+    "kind": "def",
+    "line": 158,
+    "sig": "_get_page_uuids(xochitl_dir, doc_uuid) -> list[str]",
+    "doc": "Read .content to get ordered page UUIDs."
+   },
+   {
+    "kind": "def",
+    "line": 176,
+    "sig": "_get_redir_map(xochitl_dir, doc_uuid) -> dict[str, int]",
+    "doc": "Map page UUID to its PDF page index from the ``redir`` field in ``.content``."
+   },
+   {
+    "kind": "def",
+    "line": 199,
+    "sig": "_parse_content_file(xochitl_dir, doc_uuid) -> dict",
+    "doc": "Parse a document's .content JSON file."
+   },
+   {
+    "kind": "class",
+    "line": 211,
+    "sig": "ResolvedDocument()",
+    "doc": "Full resolution result for a document, including PDF metadata.",
+    "members": [
+     "doc_uuid: str  #L226",
+     "visible_name: str  #L227",
+     "rm_files: list[Path | None]  #L228",
+     "file_type: str  #L229",
+     "pdf_path: Path | None  #L230",
+     "page_indices: list[int]  #L231"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 234,
+    "sig": "resolve_document_full(xochitl_dir, name, console) -> ResolvedDocument | None",
+    "doc": "Resolve a document name/UUID to full metadata including PDF path."
+   }
+  ]
+ },
+ "cli/_util.py": {
+  "loc": 112,
+  "items": [
+   {
+    "kind": "class",
+    "line": 13,
+    "sig": "RmspecSettings(BaseSettings)",
+    "doc": "Global settings for the rmspec CLI.",
+    "members": [
+     "xochitl: Path | None  #L29",
+     "device_host: str  #L34",
+     "device_user: str  #L39",
+     "device_password: str | None  #L43",
+     "thickness: float  #L47",
+     "dpi: int  #L52",
+     "sync_db: Path | None  #L56"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 75,
+    "sig": "get_sync_db() -> None",
+    "doc": "Get a SyncDB instance using the configured path."
+   },
+   {
+    "kind": "def",
+    "line": 85,
+    "sig": "get_xochitl_dir(explicit) -> Path | None",
+    "doc": "Resolve xochitl directory from explicit arg, env var, or .env file."
+   }
+  ]
+ },
+ "cli/annotations_cmd.py": {
+  "loc": 299,
+  "items": [
+   {
+    "kind": "def",
+    "line": 83,
+    "sig": "annotations(source) -> None",
+    "doc": "Analyze handwritten annotations on PDF documents."
+   },
+   {
+    "kind": "def",
+    "line": 209,
+    "sig": "_analyze_page(rm_path, pdf_page_idx, pdf_path, pdf_text, result, page_idx, dpi, thickness) -> str",
+    "doc": "Render a page with PDF background and analyze annotations via Opus."
+   },
+   {
+    "kind": "def",
+    "line": 251,
+    "sig": "_invoke_annotation_analysis(image_path, pdf_text, model_id, region) -> str",
+    "doc": "Send composite image + PDF text to Opus for annotation analysis."
+   }
+  ]
+ },
+ "cli/device_cmd.py": {
+  "loc": 504,
+  "items": [
+   {
+    "kind": "def",
+    "line": 51,
+    "sig": "_check_device_deps() -> bool",
+    "doc": "Check if device dependencies are installed."
+   },
+   {
+    "kind": "def",
+    "line": 66,
+    "sig": "info() -> None",
+    "doc": "Show device information (model, firmware, storage)."
+   },
+   {
+    "kind": "def",
+    "line": 162,
+    "sig": "ls() -> None",
+    "doc": "List all documents on the device."
+   },
+   {
+    "kind": "def",
+    "line": 293,
+    "sig": "pull(doc_name, dest) -> None",
+    "doc": "Download a document from the device."
+   },
+   {
+    "kind": "def",
+    "line": 443,
+    "sig": "push(file) -> None",
+    "doc": "Upload a file to the device."
+   }
+  ]
+ },
+ "cli/diagram_cmd.py": {
+  "loc": 376,
+  "items": [
+   {
+    "kind": "def",
+    "line": 54,
+    "sig": "diagram(source) -> None",
+    "doc": "Extract Mermaid diagrams from handwritten reMarkable pages."
+   },
+   {
+    "kind": "def",
+    "line": 202,
+    "sig": "_extract_with_cache(rm_path, dpi, thickness, background_image_b64) -> MermaidResult",
+    "doc": "Extract Mermaid from a .rm file, using the sync DB cache when available."
+   },
+   {
+    "kind": "def",
+    "line": 261,
+    "sig": "_display_result(result, page_num) -> None",
+    "doc": "Display a MermaidResult to the console with syntax highlighting."
+   },
+   {
+    "kind": "def",
+    "line": 281,
+    "sig": "_render_mermaid(code, output_path) -> None",
+    "doc": "Render Mermaid code to PNG via mmdc."
+   },
+   {
+    "kind": "def",
+    "line": 309,
+    "sig": "_handle_result(result) -> None",
+    "doc": "Handle output for a single .rm file target."
+   },
+   {
+    "kind": "def",
+    "line": 351,
+    "sig": "_get_pdf_bg_diagram(result, page_idx, rm_path) -> tuple[str, tuple[float, float]] | None",
+    "doc": "Rasterize a PDF page background for diagram extraction."
+   }
+  ]
+ },
+ "cli/env_cmd.py": {
+  "loc": 63,
+  "items": [
+   {
+    "kind": "def",
+    "line": 27,
+    "sig": "env() -> None",
+    "doc": "Print environment variables for shell integration."
+   }
+  ]
+ },
+ "cli/inspect_cmd.py": {
+  "loc": 317,
+  "items": [
+   {
+    "kind": "def",
+    "line": 47,
+    "sig": "inspect_file(path) -> None",
+    "doc": "Inspect a reMarkable file and display its parsed structure."
+   },
+   {
+    "kind": "def",
+    "line": 103,
+    "sig": "_inspect_rm(path, json_output) -> None",
+    "doc": "Inspect a .rm binary file."
+   },
+   {
+    "kind": "def",
+    "line": 174,
+    "sig": "_inspect_metadata(path, json_output) -> None",
+    "doc": "Inspect a .metadata JSON file."
+   },
+   {
+    "kind": "def",
+    "line": 228,
+    "sig": "_inspect_content(path, json_output) -> None",
+    "doc": "Inspect a .content JSON file."
+   },
+   {
+    "kind": "def",
+    "line": 290,
+    "sig": "_inspect_pagedata(path, json_output) -> None",
+    "doc": "Inspect a .pagedata text file."
+   }
+  ]
+ },
+ "cli/ls_cmd.py": {
+  "loc": 309,
+  "items": [
+   {
+    "kind": "class",
+    "line": 57,
+    "sig": "_DocEntry()",
+    "doc": "Internal representation of a discovered document.",
+    "members": [
+     "uuid: str  #L60",
+     "name: str  #L61",
+     "doc_type: str  #L62",
+     "file_type: str  #L63",
+     "parent: str  #L64",
+     "page_count: int  #L65",
+     "last_modified: int  #L66",
+     "deleted: bool  #L67",
+     "pinned: bool  #L68",
+     "children: list[_DocEntry]  #L69"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 73,
+    "sig": "ls_documents(xochitl_dir) -> None",
+    "doc": "List all documents in a reMarkable xochitl directory."
+   },
+   {
+    "kind": "def",
+    "line": 158,
+    "sig": "_scan_documents(xochitl_dir) -> list[_DocEntry]",
+    "doc": "Scan the xochitl directory and build a list of document entries."
+   },
+   {
+    "kind": "def",
+    "line": 202,
+    "sig": "_output_table(entries) -> None",
+    "doc": "Display entries as a rich table."
+   },
+   {
+    "kind": "def",
+    "line": 242,
+    "sig": "_output_tree(entries) -> None",
+    "doc": "Display entries as a folder hierarchy tree."
+   },
+   {
+    "kind": "def",
+    "line": 265,
+    "sig": "_add_tree_children(tree_node, entries) -> None",
+    "doc": "Recursively add children to a rich Tree node."
+   },
+   {
+    "kind": "def",
+    "line": 283,
+    "sig": "_output_json(entries) -> None",
+    "doc": "Output entries as JSON."
+   },
+   {
+    "kind": "def",
+    "line": 302,
+    "sig": "_format_type(file_type) -> str",
+    "doc": "Format a file type string for display."
+   }
+  ]
+ },
+ "cli/ocr_cmd.py": {
+  "loc": 240,
+  "items": [
+   {
+    "kind": "def",
+    "line": 50,
+    "sig": "ocr(source) -> None",
+    "doc": "Run handwriting OCR on reMarkable pages."
+   },
+   {
+    "kind": "def",
+    "line": 179,
+    "sig": "_get_pdf_bg_ocr(result, page_idx, rm_path) -> tuple[str, tuple[float, float]] | None",
+    "doc": "Rasterize a PDF page background for OCR, using auto-detected screen."
+   },
+   {
+    "kind": "def",
+    "line": 207,
+    "sig": "_ocr_pdf_page_only(result, page_idx, dpi) -> str | None",
+    "doc": "OCR a bare PDF page (no annotation layer) via the full pipeline."
+   }
+  ]
+ },
+ "cli/render_cmd.py": {
+  "loc": 408,
+  "items": [
+   {
+    "kind": "def",
+    "line": 58,
+    "sig": "render(source, output) -> None",
+    "doc": "Render a .rm file or document to an image or document format."
+   },
+   {
+    "kind": "def",
+    "line": 131,
+    "sig": "_render_single_rm(rm_file, output) -> None",
+    "doc": "Render a single .rm file (original behavior)."
+   },
+   {
+    "kind": "def",
+    "line": 176,
+    "sig": "_render_document_by_name(name, output) -> None",
+    "doc": "Look up a document by name in the xochitl dir and render its pages."
+   },
+   {
+    "kind": "def",
+    "line": 302,
+    "sig": "_load_page_from_rm(rm_path, page_uuid) -> tuple[Page, ScreenSpec]",
+    "doc": "Load a .rm file and return a (Page, detected ScreenSpec) tuple."
+   },
+   {
+    "kind": "def",
+    "line": 313,
+    "sig": "_get_pdf_bg(result, page_idx, screen) -> tuple[str, tuple[float, float]] | None",
+    "doc": "Rasterize a PDF page background for a resolved document."
+   },
+   {
+    "kind": "def",
+    "line": 340,
+    "sig": "_export_page(page, output, suffix) -> None",
+    "doc": "Export a Page to the given output path based on file suffix."
+   }
+  ]
+ },
+ "cli/search_cmd.py": {
+  "loc": 250,
+  "items": [
+   {
+    "kind": "def",
+    "line": 46,
+    "sig": "search(query) -> None",
+    "doc": "Search for text across reMarkable notebooks."
+   },
+   {
+    "kind": "def",
+    "line": 76,
+    "sig": "_search_device(query, json_output) -> None",
+    "doc": "Search via the reMarkable USB web interface."
+   },
+   {
+    "kind": "def",
+    "line": 129,
+    "sig": "_search_local(query, doc_filter, xochitl, json_output) -> None",
+    "doc": "Search locally using Apple Vision OCR."
+   }
+  ]
+ },
+ "cli/sync_cmd.py": {
+  "loc": 425,
+  "items": [
+   {
+    "kind": "def",
+    "line": 48,
+    "sig": "_default() -> None",
+    "doc": "Show sync status (default when no subcommand given)."
+   },
+   {
+    "kind": "def",
+    "line": 81,
+    "sig": "_get_connection(host, user, password) -> None",
+    "doc": "Create a DeviceConnection with sensible defaults."
+   },
+   {
+    "kind": "def",
+    "line": 98,
+    "sig": "status() -> None",
+    "doc": "Show what's changed on the device since last sync."
+   },
+   {
+    "kind": "def",
+    "line": 171,
+    "sig": "pull() -> None",
+    "doc": "Pull only changed documents from the device (incremental sync)."
+   },
+   {
+    "kind": "def",
+    "line": 228,
+    "sig": "push(file) -> None",
+    "doc": "Push a file to the device."
+   },
+   {
+    "kind": "def",
+    "line": 368,
+    "sig": "log() -> None",
+    "doc": "Show sync history."
+   }
+  ]
+ },
+ "cli/tree_cmd.py": {
+  "loc": 234,
+  "items": [
+   {
+    "kind": "class",
+    "line": 47,
+    "sig": "_TreeEntry()",
+    "doc": "Internal representation of a document or folder for tree display.",
+    "members": [
+     "uuid: str  #L50",
+     "name: str  #L51",
+     "doc_type: str  #L52",
+     "file_type: str  #L53",
+     "parent: str  #L54",
+     "page_count: int  #L55",
+     "children: list[_TreeEntry]  #L56"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 60,
+    "sig": "tree(xochitl_dir) -> None",
+    "doc": "Show the folder hierarchy of documents in a xochitl directory."
+   },
+   {
+    "kind": "def",
+    "line": 118,
+    "sig": "_scan_entries(xochitl_dir) -> list[_TreeEntry]",
+    "doc": "Scan the xochitl directory and build a list of tree entries."
+   },
+   {
+    "kind": "def",
+    "line": 163,
+    "sig": "_output_tree(entries) -> None",
+    "doc": "Display entries as a rich folder hierarchy tree."
+   },
+   {
+    "kind": "def",
+    "line": 185,
+    "sig": "_add_tree_children(tree_node, entries, by_uuid) -> None",
+    "doc": "Recursively add children to a rich Tree node."
+   },
+   {
+    "kind": "def",
+    "line": 208,
+    "sig": "_output_json(entries) -> None",
+    "doc": "Output the tree structure as JSON."
+   }
+  ]
+ },
+ "device/connection.py": {
+  "loc": 231,
+  "items": [
+   {
+    "kind": "def",
+    "line": 25,
+    "sig": "_import_paramiko() -> paramiko",
+    "doc": "Lazily import paramiko, raising a helpful error if not installed."
+   },
+   {
+    "kind": "class",
+    "line": 38,
+    "sig": "DeviceConnection()",
+    "doc": "Manages an SSH connection to a reMarkable tablet.",
+    "members": [
+     "__init__(host, user, key_path, password) -> None  #L67",
+     "connect() -> None  #L81",
+     "disconnect() -> None  #L119",
+     "_ensure_connected() -> None  #L133",
+     "execute(command) -> str  #L140",
+     "get_file(remote, local) -> None  #L166",
+     "put_file(local, remote) -> None  #L183",
+     "list_dir(path) -> list[str]  #L202",
+     "__enter__() -> DeviceConnection  #L219",
+     "__exit__(exc_type, exc_val, exc_tb) -> None  #L224"
+    ]
+   }
+  ]
+ },
+ "device/paths.py": {
+  "loc": 46,
+  "items": [
+   {
+    "kind": "class",
+    "line": 13,
+    "sig": "DevicePaths()",
+    "doc": "Well-known filesystem paths and network constants for the reMarkable device.",
+    "members": [
+     "XOCHITL_DATA: str  #L35",
+     "TEMPLATES_BUILTIN: str  #L36",
+     "TEMPLATES_CUSTOM: str  #L37",
+     "CONFIG_FILE: str  #L38",
+     "UPDATE_CONF: str  #L39",
+     "SPLASH_DIR: str  #L40",
+     "SSH_KEYS: str  #L41",
+     "USB_IP: str  #L43",
+     "USB_SUBNET: str  #L44",
+     "WEB_API_PORT: int  #L45",
+     "SSH_PORT: int  #L46"
+    ]
+   }
+  ]
+ },
+ "device/push.py": {
+  "loc": 193,
+  "items": [
+   {
+    "kind": "def",
+    "line": 30,
+    "sig": "render_to_pdf(source) -> Path",
+    "doc": "Detect file type by extension and render to PDF."
+   },
+   {
+    "kind": "def",
+    "line": 58,
+    "sig": "_render_markdown(source) -> Path",
+    "doc": "Render Markdown to PDF via weasyprint."
+   },
+   {
+    "kind": "def",
+    "line": 116,
+    "sig": "_render_mermaid(source) -> Path",
+    "doc": "Render Mermaid diagram to PDF via ``mmdc`` CLI."
+   },
+   {
+    "kind": "def",
+    "line": 146,
+    "sig": "_render_text(source) -> Path",
+    "doc": "Render plain text to PDF via weasyprint with monospace font."
+   }
+  ]
+ },
+ "device/sync.py": {
+  "loc": 573,
+  "items": [
+   {
+    "kind": "class",
+    "line": 31,
+    "sig": "SyncManager()",
+    "doc": "Manages sync between a reMarkable device and local filesystem.",
+    "members": [
+     "XOCHITL_DIR: str  #L48",
+     "TEMPLATES_DIR: str  #L49",
+     "CONFIG_PATH: str  #L50",
+     "pull_all(dest, connection) -> None  #L52",
+     "pull_document(doc_uuid, dest, connection) -> None  #L92",
+     "push_pdf(pdf_path, connection, name) -> None  #L149",
+     "sync_status(connection, db, local_dir) -> list[tuple[str, str, str]]  #L233",
+     "sync_pull(dest, connection, db) -> tuple[list[tuple[str, str, int]], list[tuple[str, str, str]]]  #L303",
+     "_count_pdf_pages(file_path) -> int  #L438",
+     "sync_push_file(file_path, connection, db, name, parent) -> str  #L456"
+    ]
+   }
+  ]
+ },
+ "device/web_api.py": {
+  "loc": 227,
+  "items": [
+   {
+    "kind": "def",
+    "line": 24,
+    "sig": "_import_httpx() -> httpx",
+    "doc": "Lazily import httpx, raising a helpful error if not installed."
+   },
+   {
+    "kind": "class",
+    "line": 37,
+    "sig": "WebAPI()",
+    "doc": "Client for the reMarkable USB web interface (http://10.11.99.1).",
+    "members": [
+     "__init__(base_url, timeout) -> None  #L57",
+     "_get_client() -> httpx.Client  #L65",
+     "list_documents(parent) -> list[dict[str, Any]]  #L70",
+     "list_all_documents() -> list[dict[str, Any]]  #L90",
+     "download_pdf(doc_id, output) -> None  #L112",
+     "download_rmdoc(doc_id, output) -> None  #L129",
+     "upload_pdf(path) -> None  #L149",
+     "upload_epub(path) -> None  #L172",
+     "get_thumbnail(doc_id) -> bytes  #L194",
+     "search(keyword) -> list[dict[str, Any]]  #L209"
+    ]
+   }
+  ]
+ },
+ "export/pdf.py": {
+  "loc": 168,
+  "items": [
+   {
+    "kind": "def",
+    "line": 19,
+    "sig": "export_pdf(pages, output, palette, screen, template_svg, background_images_b64) -> None",
+    "doc": "Export one or more pages to a multi-page PDF."
+   }
+  ]
+ },
+ "export/png.py": {
+  "loc": 112,
+  "items": [
+   {
+    "kind": "def",
+    "line": 19,
+    "sig": "export_png(page, output, dpi, palette, screen, template_svg, background_image_b64, background_page_size) -> None",
+    "doc": "Export a single page to PNG."
+   }
+  ]
+ },
+ "export/svg.py": {
+  "loc": 68,
+  "items": [
+   {
+    "kind": "def",
+    "line": 18,
+    "sig": "export_svg(page, output, palette, screen, template_svg, thickness, background_image_b64, background_page_size) -> None",
+    "doc": "Export a single page to an SVG file."
+   }
+  ]
+ },
+ "formats/content.py": {
+  "loc": 77,
+  "items": [
+   {
+    "kind": "def",
+    "line": 40,
+    "sig": "parse_content(path) -> ContentInfo",
+    "doc": "Parse a ``.content`` JSON file from disk."
+   },
+   {
+    "kind": "def",
+    "line": 64,
+    "sig": "parse_content_json(data) -> ContentInfo",
+    "doc": "Parse a content dict (already loaded from JSON) into a ContentInfo."
+   }
+  ]
+ },
+ "formats/document_loader.py": {
+  "loc": 117,
+  "items": [
+   {
+    "kind": "def",
+    "line": 36,
+    "sig": "load_document(xochitl_dir, doc_uuid) -> Document",
+    "doc": "Load a complete document from the xochitl directory."
+   }
+  ]
+ },
+ "formats/metadata.py": {
+  "loc": 73,
+  "items": [
+   {
+    "kind": "def",
+    "line": 36,
+    "sig": "parse_metadata(path) -> DocumentMetadata",
+    "doc": "Parse a ``.metadata`` JSON file from disk."
+   },
+   {
+    "kind": "def",
+    "line": 60,
+    "sig": "parse_metadata_json(data) -> DocumentMetadata",
+    "doc": "Parse a metadata dict (already loaded from JSON) into a DocumentMetadata."
+   }
+  ]
+ },
+ "formats/pagedata.py": {
+  "loc": 48,
+  "items": [
+   {
+    "kind": "def",
+    "line": 26,
+    "sig": "parse_pagedata(path) -> list[str]",
+    "doc": "Parse a ``.pagedata`` text file into a list of template names."
+   }
+  ]
+ },
+ "formats/rm_file.py": {
+  "loc": 212,
+  "items": [
+   {
+    "kind": "def",
+    "line": 46,
+    "sig": "parse_rm_file(path) -> list[Layer]",
+    "doc": "Parse a v6 ``.rm`` binary file into a list of :class:`Layer` objects."
+   },
+   {
+    "kind": "def",
+    "line": 70,
+    "sig": "parse_rm_bytes(data) -> list[Layer]",
+    "doc": "Parse raw ``.rm`` bytes into a list of :class:`Layer` objects."
+   },
+   {
+    "kind": "def",
+    "line": 92,
+    "sig": "_convert_tree(tree) -> list[Layer]",
+    "doc": "Walk the scene tree root and convert each top-level Group into a Layer."
+   },
+   {
+    "kind": "def",
+    "line": 114,
+    "sig": "_convert_group(group, tree) -> Layer",
+    "doc": "Convert an rmscene Group (layer) into a Layer model."
+   },
+   {
+    "kind": "def",
+    "line": 139,
+    "sig": "_collect_item(item, layer) -> None",
+    "doc": "Add an rmscene item (Line, Text, etc.) to the given layer."
+   },
+   {
+    "kind": "def",
+    "line": 156,
+    "sig": "_convert_line(line) -> Stroke",
+    "doc": "Convert an rmscene Line into a Stroke model."
+   },
+   {
+    "kind": "def",
+    "line": 183,
+    "sig": "_convert_point(point) -> Point",
+    "doc": "Convert an rmscene Point into a Point model."
+   },
+   {
+    "kind": "def",
+    "line": 195,
+    "sig": "_convert_text(text) -> TextBlock",
+    "doc": "Convert an rmscene Text block into a TextBlock model."
+   }
+  ]
+ },
+ "models/color.py": {
+  "loc": 119,
+  "items": [
+   {
+    "kind": "class",
+    "line": 17,
+    "sig": "PenColor(enum.IntEnum)",
+    "doc": "Color index stored per stroke in .rm binary files.",
+    "members": []
+   },
+   {
+    "kind": "class",
+    "line": 44,
+    "sig": "HighlightColor(enum.Enum)",
+    "doc": "Highlight colors that share PenColor.HIGHLIGHT (ID 9).",
+    "members": []
+   },
+   {
+    "kind": "class",
+    "line": 59,
+    "sig": "RGB(BaseModel)",
+    "doc": "8-bit RGB color value used for color palette definitions.",
+    "members": [
+     "r: int  #L69",
+     "g: int  #L70",
+     "b: int  #L71",
+     "as_tuple() -> tuple[int, int, int]  #L73",
+     "as_hex() -> str  #L77",
+     "as_css() -> str  #L81"
+    ]
+   }
+  ]
+ },
+ "models/document.py": {
+  "loc": 388,
+  "items": [
+   {
+    "kind": "class",
+    "line": 27,
+    "sig": "DocumentType(enum.Enum)",
+    "doc": "Document vs folder distinction in .metadata files.",
+    "members": []
+   },
+   {
+    "kind": "class",
+    "line": 39,
+    "sig": "FileType(enum.Enum)",
+    "doc": "The underlying file type of a document.",
+    "members": []
+   },
+   {
+    "kind": "class",
+    "line": 52,
+    "sig": "DocumentMetadata(BaseModel)",
+    "doc": "Parsed contents of a {UUID}.metadata JSON file.",
+    "members": [
+     "visible_name: str  #L63",
+     "doc_type: DocumentType  #L67",
+     "parent: str  #L71",
+     "deleted: bool  #L76",
+     "pinned: bool  #L81",
+     "last_modified: int  #L85",
+     "last_opened: int  #L90",
+     "last_opened_page: int  #L94",
+     "version: int  #L98",
+     "synced: bool  #L102",
+     "from_json(cls, data) -> DocumentMetadata  #L108",
+     "from_path(cls, path) -> DocumentMetadata  #L128"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 133,
+    "sig": "ExtraMetadata(BaseModel)",
+    "doc": "Per-tool last-used settings from the .content file's extraMetadata field.",
+    "members": [
+     "last_tool: str  #L142",
+     "last_pen: str  #L146",
+     "tool_settings: dict[str, str]  #L150",
+     "from_json(cls, data) -> ExtraMetadata  #L157"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 166,
+    "sig": "PageRef(BaseModel)",
+    "doc": "Reference to a page within a document's .content file.",
+    "members": [
+     "uuid: UUID  #L174",
+     "template: str  #L178",
+     "redirect: str | None  #L183"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 190,
+    "sig": "ContentInfo(BaseModel)",
+    "doc": "Parsed contents of a {UUID}.content JSON file.",
+    "members": [
+     "file_type: FileType  #L202",
+     "format_version: int  #L206",
+     "orientation: str  #L210",
+     "page_count: int  #L214",
+     "page_refs: list[PageRef]  #L218",
+     "extra_metadata: ExtraMetadata  #L223",
+     "margins: int  #L230",
+     "font_name: str  #L234",
+     "line_height: int  #L238",
+     "text_scale: float  #L242",
+     "text_alignment: str  #L246",
+     "zoom_mode: str  #L250",
+     "custom_zoom_scale: float  #L254",
+     "from_json(cls, data) -> ContentInfo  #L260",
+     "from_path(cls, path) -> ContentInfo  #L302"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 307,
+    "sig": "Document(BaseModel)",
+    "doc": "A complete reMarkable document with metadata, content info, and pages.",
+    "members": [
+     "uuid: UUID  #L322",
+     "metadata: DocumentMetadata  #L326",
+     "content: ContentInfo  #L329",
+     "pages: list[Page]  #L332",
+     "templates: list[str]  #L337",
+     "name() -> str  #L345",
+     "is_notebook() -> bool  #L351",
+     "is_pdf() -> bool  #L357",
+     "is_epub() -> bool  #L363",
+     "is_folder() -> bool  #L369",
+     "is_trashed() -> bool  #L375",
+     "base_path(xochitl_dir) -> Path  #L379"
+    ]
+   }
+  ]
+ },
+ "models/page.py": {
+  "loc": 157,
+  "items": [
+   {
+    "kind": "class",
+    "line": 18,
+    "sig": "TextBlock(BaseModel)",
+    "doc": "A block of typed text on a page.",
+    "members": [
+     "pos_x: float  #L29",
+     "pos_y: float  #L32",
+     "width: float  #L35",
+     "text: str  #L38"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 45,
+    "sig": "Layer(BaseModel)",
+    "doc": "A single drawing layer within a page.",
+    "members": [
+     "name: str  #L56",
+     "visible: bool  #L60",
+     "strokes: list[Stroke]  #L64",
+     "text_blocks: list[TextBlock]  #L69",
+     "is_empty() -> bool  #L76",
+     "bounding_box() -> tuple[float, float, float, float]  #L82"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 99,
+    "sig": "Page(BaseModel)",
+    "doc": "A single page in a notebook or annotated document.",
+    "members": [
+     "uuid: UUID  #L110",
+     "layers: list[Layer]  #L114",
+     "template_name: str  #L118",
+     "rm_filename() -> str  #L126",
+     "metadata_filename() -> str  #L132",
+     "thumbnail_filename() -> str  #L138",
+     "all_strokes() -> list[Stroke]  #L144",
+     "rm_path(document_uuid) -> Path  #L148"
+    ]
+   }
+  ]
+ },
+ "models/pen.py": {
+  "loc": 226,
+  "items": [
+   {
+    "kind": "class",
+    "line": 17,
+    "sig": "PenType(enum.IntEnum)",
+    "doc": "Pen tool ID stored per stroke in .rm binary files.",
+    "members": [
+     "is_highlighter(cls, value) -> bool  #L49",
+     "is_eraser(cls, value) -> bool  #L54",
+     "canonical(cls, value) -> PenType  #L59"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 78,
+    "sig": "Pen(BaseModel)",
+    "doc": "A pen configuration with rendering parameters.",
+    "members": [
+     "pen_type: PenType  #L92",
+     "base_width: float  #L96",
+     "base_opacity: float  #L100",
+     "stroke_linecap: str  #L105",
+     "segment_length: int  #L110",
+     "pressure_sensitive: bool  #L115",
+     "tilt_sensitive: bool  #L120",
+     "speed_sensitive: bool  #L125",
+     "from_stroke(cls, pen_type, thickness_scale) -> Pen  #L132"
+    ]
+   }
+  ]
+ },
+ "models/screen.py": {
+  "loc": 104,
+  "items": [
+   {
+    "kind": "class",
+    "line": 14,
+    "sig": "ScreenSpec(BaseModel)",
+    "doc": "Physical screen specification for a reMarkable device.",
+    "members": [
+     "width: int  #L28",
+     "height: int  #L32",
+     "dpi: int  #L36",
+     "name: str  #L40",
+     "points_per_pixel() -> float  #L46",
+     "page_width_pt() -> float  #L56",
+     "page_height_pt() -> float  #L62",
+     "page_width_inches() -> float  #L68",
+     "page_height_inches() -> float  #L74"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 86,
+    "sig": "detect_screen(layers) -> ScreenSpec",
+    "doc": "Auto-detect device screen from stroke coordinate extents."
+   }
+  ]
+ },
+ "models/stroke.py": {
+  "loc": 142,
+  "items": [
+   {
+    "kind": "class",
+    "line": 24,
+    "sig": "Point(BaseModel)",
+    "doc": "A single sampled point from the stylus.",
+    "members": [
+     "x: float  #L38",
+     "y: float  #L39",
+     "speed: int  #L40",
+     "direction: int  #L45",
+     "width: int  #L50",
+     "pressure: int  #L55",
+     "pressure_normalized() -> float  #L63",
+     "direction_radians() -> float  #L69",
+     "tilt() -> float  #L75"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 84,
+    "sig": "Stroke(BaseModel)",
+    "doc": "A single stroke (line) drawn by the stylus.",
+    "members": [
+     "pen_type: PenType  #L96",
+     "color: PenColor  #L100",
+     "thickness_scale: float  #L104",
+     "points: list[Point]  #L108",
+     "starting_length: float  #L113",
+     "is_eraser() -> bool  #L121",
+     "is_highlighter() -> bool  #L127",
+     "bounding_box() -> tuple[float, float, float, float]  #L133"
+    ]
+   }
+  ]
+ },
+ "models/template.py": {
+  "loc": 150,
+  "items": [
+   {
+    "kind": "class",
+    "line": 20,
+    "sig": "BuiltinTemplate(BaseModel)",
+    "doc": "A built-in template from the legacy template system (pre-3.x firmware).",
+    "members": [
+     "name: str  #L34",
+     "filename: str  #L38",
+     "icon_code: str  #L42",
+     "landscape: bool  #L46",
+     "categories: tuple[str, ...]  #L50"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 57,
+    "sig": "TemplateItem(BaseModel)",
+    "doc": "A geometric item within a methods template (line, rect, circle, etc.).",
+    "members": [
+     "item_id: str  #L66",
+     "item_type: str  #L69",
+     "properties: dict[str, str | float | int]  #L72"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 79,
+    "sig": "Template(BaseModel)",
+    "doc": "A methods-style template (firmware 3.x+).",
+    "members": [
+     "name: str  #L91",
+     "author: str  #L94",
+     "template_version: str  #L98",
+     "format_version: int  #L102",
+     "orientation: str  #L106",
+     "categories: list[str]  #L110",
+     "labels: list[str]  #L114",
+     "supported_screens: list[str]  #L118",
+     "constants: dict[str, str | float]  #L123",
+     "items: list[TemplateItem]  #L128",
+     "icon_data: str  #L132"
+    ]
+   }
+  ]
+ },
+ "ocr/diagram.py": {
+  "loc": 332,
+  "items": [
+   {
+    "kind": "class",
+    "line": 31,
+    "sig": "PageContentType(enum.Enum)",
+    "doc": "Classification of a reMarkable page's visual content.",
+    "members": []
+   },
+   {
+    "kind": "class",
+    "line": 40,
+    "sig": "MermaidResult()",
+    "doc": "Result of diagram extraction from a reMarkable page.",
+    "members": [
+     "content_type: PageContentType  #L51",
+     "diagram_type: str | None  #L52",
+     "mermaid_code: str | None  #L53",
+     "raw_response: str  #L54"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 115,
+    "sig": "classify_page(image_path, model_id, region) -> PageContentType",
+    "doc": "Send PNG to Opus and classify as TEXT, DIAGRAM, or MIXED."
+   },
+   {
+    "kind": "def",
+    "line": 145,
+    "sig": "extract_mermaid(image_path, model_id, region) -> MermaidResult",
+    "doc": "Send PNG to Opus with diagram extraction prompt."
+   },
+   {
+    "kind": "def",
+    "line": 174,
+    "sig": "extract_mermaid_from_rm(rm_path, dpi, thickness, model_id, region, background_image_b64) -> MermaidResult",
+    "doc": "Full pipeline: .rm -> PNG -> extract Mermaid."
+   },
+   {
+    "kind": "def",
+    "line": 213,
+    "sig": "validate_mermaid(code) -> tuple[bool, str]",
+    "doc": "Validate Mermaid syntax."
+   },
+   {
+    "kind": "def",
+    "line": 261,
+    "sig": "_parse_mermaid_response(response) -> MermaidResult",
+    "doc": "Parse the structured LLM response into a MermaidResult."
+   },
+   {
+    "kind": "def",
+    "line": 286,
+    "sig": "_invoke_bedrock_vision(prompt, img_b64, media_type, model_id, region) -> str",
+    "doc": "Call Bedrock invoke_model with image + text."
+   }
+  ]
+ },
+ "ocr/pipeline.py": {
+  "loc": 127,
+  "items": [
+   {
+    "kind": "def",
+    "line": 25,
+    "sig": "render_rm_to_png(rm_path, output_path, dpi, thickness, background_image_b64, background_page_size) -> Path",
+    "doc": "Render a .rm file to a high-DPI PNG."
+   },
+   {
+    "kind": "def",
+    "line": 86,
+    "sig": "transcribe_rm(rm_path, dpi, thickness, model_id, region, background_image_b64, background_page_size) -> str",
+    "doc": "Full pipeline: .rm \u2192 PNG \u2192 parallel OCR \u2192 LLM merge with image."
+   }
+  ]
+ },
+ "ocr/postprocess.py": {
+  "loc": 235,
+  "items": [
+   {
+    "kind": "def",
+    "line": 110,
+    "sig": "transcribe_page(image_path, model_id, region) -> str",
+    "doc": "Full OCR pipeline: Vision + Textract in parallel, then LLM merge with image."
+   },
+   {
+    "kind": "def",
+    "line": 148,
+    "sig": "merge_with_image(image_path, vision_result, textract_result, model_id, region) -> str",
+    "doc": "Send OCR results + original image to an LLM for final transcription."
+   },
+   {
+    "kind": "def",
+    "line": 187,
+    "sig": "_invoke_bedrock_vision(prompt, img_b64, media_type, model_id, region) -> str",
+    "doc": "Call Bedrock invoke_model with image + text."
+   }
+  ]
+ },
+ "ocr/textract.py": {
+  "loc": 71,
+  "items": [
+   {
+    "kind": "def",
+    "line": 14,
+    "sig": "_import_boto3() -> None",
+    "doc": ""
+   },
+   {
+    "kind": "def",
+    "line": 23,
+    "sig": "ocr_image_textract(image_path, region) -> OCRResult",
+    "doc": "Run handwriting OCR on a PNG/JPEG image via AWS Textract."
+   }
+  ]
+ },
+ "ocr/vision.py": {
+  "loc": 190,
+  "items": [
+   {
+    "kind": "class",
+    "line": 19,
+    "sig": "OCRResult()",
+    "doc": "Result of OCR on a single page.",
+    "members": [
+     "text: str  #L22",
+     "confidence: float  #L23",
+     "lines: list[OCRLine]  #L24"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 28,
+    "sig": "OCRLine()",
+    "doc": "A single recognized line of text with position and confidence.",
+    "members": [
+     "text: str  #L31",
+     "confidence: float  #L32",
+     "x: float  #L33",
+     "y: float  #L34",
+     "width: float  #L35",
+     "height: float  #L36"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 39,
+    "sig": "_import_vision() -> None",
+    "doc": "Lazily import Vision framework."
+   },
+   {
+    "kind": "def",
+    "line": 51,
+    "sig": "_import_quartz() -> None",
+    "doc": "Lazily import Quartz framework."
+   },
+   {
+    "kind": "def",
+    "line": 63,
+    "sig": "ocr_image(image_path) -> OCRResult",
+    "doc": "Run handwriting OCR on a PNG/JPEG image file."
+   },
+   {
+    "kind": "def",
+    "line": 140,
+    "sig": "ocr_page(rm_path, dpi, thickness) -> OCRResult",
+    "doc": "Run handwriting OCR on a .rm file."
+   }
+  ]
+ },
+ "render/engine.py": {
+  "loc": 379,
+  "items": [
+   {
+    "kind": "class",
+    "line": 35,
+    "sig": "RenderEngine(ABC)",
+    "doc": "Abstract base class for rendering engines.",
+    "members": [
+     "render_page(page, output, palette, screen, template_svg, thickness, background_image_b64, background_page_size) -> None  #L44"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 75,
+    "sig": "SVGRenderer(RenderEngine)",
+    "doc": "Pure-Python SVG renderer with no external dependencies.",
+    "members": [
+     "render_page(page, output, palette, screen, template_svg, thickness, background_image_b64, background_page_size) -> None  #L91",
+     "_render_stroke(parent, stroke, palette, scale, x_shift, thickness) -> None  #L232",
+     "_embed_template(svg, template_path, vw, vh) -> None  #L317",
+     "_embed_raster_background(svg, image_b64, vw, vh, x) -> None  #L352"
+    ]
+   }
+  ]
+ },
+ "render/palette.py": {
+  "loc": 95,
+  "items": [
+   {
+    "kind": "class",
+    "line": 26,
+    "sig": "Palette()",
+    "doc": "A named mapping from PenColor IDs to RGB tuples.",
+    "members": [
+     "name: str  #L38",
+     "colors: dict[PenColor, RGB]  #L39",
+     "get_rgb(color) -> tuple[int, int, int]  #L41",
+     "get_hex(color) -> str  #L62",
+     "get_css(color) -> str  #L76"
+    ]
+   }
+  ]
+ },
+ "render/pdf_bg.py": {
+  "loc": 61,
+  "items": [
+   {
+    "kind": "def",
+    "line": 15,
+    "sig": "rasterize_pdf_page(pdf_path, page_index, width_pt, height_pt) -> tuple[str, float, float]",
+    "doc": "Rasterize one page of a PDF to a base64-encoded PNG."
+   }
+  ]
+ },
+ "render/pens.py": {
+  "loc": 480,
+  "items": [
+   {
+    "kind": "def",
+    "line": 26,
+    "sig": "direction_to_tilt(direction) -> float",
+    "doc": "Convert direction byte (0-255) to tilt angle in radians."
+   },
+   {
+    "kind": "class",
+    "line": 42,
+    "sig": "PenRenderer(Protocol)",
+    "doc": "Protocol defining the per-segment rendering interface for a pen type.",
+    "members": [
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L57",
+     "segment_color(speed, direction, width, pressure, last_width, base_color) -> tuple[int, int, int]  #L68",
+     "segment_opacity(speed, direction, width, pressure, last_width) -> float  #L80"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 92,
+    "sig": "BasePenRenderer(ABC)",
+    "doc": "Abstract base class for pen renderers with shared defaults.",
+    "members": [
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L101",
+     "segment_color(speed, direction, width, pressure, last_width, base_color) -> tuple[int, int, int]  #L112",
+     "segment_opacity(speed, direction, width, pressure, last_width) -> float  #L124"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 136,
+    "sig": "FinelineRenderer(BasePenRenderer)",
+    "doc": "Fineliner pen renderer.",
+    "members": [
+     "__init__(base_width) -> None  #L143",
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L146"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 158,
+    "sig": "BallpointRenderer(BasePenRenderer)",
+    "doc": "Ballpoint pen renderer.",
+    "members": [
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L167",
+     "segment_color(speed, direction, width, pressure, last_width, base_color) -> tuple[int, int, int]  #L178"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 196,
+    "sig": "MarkerRenderer(BasePenRenderer)",
+    "doc": "Marker pen renderer.",
+    "members": [
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L205"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 218,
+    "sig": "PencilRenderer(BasePenRenderer)",
+    "doc": "Pencil (standard) renderer.",
+    "members": [
+     "__init__(base_width) -> None  #L228",
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L231",
+     "segment_opacity(speed, direction, width, pressure, last_width) -> float  #L247"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 259,
+    "sig": "MechanicalPencilRenderer(BasePenRenderer)",
+    "doc": "Mechanical pencil renderer.",
+    "members": [
+     "__init__(base_width) -> None  #L265",
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L268",
+     "segment_opacity(speed, direction, width, pressure, last_width) -> float  #L279"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 291,
+    "sig": "PaintbrushRenderer(BasePenRenderer)",
+    "doc": "Paintbrush renderer.",
+    "members": [
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L301"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 314,
+    "sig": "CalligraphyRenderer(BasePenRenderer)",
+    "doc": "Calligraphy pen renderer.",
+    "members": [
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L321"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 334,
+    "sig": "HighlighterRenderer(BasePenRenderer)",
+    "doc": "Highlighter renderer.",
+    "members": [
+     "__init__(base_width, base_opacity) -> None  #L342",
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L346",
+     "segment_opacity(speed, direction, width, pressure, last_width) -> float  #L357"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 369,
+    "sig": "ShaderRenderer(BasePenRenderer)",
+    "doc": "Shader tool renderer.",
+    "members": [
+     "__init__(base_width, base_opacity) -> None  #L376",
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L380",
+     "segment_opacity(speed, direction, width, pressure, last_width) -> float  #L391"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 403,
+    "sig": "EraserRenderer(BasePenRenderer)",
+    "doc": "Eraser renderer.",
+    "members": [
+     "__init__(base_width) -> None  #L410",
+     "segment_width(speed, direction, width, pressure, last_width) -> float  #L413",
+     "segment_color(speed, direction, width, pressure, last_width, base_color) -> tuple[int, int, int]  #L424"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 437,
+    "sig": "get_pen_renderer(pen_type, base_width) -> BasePenRenderer",
+    "doc": "Return the appropriate PenRenderer for a given pen type."
+   }
+  ]
+ },
+ "sync/db.py": {
+  "loc": 365,
+  "items": [
+   {
+    "kind": "class",
+    "line": 26,
+    "sig": "SyncDB()",
+    "doc": "Local SQLite database for sync state, OCR cache, and diagram cache.",
+    "members": [
+     "__init__(db_path) -> None  #L43",
+     "conn() -> sqlite3.Connection  #L48",
+     "close() -> None  #L62",
+     "__enter__() -> SyncDB  #L68",
+     "__exit__() -> None  #L72",
+     "upsert_document(doc) -> None  #L77",
+     "get_document(doc_uuid) -> SyncDocument | None  #L111",
+     "list_documents() -> list[SyncDocument]  #L120",
+     "delete_document(doc_uuid) -> None  #L125",
+     "upsert_page(page) -> None  #L132",
+     "get_pages(doc_uuid) -> list[SyncPage]  #L154",
+     "get_page(doc_uuid, page_uuid) -> SyncPage | None  #L162",
+     "get_ocr(rm_hash, engine) -> OCRCacheEntry | None  #L174",
+     "put_ocr(entry) -> None  #L192",
+     "get_all_ocr(rm_hash) -> list[OCRCacheEntry]  #L216",
+     "get_diagram(rm_hash) -> DiagramCacheEntry | None  #L237",
+     "put_diagram(entry) -> None  #L253",
+     "log_sync(entry) -> None  #L278",
+     "get_sync_log(limit) -> list[SyncLogEntry]  #L298",
+     "find_changed_pages(doc_uuid, current_hashes) -> list[str]  #L319"
+    ]
+   },
+   {
+    "kind": "def",
+    "line": 337,
+    "sig": "_row_to_sync_document(row) -> SyncDocument",
+    "doc": "Convert a sqlite3.Row to a SyncDocument model."
+   },
+   {
+    "kind": "def",
+    "line": 355,
+    "sig": "_row_to_sync_page(row) -> SyncPage",
+    "doc": "Convert a sqlite3.Row to a SyncPage model."
+   }
+  ]
+ },
+ "sync/hasher.py": {
+  "loc": 63,
+  "items": [
+   {
+    "kind": "def",
+    "line": 15,
+    "sig": "hash_file(path) -> str",
+    "doc": "Compute SHA-256 hex digest of a file's contents."
+   },
+   {
+    "kind": "def",
+    "line": 27,
+    "sig": "hash_document_files(xochitl_dir, doc_uuid) -> dict[str, str | dict[str, str]]",
+    "doc": "Hash all relevant files for a document."
+   }
+  ]
+ },
+ "sync/migrations.py": {
+  "loc": 151,
+  "items": [
+   {
+    "kind": "def",
+    "line": 99,
+    "sig": "init_schema(conn) -> None",
+    "doc": "Create all tables if they don't exist."
+   },
+   {
+    "kind": "def",
+    "line": 113,
+    "sig": "migrate_ocr_sidecars(conn, xochitl_dir) -> int",
+    "doc": "Import existing ``.ocr.txt`` sidecar files into the ocr_cache table."
+   }
+  ]
+ },
+ "sync/models.py": {
+  "loc": 120,
+  "items": [
+   {
+    "kind": "def",
+    "line": 14,
+    "sig": "_utcnow() -> datetime",
+    "doc": ""
+   },
+   {
+    "kind": "class",
+    "line": 18,
+    "sig": "SyncDocument(BaseModel)",
+    "doc": "A tracked document in the sync database.",
+    "members": [
+     "doc_uuid: str  #L21",
+     "visible_name: str  #L22",
+     "doc_type: str  #L23",
+     "file_type: str  #L27",
+     "parent: str  #L31",
+     "page_count: int  #L35",
+     "metadata_hash: str | None  #L36",
+     "content_hash: str | None  #L37",
+     "device_last_modified: int  #L38",
+     "last_synced_at: datetime  #L41",
+     "local_path: str | None  #L44"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 49,
+    "sig": "SyncPage(BaseModel)",
+    "doc": "A tracked page within a document.",
+    "members": [
+     "page_uuid: str  #L52",
+     "doc_uuid: str  #L53",
+     "page_index: int  #L54",
+     "rm_hash: str | None  #L55",
+     "rm_size_bytes: int | None  #L59",
+     "last_synced_at: datetime  #L60"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 65,
+    "sig": "OCRCacheEntry(BaseModel)",
+    "doc": "Cached OCR result keyed by rm_hash.",
+    "members": [
+     "rm_hash: str  #L72",
+     "engine: str  #L73",
+     "ocr_text: str  #L74",
+     "confidence: float | None  #L75",
+     "model_id: str | None  #L78",
+     "render_dpi: int  #L82",
+     "created_at: datetime  #L83"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 88,
+    "sig": "DiagramCacheEntry(BaseModel)",
+    "doc": "Cached diagram extraction result keyed by rm_hash.",
+    "members": [
+     "rm_hash: str  #L91",
+     "content_type: str  #L92",
+     "mermaid_code: str | None  #L95",
+     "diagram_type: str | None  #L98",
+     "model_id: str  #L102",
+     "created_at: datetime  #L103"
+    ]
+   },
+   {
+    "kind": "class",
+    "line": 108,
+    "sig": "SyncLogEntry(BaseModel)",
+    "doc": "An entry in the sync history log.",
+    "members": [
+     "direction: str  #L111",
+     "doc_uuid: str  #L112",
+     "doc_name: str  #L113",
+     "pages_transferred: int  #L114",
+     "status: str  #L115",
+     "details: str  #L118",
+     "device_host: str | None  #L119",
+     "timestamp: datetime  #L120"
+    ]
+   }
+  ]
+ }
+}
