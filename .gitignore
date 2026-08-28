@@ -41,6 +41,12 @@ xochitl/
 *.sqlite
 *.sqlite3
 
+# Generated docs input (Repomix pack -- regenerate with `npx repomix@latest`)
+docs/.repomix/
+
+# Code index
+.codegraph/
+
 # Misc
 *.log
 .claude/
