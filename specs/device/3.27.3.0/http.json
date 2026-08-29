@@ -3,8 +3,8 @@
   "measured_on_kernel": "6.12.49+git-imx8mm-ferrari-g68b95e858a0a",
   "source": "read-only probe",
   "measured_at": "2026-08-28T23:00:00Z",
-  "remeasured_at": "2026-08-29T15:40:00Z",
-  "remeasurement_note": "The device was re-attached on 2026-08-29 and IMG_VERSION was still 3.27.3.0. Claims carrying \"measured\": \"2026-08-29\" are new in that pass; everything else is from 2026-08-28 and was not re-run. One 2026-08-28 claim was REFUTED by the second pass -- see refuted[0], the .rmdoc archive shape -- because the original measurement sampled a notebook, the one document class that cannot exhibit the counterexample.",
+  "remeasured_at": "2026-08-29T15:40:00Z ; 2026-08-29T22:31Z (POST /upload, first live probe)",
+  "remeasurement_note": "The device was re-attached on 2026-08-29 and IMG_VERSION was still 3.27.3.0. Claims carrying \"measured\": \"2026-08-29\" are new in that pass; everything else is from 2026-08-28 and was not re-run. One 2026-08-28 claim was REFUTED by the second pass -- see refuted[0], the .rmdoc archive shape -- because the original measurement sampled a notebook, the one document class that cannot exhibit the counterexample. 2026-08-29: POST /upload was probed live for the first time, with Laith's explicit authorisation, after reMarkable's own developer documentation (https://developer.remarkable.com/documentation/xochitl) was found to state \"Xochitl must not run when manually accessing document files\". That makes POST /upload the only write route on this firmware that goes *through* xochitl rather than around it, and therefore the only one whose result is visible to the user without stopping or restarting the application. The probe used throwaway documents and mapped the contract in four requests. claims[14] and claims[15] are rewritten from measurement; the protocol note below is corrected.",
   "device": {
     "machine": "reMarkable Ferrari",
     "build": "20260612085811",
@@ -13,7 +13,7 @@
     "endpoint": "http://10.11.99.1/",
     "host_side": "10.11.99.12 on en11 (USB-C CDC-ECM gadget)"
   },
-  "method": "GET and HEAD only. Every request was correlated against GET /log.txt, which returns the live systemd journal containing the Qt server's own rm.usb.web verdict for each request. Sentinel paths (/RMSPEC-PROBE-START etc.) were requested before and after each probe batch so the log slice could be bracketed exactly. POST /upload was NEVER requested in any form, including GET, because the server ignores the request method and a GET to that path could not be proven non-mutating.",
+  "method": "GET and HEAD only. Every request was correlated against GET /log.txt, which returns the live systemd journal containing the Qt server's own rm.usb.web verdict for each request. Sentinel paths (/RMSPEC-PROBE-START etc.) were requested before and after each probe batch so the log slice could be bracketed exactly. POST /upload was probed on 2026-08-29 (see claims[14]); before that date it had never been requested in any form, including GET, because the server ignores the request method and a GET to that path could not be proven non-mutating.",
   "claims": [
     {
       "id": "transport:listener",
@@ -47,7 +47,10 @@
       "id": "route:GET /documents/",
       "kind": "route",
       "path_template": "/documents/",
-      "methods_verified": ["GET", "HEAD"],
+      "methods_verified": [
+        "GET",
+        "HEAD"
+      ],
       "status": 200,
       "content_type_advertised": "application/json; charset=ISO-8859-1",
       "content_type_actual": "JSON, UTF-8 encoded",
@@ -59,7 +62,9 @@
       "id": "route:GET /documents/{parentId}",
       "kind": "route",
       "path_template": "/documents/{parentId}",
-      "methods_verified": ["GET"],
+      "methods_verified": [
+        "GET"
+      ],
       "status": 200,
       "content_type_advertised": "application/json; charset=ISO-8859-1",
       "response_shape": "Same array-of-entries shape as /documents/. The argument is a PARENT (folder) id, not a document id: entries returned all carry Parent == {parentId}.",
@@ -70,8 +75,13 @@
       "id": "route:GET /download/{id}/{format}",
       "kind": "route",
       "path_template": "/download/{documentId}/{format}",
-      "methods_verified": ["GET"],
-      "status": [200, 400],
+      "methods_verified": [
+        "GET"
+      ],
+      "status": [
+        200,
+        400
+      ],
       "format_values": {
         "pdf": "200, Content-Type: application/pdf, Content-Disposition: attachment; filename=\"<VisibleName>.pdf\", body starts %PDF-1",
         "rmdoc": "200, Content-Type: application/zip, Content-Disposition: attachment; filename=\"<VisibleName>.rmdoc\", body starts PK\\x03\\x04"
@@ -118,8 +128,14 @@
       "id": "route:GET /thumbnail/{id}",
       "kind": "route",
       "path_template": "/thumbnail/{documentId}",
-      "methods_verified": ["GET"],
-      "status": [200, 400, 500],
+      "methods_verified": [
+        "GET"
+      ],
+      "status": [
+        200,
+        400,
+        500
+      ],
       "content_type_advertised": "image/jpeg",
       "content_type_actual": "PNG",
       "evidence": "$ curl -sS -o b_thumb.bin -w '%{http_code} %{content_type} %{size_download}' 'http://10.11.99.1/thumbnail/40fa3080-af19-4fa9-9a42-a73f6fb7b22d' -> \"200 image/jpeg 41013\"; $ xxd -l 16 b_thumb.bin -> \"00000000: 8950 4e47 0d0a 1a0a 0000 000d 4948 4452  .PNG........IHDR\".",
@@ -135,7 +151,10 @@
       "id": "route:GET /log.txt",
       "kind": "route",
       "path_template": "/log.txt",
-      "methods_verified": ["GET", "HEAD"],
+      "methods_verified": [
+        "GET",
+        "HEAD"
+      ],
       "status": 200,
       "content_type_advertised": "text/plain",
       "response_shape": "The persistent systemd journal, rendered at microsecond precision (equivalent to journalctl -o short-iso-precise), spanning all retained boots. ~9.7 MB / ~78,500 lines at measurement time. Served with Content-Disposition: attachment and a request-time filename.",
@@ -145,8 +164,13 @@
     {
       "id": "route:GET / and /index.html",
       "kind": "route",
-      "path_template": ["/", "/index.html"],
-      "methods_verified": ["GET"],
+      "path_template": [
+        "/",
+        "/index.html"
+      ],
+      "methods_verified": [
+        "GET"
+      ],
       "status": 200,
       "content_type_advertised": "text/html",
       "response_shape": "444-byte SPA shell that loads /assets/index.js and /assets/index.css.",
@@ -156,8 +180,14 @@
       "id": "route:static files",
       "kind": "route",
       "path_template": "/<file> and /assets/<file>, served from /usr/share/remarkable/webui/",
-      "methods_verified": ["GET", "HEAD"],
-      "status": [200, 404],
+      "methods_verified": [
+        "GET",
+        "HEAD"
+      ],
+      "status": [
+        200,
+        404
+      ],
       "shape": "Exactly five entries at the web root (assets/, favicon-32x32.png, index.html, reMarkableSans.woff2, reMarkableSerif.woff2) and exactly three under assets/ (index.css, index.js, rm_logo.svg). Content-Type is correctly derived per extension.",
       "evidence": "$ ssh remarkable 'ls -A /usr/share/remarkable/webui/' -> \"assets / favicon-32x32.png / index.html / reMarkableSans.woff2 / reMarkableSerif.woff2\"; $ ssh remarkable 'ls -A /usr/share/remarkable/webui/assets' -> \"index.css / index.js / rm_logo.svg\"; probes -> \"/favicon-32x32.png -> 200 image/png 716\"; \"/reMarkableSans.woff2 -> 200 font/woff2 44668\"; \"/assets/index.css -> 200 text/css 73826\"; \"/assets/index.js -> 200 text/javascript 616082\"; \"/assets/rm_logo.svg -> 200 image/svg+xml 4675\".",
       "error_cases": {
@@ -169,24 +199,49 @@
       "id": "route:POST /upload",
       "kind": "route",
       "path_template": "/upload",
-      "methods_verified": [],
-      "not_probed": true,
-      "shape": "Multipart upload endpoint. Returns 201 on success. NOT PROBED IN ANY FORM, including GET, because the server ignores the request method (see protocol:methods) and a GET to this path could not be proven non-mutating.",
-      "evidence": "$ ssh remarkable 'grep -o -E \".{160}/download/.{200}\" /usr/share/remarkable/webui/assets/index.js' -> the surrounding bundle text reads \"),body:n}));if(r.status!==201)throw new Error(`Upload failed (${r.status})`)}catch(n){throw Np(n)}\" -- so the client asserts status 201. Historical journal lines from a prior session record the failure verdict: $ grep -a 'rm.usb.web' /log.txt -> \"ERROR \\\"No file sent\\\"\" (i.e. the handler is reached and rejects when no multipart body is present).",
-      "notes": "\"No file sent\" is therefore an /upload-handler error string, inferred from the oracle rather than from a live probe. Everything else about this route -- accepted content types, field names, response body -- is UNMEASURED on this firmware."
+      "methods_verified": [
+        "POST"
+      ],
+      "not_probed": false,
+      "shape": "Multipart upload. Exactly one part, field name `file`. Returns 201 {\"status\":\"Upload successful\"} on success and 400 {\"error\":\"No file sent\"} when no part named `file` is present. The imported document is visible in GET /documents/ IMMEDIATELY, with no restart and no stop of xochitl -- xochitl performs the import itself and writes every sidecar. This is the only write path on this firmware with that property, which is what makes it the supported route for an agent writing to a tablet a human is holding.",
+      "evidence": "The client shape was read out of the device's own SPA bundle rather than guessed: $ ssh remarkable 'grep -o -E \".{600}/upload.{300}\" /usr/share/remarkable/webui/assets/index.js' -> \"Cx=async(e,t)=>{try{await jd(t);const n=new FormData;n.append(\\\"file\\\",e);const r=await Pp(\\\"api\\\",()=>fetch(\\\"/upload\\\",{method:\\\"post\\\",credentials:\\\"same-origin\\\",signal:AbortSignal.timeout(3e4),body:n}));if(r.status!==201)throw new Error(`Upload failed (${r.status})`)}catch(n){throw Np(n)}}\". Note the client awaits jd(t) -- GET /documents/{t} -- BEFORE uploading; that is a pre-flight refresh of the target folder view, not a parent parameter, and there is no parent parameter anywhere in the call. Four live probes then measured the contract: (a) $ curl -X POST http://10.11.99.1/upload -> 400 {\"error\":\"No file sent\"}; (b) $ curl -X POST -F 'document=@probe.pdf' .../upload -> 400 {\"error\":\"No file sent\"} (so the field name is checked, not merely the presence of a body); (c) $ curl -X POST -F 'file=@probe.pdf;type=application/pdf' .../upload -> 201 {\"status\":\"Upload successful\"}; (d) $ curl -X POST -F 'file=@testnb.rmdoc;filename=Probe Rmdoc.rmdoc;type=application/zip' .../upload -> 201 {\"status\":\"Upload successful\"}.",
+      "measured_effects": {
+        "visibility": "GET /documents/ went from 10 root entries to 11 immediately after probe (c), with no restart of xochitl and no reload of any kind. Contrast the SSH filesystem write path, where a page written directly to disk is invisible until xochitl re-reads the document.",
+        "sidecars_written_by_xochitl": "For a PDF upload xochitl wrote <uuid>.metadata (266 B), <uuid>.content (718 B), <uuid>.local (34 B), <uuid>.pagedata (1 B), <uuid>.pdf (826 B, mode -rw-------), an empty <uuid>/ directory, and updated .tree. The client supplies none of these.",
+        "parent": "The new entry carries Parent == \"\", i.e. root. There is no folder parameter in the route and none in the SPA's call, so an upload CANNOT target a folder -- the document always lands at the top level and must be moved afterwards by some other means.",
+        "visible_name_pdf": "For a PDF the multipart filename sets visibleName VERBATIM, extension included: 'probe-upload.pdf' and 'Probe Named Doc.pdf' both appeared under exactly those names. A client wanting a clean title must strip the extension itself, and cannot rely on the firmware doing it.",
+        "visible_name_rmdoc": "For a .rmdoc the ARCHIVE'S OWN .metadata visibleName wins over the multipart filename: uploading TestNb's archive under filename 'Probe Rmdoc.rmdoc' produced a document named 'TestNb'. So the two accepted container types disagree about where the title comes from, and a client must not assume the filename controls it.",
+        "rmdoc_accepted": ".rmdoc is accepted and imported as fileType notebook, so a client can author a whole notebook -- pages, strokes, typed text -- and have xochitl import it live. Measured with a 4,252-byte archive of a real one-page notebook.",
+        "identity_is_not_preserved": "The import RE-KEYS both identities. Uploading TestNb's own archive produced document uuid a262706d-8c89-433f-ad2b-9ec82abf102d (not 31833079-...) and page uuid 97ecf030-0911-4e4c-bc12-500bf235b8d6 (not 2302bcd7-...), while the page bytes were preserved exactly (24,534 bytes in both). So POST /upload is CREATE-ONLY: it can add a document but can never update one, and round-tripping an existing document produces a copy rather than an edit. Editing an existing page therefore still requires the SSH filesystem path, which is the path reMarkable's documentation warns against."
+      },
+      "notes": "Cleanup caveat worth recording: the firmware's route table is closed at six families and none of them deletes, so a client that uploads cannot undo it over HTTP. The three throwaway documents this probe created had to be removed by hand from the tablet UI -- deleting their files over SSH while xochitl is running leaves phantom entries in the library until it reloads. Any push feature must treat 'created' as effectively irreversible from the host's point of view."
     },
     {
       "id": "error-contract",
       "kind": "protocol",
       "shape": "Every error body is a single-line JSON object {\"error\":\"<message>\"} with Content-Type application/json; charset=ISO-8859-1. FOUR status codes are in use: 200 (success, and also the silent /documents/{id} fallback), 400 (routed path, bad argument), 404 (routed path, backing file unopenable), 500 (path not routed, or backing entry unresolvable).",
       "status_map": {
-        "400": ["Malformed URL", "Filetype not supported", "Can only download documents", "No such entry", "Missing thumbnail ID"],
-        "404": ["Unable to open file /usr/share/remarkable/webui/assets"],
-        "500": ["Unknown file", "Unable to get thumbnail for entry"],
-        "unobserved-status": ["No file sent (from /upload; status not measured because the route was not probed)"]
+        "400": [
+          "Malformed URL",
+          "Filetype not supported",
+          "Can only download documents",
+          "No such entry",
+          "Missing thumbnail ID",
+          "No file sent (from /upload, measured 2026-08-29)"
+        ],
+        "404": [
+          "Unable to open file /usr/share/remarkable/webui/assets"
+        ],
+        "500": [
+          "Unknown file",
+          "Unable to get thumbnail for entry"
+        ],
+        "201": [
+          "Upload successful (from /upload, measured 2026-08-29)"
+        ]
       },
       "evidence": "Bodies captured verbatim: {\"error\":\"Unknown file\"} (24 bytes, status 500, from /nope-xyz, /documents, /images/, /images/foo.png, /thumbnail, /download); {\"error\":\"Malformed URL\"} (25, 400); {\"error\":\"Filetype not supported\"} (34, 400); {\"error\":\"Can only download documents\"} (39, 400); {\"error\":\"No such entry\"} (25, 400); {\"error\":\"Missing thumbnail ID\"} (32, 400); {\"error\":\"Unable to get thumbnail for entry\"} (45, 500); {\"error\":\"Unable to open file /usr/share/remarkable/webui/assets\"} (66, 404).",
-      "notes": "Nine distinct error strings are known: the eight above plus \"No file sent\" from the /upload handler, recorded from the log oracle only. Status code alone is not a sufficient discriminator -- 400 covers five semantically different failures and 500 covers both \"no such route\" and \"route exists, entry missing\"."
+      "notes": "Nine distinct error strings are known. \"No file sent\" is no longer inferred from the log oracle: it was measured on 2026-08-29 as a 400 body, returned both for a request with no multipart body at all and for one whose single part is named anything other than `file`. /upload also supplies this route table's only measured 2xx body, 201 {\"status\":\"Upload successful\"}. Status code alone is still not a sufficient discriminator -- 400 now covers six semantically different failures and 500 covers both \"no such route\" and \"route exists, entry missing\"."
     },
     {
       "id": "oracle:verdict-pairs",
