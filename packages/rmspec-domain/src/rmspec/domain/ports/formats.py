@@ -43,10 +43,27 @@ suffixes leaks the storage layout into the app layer as well.
 **No byte-source port, no artifact-kind enum.** ``bytes`` are useless above the
 formats adapter, since nothing outside it may import a scene parser, so a byte
 port forces every caller to hold a second collaborator and correlate opaque
-blobs between two fakes. It also cannot be implemented by the device: the USB
-web API is five routes, ``GET /download/{id}/{name}`` always returns
-``application/pdf``, and no route yields scene bytes. Remote reads are a mirror
-concern belonging to the device slice, not an implementation of this port.
+blobs between two fakes. Remote reads stay a device-slice concern rather than an
+implementation of this port -- but on a narrower ground than this paragraph
+originally gave.
+
+The original ground was that the device *cannot* serve scene bytes: "the USB web
+API is five routes, ``GET /download/{id}/{name}`` always returns
+``application/pdf``, and no route yields scene bytes". Measured against firmware
+3.27.3.0 that is false on all three counts. The route table is six families; the
+third path segment is a format selector rather than a filename, so
+``GET /download/{id}/rmdoc`` returns ``application/zip``; and that archive carries
+one ``<docUUID>/<pageUUID>.rm`` per page. A route does yield scene bytes.
+
+The conclusion survives anyway, and it is worth saying why, because "the device
+can now do it" is exactly the argument that would otherwise reopen this. The
+device's own transport already hands the application layer a decoded,
+ordered :class:`~rmspec.domain.ports.device.DocumentSourceBundle`; a byte-source
+port here would give it a second, lower-altitude way to say the same thing, and
+the two would drift. What changed is not the shape of this port but the *value*
+of the device slice: :class:`~rmspec.domain.ports.device.RawBundleSource` is now
+bindable over USB as well as SSH, which is where the capability belongs. See
+``specs/device/3.27.3.0/http.json``, claim ``artifact:.rmdoc archive shape``.
 
 **No version probe and no capability query.** Nothing branches on the scene
 format version, so :class:`PageCodec` has no ``probe_version`` and publishes no

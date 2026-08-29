@@ -10,15 +10,31 @@ Six decisions are baked into the shapes below.
 
 Capability asymmetry is which ports exist, never data a caller branches on. There is no
 ``capabilities`` field, no ``supports()`` method and no ``probe()``. A use case that
-needs raw ``.rm`` bytes declares :class:`RawBundleSource` and the composition root
-either binds one or fails. Firmware 3.27.3.0's USB web API is five routes and cannot
-serve a raw bundle at all -- ``Accept: application/zip`` does not yield a ``.rmdoc`` --
-so under ``--usb`` that binding is absent and the container raises
+needs to *write* to the tablet declares :class:`DocumentUploader` and the composition
+root either binds one or fails. The already-pulled local mirror is a read-only copy of a
+store, so under a mirror transport that binding is absent and the container raises
 ``DeviceOperationUnsupported``, which carries the operation name and a closed
-``TransportKind`` enum so the shell can say "retry over SSH" instead of leaking a
+``TransportKind`` enum so the shell can say "attach the tablet" instead of leaking a
 dependency-injection resolution failure. A missing optional package is the sibling
 case: ``MissingAdapterDependency``, raised once at composition, naming both the package
 and the extra that provides it.
+
+This paragraph previously argued the same point from :class:`RawBundleSource` over the
+USB web API, on the claim that "firmware 3.27.3.0's USB web API is five routes and cannot
+serve a raw bundle at all -- ``Accept: application/zip`` does not yield a ``.rmdoc``".
+Both halves are measured false and the example is replaced rather than repaired. The
+route table is six families, and ``GET /download/{id}/rmdoc`` returns
+``application/zip`` carrying ``<docUUID>.metadata``, ``<docUUID>.content``, one
+``<docUUID>/<pageUUID>.rm`` per page, and -- for a document whose recorded type is not a
+notebook -- ``<docUUID>.<fileType>``, the original underlay. The legacy client sent that
+``Accept`` header against a *filename*-shaped third path segment, and the segment is a
+format selector that accepts only the exact lowercase ``pdf`` and ``rmdoc``: a bare
+filename is answered ``400 {"error": "Filetype not supported"}``, so that client received
+neither a ``.rmdoc`` nor a pdf and surfaced a bare transport error instead. A USB
+transport can therefore serve a
+complete :class:`DocumentSourceBundle`, ``base`` included, with no SSH credential. See
+``specs/device/3.27.3.0/http.json``, claim ``artifact:.rmdoc archive shape`` and the
+refutation above it.
 
 Where an asymmetry is per-request data rather than a binding, the same error is raised
 at the call and never degraded silently. ``POST /upload`` on that firmware has no
@@ -258,12 +274,30 @@ class DeviceDocument(BaseModel, frozen=True, extra="forbid"):
     export slices, never to a transport.
 
     ``trashed`` mirrors ``DocumentMetadata.trashed`` on the store side, so the same
-    decision reads the same way on both sides of a sync. It is a real field rather than
-    a sentinel in ``parent_uuid``: the xochitl metadata writes ``parent: "trash"`` and
-    the USB web API models the trash as a parent value, and an adapter translates both
-    into ``trashed=True`` plus the entry's real parent. ``parent_uuid`` therefore never
+    decision reads the same way on both sides of a sync. It is a real field rather than a
+    sentinel in ``parent_uuid``: the xochitl metadata overloads ``parent`` with the literal
+    ``"trash"``, and an adapter that reads that store translates the sentinel into
+    ``trashed=True`` with ``parent_uuid`` set to ``None``. ``parent_uuid`` therefore never
     names a phantom folder, and a caller can write ``if not doc.trashed`` instead of
-    matching an undocumented wire string one of three adapters happens to produce.
+    matching an undocumented wire string each adapter happens to produce.
+
+    ``parent_uuid`` is ``None`` and not the containing folder for a trashed entry because
+    firmware 3.27.3.0 does not preserve the original parent: the field's value *is*
+    ``"trash"``, so there is nothing to recover. ``DocumentMetadata.parent_uuid``
+    documents the same rule, which is what keeps the two sides of a sync comparable.
+
+    An earlier revision of this docstring added "and the USB web API models the trash as a
+    parent value", and claimed an adapter reports "the entry's real parent". Both are
+    measured false. Over the USB web API the trash is not modelled at all -- a trashed
+    document is simply absent from every listing at every depth, and no entry ever carries
+    ``Parent == "trash"``. A USB catalog therefore reports ``trashed=False`` on every entry
+    it returns and that is *accurate*, because it never returns a trashed one; sentinel
+    translation in a USB adapter would be unreachable code. Note also that ``deleted`` is
+    not the trash signal on this firmware -- absent on 28 of 42 metadata files, ``false``
+    on 14, never ``true`` -- so only the ``parent`` sentinel is ever exercised.
+    :meth:`DeviceCatalog.list_documents` already stated the correct version, so the two
+    halves of this module disagreed until this was fixed. See
+    ``specs/device/3.27.3.0/http.json``, claim ``route:GET /documents/ trash filtering``.
     """
 
     uuid: str = Field(min_length=1)
