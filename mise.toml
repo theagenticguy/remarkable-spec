@@ -64,9 +64,14 @@ run = "uv run pytest -n auto -m 'not hardware' --cov=packages/rmspec-app/src/rms
 description = "Tests that need the tablet attached. Never runs in CI."
 run = "uv run pytest -m hardware -q"
 
-[tasks.spec-verify]
-description = "Re-probe the attached device and diff against the committed spec"
-run = "uv run rmspec-dev spec verify"
+# There is deliberately no `spec-verify` task. It used to name `uv run rmspec-dev spec
+# verify`, an entry point that has never existed, so the one command in this file that
+# claimed to check the committed device spec failed with "command not found" -- a broken
+# gate reads as a real one until someone runs it. `test-hardware` is the real version and
+# already re-measures five of the spec's claims against the attached tablet, including the
+# two the 2026-08-29 re-measurement refuted. A dedicated re-probe-and-diff tool over all
+# 125 evidence-carrying claims in specs/device/3.27.3.0/ is worth building; until it
+# exists, nothing here pretends it has been.
 
 [tasks.check]
 description = "Everything that must pass before a push"
