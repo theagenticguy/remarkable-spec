@@ -11,7 +11,6 @@ requires-python = ">=3.13"
 dependencies = [
     "rmspec-domain",
     "rmspec-render",
-    "cairocffi>=1.7.1",
     "cairosvg>=2.8.2",
     "pillow>=12.1.1",
     "pymupdf>=1.27.1",

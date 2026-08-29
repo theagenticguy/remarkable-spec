@@ -44,11 +44,13 @@ Errors named in the ``Raises`` sections, all defined in ``rmspec.domain.errors``
     succeeded, which is why it is a distinct, single, user-visible degradation.
 
 One builtin is also declared, and it is not a store error: ``ValueError`` for an
-argument the caller got wrong before any store was touched -- today only a
-non-positive ``limit``. It is spelled out because an unspecified bound is where
-two adapters provably diverge: a bare list slice and a store-side row limit do
-not agree about a negative number, and the caller cannot be asked to know which
-one it is talking to.
+argument the caller got wrong before any store was touched -- a non-positive
+``limit``, and a page set that does not belong to the document it is recorded
+with. Both are spelled out because an unspecified argument is where two adapters
+provably diverge: a bare list slice and a store-side row limit do not agree about
+a negative number, and a dict keyed by the document and a table keyed by the page
+do not agree about a page whose ``doc_uuid`` names somewhere else. The caller
+cannot be asked to know which one it is talking to.
 
 Domain models these ports depend on, all defined in ``rmspec.domain.models``
 ---------------------------------------------------------------------------
@@ -176,16 +178,29 @@ class DocumentSyncStore(Protocol):
         page. Text for a page uuid that survives the replacement is kept, even if
         its ``page_index`` moved.
 
+        Every page must name this document. ``SyncedPage.doc_uuid`` and
+        ``document.uuid`` are two spellings of one fact, and a pair that disagrees
+        is a caller bug with no reading that is safe to guess: filing the page
+        under the document strands a row whose payload names someone else, and
+        filing it under the page writes outside the document the call named. So it
+        is refused, before any store is touched, and identically by every binding
+        -- an implementation left to choose would make a re-parented page set green
+        against a double and destructive against a database.
+
         Parameters
         ----------
         document
             The document to record, keyed by its uuid.
         pages
-            The document's complete page set. Passing an empty sequence records
-            a document with no pages and discards all of its recorded text.
+            The document's complete page set, every page owned by ``document``.
+            Passing an empty sequence records a document with no pages and
+            discards all of its recorded text.
 
         Raises
         ------
+        ValueError
+            A page's ``doc_uuid`` is not ``document.uuid``. Raised before anything
+            is recorded, so the call changes nothing.
         StoreUnavailableError
             The store cannot be written.
         """
@@ -219,10 +234,15 @@ class DocumentSyncStore(Protocol):
 
         The order is part of the contract: ``(visible_name.casefold(), uuid)``
         ascending. It is total, so the double and the adapter cannot disagree on
-        ties, and it is case-folded because that is what the legacy listing
-        produced. There is no name or parent filter: filtering is a domain
-        concern, and a store-side filter would inherit the adapter's collation --
-        SQL ``LIKE`` folds ASCII case while Python ``in`` does not.
+        ties. It is *not* what the legacy listing produced: legacy ``ORDER BY
+        visible_name`` took SQLite's BINARY collation, which puts every uppercase
+        letter before every lowercase one -- "Banana" before "apple" -- so a
+        mixed-case library lists in a visibly different order than it used to.
+        That change is deliberate and user-visible, and saying so here is what
+        stops the next reader concluding ``rmspec ls`` output was unaffected.
+        There is no name or parent filter: filtering is a domain concern, and a
+        store-side filter would inherit the adapter's collation -- SQL ``LIKE``
+        folds ASCII case while Python ``in`` does not.
 
         Returns
         -------

@@ -50,7 +50,10 @@ body = {
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": "Transcribe the text in this image. Output only the text."},
+                {
+                    "type": "text",
+                    "text": "Transcribe the text in this image. Output only the text.",
+                },
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
             ],
         }

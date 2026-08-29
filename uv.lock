@@ -1398,7 +1398,6 @@ name = "rmspec-export"
 version = "0.2.0"
 source = { editable = "packages/rmspec-export" }
 dependencies = [
-    { name = "cairocffi" },
     { name = "cairosvg" },
     { name = "pillow" },
     { name = "pymupdf" },
@@ -1408,7 +1407,6 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cairocffi", specifier = ">=1.7.1" },
     { name = "cairosvg", specifier = ">=2.8.2" },
     { name = "pillow", specifier = ">=12.1.1" },
     { name = "pymupdf", specifier = ">=1.27.1" },
@@ -1421,12 +1419,14 @@ name = "rmspec-formats"
 version = "0.2.0"
 source = { editable = "packages/rmspec-formats" }
 dependencies = [
+    { name = "pydantic" },
     { name = "rmscene" },
     { name = "rmspec-domain" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "pydantic", specifier = ">=2.12.5" },
     { name = "rmscene", specifier = ">=0.7.0,<0.8.0" },
     { name = "rmspec-domain", editable = "packages/rmspec-domain" },
 ]
@@ -1460,11 +1460,15 @@ name = "rmspec-persistence"
 version = "0.2.0"
 source = { editable = "packages/rmspec-persistence" }
 dependencies = [
+    { name = "pydantic" },
     { name = "rmspec-domain" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "rmspec-domain", editable = "packages/rmspec-domain" }]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "rmspec-domain", editable = "packages/rmspec-domain" },
+]
 
 [[package]]
 name = "rmspec-render"
