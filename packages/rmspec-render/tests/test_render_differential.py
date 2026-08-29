@@ -62,6 +62,7 @@ from rmspec.render import SvgPageRenderer
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from types import ModuleType
 
     # The legacy reader's own models, for annotations only. They are never imported at run
     # time -- the module is loaded through importlib after the repository's ``src`` directory
@@ -141,11 +142,49 @@ def _corpus_files() -> list[Path]:
     return sorted(CORPUS.rglob("*.rm"))
 
 
-def _parse_layers(path: Path) -> list[LegacyLayer]:
-    """Read one scene file with the reader that produced the manifest."""
+def _legacy_module(name: str, /) -> ModuleType:
+    """Import one legacy module, undoing its process-wide logging side effect.
+
+    Importing anything under ``remarkable_spec`` runs
+    ``src/remarkable_spec/formats/rm_file.py``, whose line 31 is a bare
+    ``logging.getLogger("rmscene").setLevel(logging.ERROR)`` at module scope. That is
+    exactly the defect ``rmspec.formats.scene_codec`` was written to avoid -- its docstring
+    argues that "a library that reconfigures its host application's logging is a library
+    that breaks its host's logging", and two tests in
+    ``packages/rmspec-formats/tests/test_formats_scene_codec.py`` assert the ``rmscene``
+    level is still ``NOTSET``.
+
+    Those two tests failed whenever this module loaded first in the same process. It went
+    unnoticed because every mise task runs ``pytest -n auto``, and xdist put the two
+    packages in different workers; the contamination only appears in a single-process run.
+    The legacy tree is excluded from lint and scheduled for deletion in step 7, so the fix
+    belongs here, at the one place that pulls it in, rather than in a file with a deletion
+    date.
+
+    Parameters
+    ----------
+    name
+        Dotted module path under ``remarkable_spec``.
+
+    Returns
+    -------
+    ModuleType
+        The imported module. Attribute access on it is untyped, which is the honest shape:
+        the legacy tree ships no annotations and is loaded by name.
+    """
     if str(LEGACY_SRC) not in sys.path:
         sys.path.insert(0, str(LEGACY_SRC))
-    reader = importlib.import_module("remarkable_spec.formats.rm_file")
+    parser_logger = logging.getLogger("rmscene")
+    restore = parser_logger.level
+    try:
+        return importlib.import_module(name)
+    finally:
+        parser_logger.setLevel(restore)
+
+
+def _parse_layers(path: Path) -> list[LegacyLayer]:
+    """Read one scene file with the reader that produced the manifest."""
+    reader = _legacy_module("remarkable_spec.formats.rm_file")
     return list(reader.parse_rm_file(path))
 
 
@@ -339,11 +378,9 @@ def _diagnose(entry: Entry, raw: bytes, page: Page) -> str:
 
 def _legacy_svg(entry: Entry) -> bytes:
     """Re-render one entry with the legacy code, for the diff a hash pair cannot give."""
-    if str(LEGACY_SRC) not in sys.path:
-        sys.path.insert(0, str(LEGACY_SRC))
-    engine = importlib.import_module("remarkable_spec.render.engine")
-    legacy_page_model = importlib.import_module("remarkable_spec.models.page")
-    screens = importlib.import_module("remarkable_spec.models.screen")
+    engine = _legacy_module("remarkable_spec.render.engine")
+    legacy_page_model = _legacy_module("remarkable_spec.models.page")
+    screens = _legacy_module("remarkable_spec.models.screen")
     layers = _parse_layers(entry.path)
     legacy_screen = screens.PAPER_PRO_SCREEN if entry.screen == "1620x2160" else screens.RM2_SCREEN
     with tempfile.TemporaryDirectory() as directory:

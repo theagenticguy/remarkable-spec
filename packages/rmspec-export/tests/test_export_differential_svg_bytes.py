@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import logging
 import pathlib
 import sys
 import tempfile
@@ -50,7 +51,16 @@ if TYPE_CHECKING:
 REPO = pathlib.Path(__file__).resolve().parents[3]
 MANIFEST = REPO / "tests" / "fixtures" / "render-differential-manifest.json"
 LEGACY_SOURCE = REPO / "src"
+
 CORPUS = pathlib.Path.home() / "remarkable"
+
+LEGACY_PARSER_LOGGER = "rmscene"
+"""The logger the legacy reader raises to ERROR at import time, process-wide.
+
+Named rather than inlined so the two differential suites that pull in the legacy tree
+-- this one and ``packages/rmspec-render/tests/test_render_differential.py`` -- spell it
+the same way, and so a grep for it finds every site that has to put it back.
+"""
 
 #: Render parameters the manifest records. Changing any of them invalidates every hash.
 THICKNESS = 1.5
@@ -88,6 +98,20 @@ def _legacy_producer() -> SvgProducer | None:
         return None
     if str(LEGACY_SOURCE) not in sys.path:
         sys.path.insert(0, str(LEGACY_SOURCE))
+    # src/remarkable_spec/formats/rm_file.py:31 runs
+    # `logging.getLogger("rmscene").setLevel(logging.ERROR)` as an import side effect, so
+    # importing it here mutates the level for the rest of the process. Two tests in
+    # packages/rmspec-formats/tests/test_formats_scene_codec.py assert that level is still
+    # NOTSET -- rmspec.formats.scene_codec exists partly to argue that a library which
+    # reconfigures its host's logging is broken -- and both failed whenever this module ran
+    # first in the same process. It went unseen because every mise task passes `-n auto` and
+    # xdist put the two packages in different workers; only a single-process run shows it.
+    # The sibling at packages/rmspec-render/tests/test_render_differential.py already
+    # restores the level and this file was the one that did not. The legacy tree is excluded
+    # from lint and is deleted in step 7, so the fix belongs at the call site rather than in
+    # a file with a deletion date.
+    parser_logger = logging.getLogger(LEGACY_PARSER_LOGGER)
+    restore = parser_logger.level
     try:
         rm_file = importlib.import_module("remarkable_spec.formats.rm_file")
         page_module = importlib.import_module("remarkable_spec.models.page")
@@ -96,6 +120,8 @@ def _legacy_producer() -> SvgProducer | None:
         palette_module = importlib.import_module("remarkable_spec.render.palette")
     except ImportError:
         return None
+    finally:
+        parser_logger.setLevel(restore)
     parse_rm_file = rm_file.parse_rm_file
     page_type = page_module.Page
     detect_screen = screen_module.detect_screen
