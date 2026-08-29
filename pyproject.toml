@@ -87,9 +87,26 @@ ignore = [
 "packages/*/tests/**" = ["S101", "PLR2004", "SLF001", "TID251", "D100", "D103", "D104", "ANN201", "INP001"]
 # The one package allowed to speak SQL.
 "packages/rmspec-persistence/**" = ["TID251"]
+# The one package allowed to speak paramiko, which `banned-api` below bans everywhere and
+# whose ban message already says so. Without this the lint layer contradicts the
+# architecture layer: OWNED_THIRD_PARTY in tests/architecture/test_dependency_direction.py
+# assigns paramiko to this package and fails the build if any *other* package imports it,
+# while TID251 fails the build when this one does. Both transports live here, so the
+# exemption is the package, not a file list that would drift as modules are added.
+"packages/rmspec-device/**" = ["TID251"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
+
+# TC003 wants a typing-only import moved into an `if TYPE_CHECKING:` block. For a name used
+# in a pydantic field annotation that is wrong at runtime, not merely stylistic: pydantic
+# resolves annotations when the model class is built, so the moved import makes the model
+# raise `PydanticUserError: <Model> is not fully defined`. Declaring the base class here
+# tells ruff those annotations are runtime-evaluated, so it stops demanding a move that
+# breaks the model. Without it the only ways out are a `noqa` or giving the name a second
+# runtime use -- and this repo allows neither shortcut, so the config is the real fix.
+[tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 
 # The lint-level restatement of "no direct querying of DBs from application
 # layers". sqlite3 is unimportable everywhere except rmspec-persistence and
