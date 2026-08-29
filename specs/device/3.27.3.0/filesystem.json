@@ -3,6 +3,8 @@
   "measured_on_kernel": "6.12.49+git-imx8mm-ferrari-g68b95e858a0a",
   "source": "read-only probe",
   "measured_at": "2026-08-28T23:00:00Z",
+  "remeasured_at": "2026-08-29T15:40:00Z",
+  "remeasurement_note": "The device was re-attached on 2026-08-29 and IMG_VERSION was still 3.27.3.0. Claims carrying \"measured\": \"2026-08-29\" are new in that pass; everything else is from 2026-08-28 and was not re-run.",
   "root": "/home/root/.local/share/remarkable/xochitl",
   "storage": {
     "device": "/dev/mapper/home-encrypted-disk mounted at /home (ext4, rw,relatime)",
@@ -223,6 +225,30 @@
       },
       "coverage": "0 of the 12 .failure documents are indexed. 17 of 18 .local documents are indexed (92c6e348 is not).",
       "library_gap": "This is the single biggest gap for any client doing OCR: the device has already computed the text, stores it locally, and keys it by the same page UUIDs the client already parses. Note the index is a SERVER-TOGGLED feature -- enablement is gated on a cloud round-trip (rm.search.indexsettings 'Action::Check' / sendEnable), so offline you cannot confirm it is enabled, only read what it already holds."
+    },
+    {
+      "id": "gauges:memory-and-storage",
+      "kind": "environment",
+      "measured": "2026-08-29",
+      "shape": "Memory comes from /proc/meminfo (MemTotal, MemAvailable, both in kB meaning 1024 bytes). Storage comes from df, but ONLY in POSIX form: `df -k` WRAPS its output on this device and `df -Pk` does not.",
+      "wrapping_trap": "The documents partition is /dev/mapper/home-encrypted-disk -- 31 characters, wider than BusyBox df's 20-character Filesystem column -- so `df -k` emits the device name on its own line and the six numeric fields on the NEXT line. Any parser doing `df -k ... | awk 'NR==2 {print $4}'` reads the wrong field, or none. BusyBox 1.36.1 supports -P: `Usage: df [-PkmhT] [-t TYPE] [FILESYSTEM]...`, and -P puts all six fields on one line.",
+      "evidence": "$ ssh remarkable 'sed -n 1,6p /proc/meminfo' -> \"MemTotal: 2009400 kB / MemFree: 1224912 kB / MemAvailable: 1251016 kB / Buffers: 7884 kB / Cached: 111252 kB / SwapCached: 0 kB\". $ ssh remarkable 'df -k /home/root/.local/share/remarkable/xochitl' -> \"Filesystem           1K-blocks      Used Available Use% Mounted on\" then \"/dev/mapper/home-encrypted-disk\" alone on line 2 then \"                      48568796    112564  47929504   0% /home\" on line 3. $ ssh remarkable 'df -Pk /home/root/.local/share/remarkable/xochitl' -> header then \"/dev/mapper/home-encrypted-disk             48568796    112564  47929504   0% /home\" on ONE line; field-splitting that line with `while read a b c d e f` yields exactly \"[/dev/mapper/home-encrypted-disk][48568796][112564][47929504][0%][/home]\". $ ssh remarkable 'df --help' -> \"BusyBox v1.36.1 () multi-call binary. / Usage: df [-PkmhT] [-t TYPE] [FILESYSTEM]...\".",
+      "arithmetic": "Blocks are 1024 bytes, so total = 48568796 * 1024 and available = 47929504 * 1024. Used + Available < total because of reserved blocks (112564 + 47929504 = 48042068 against 48568796), so a reading satisfies an available <= total invariant without the two ever being an identity. Do not derive total from Used + Available.",
+      "notes": "Neither `free` nor a `du` walk is needed for either gauge, which is what the legacy tree shelled out to and string-parsed. Passing the xochitl data directory itself to df -Pk resolves to the /home mount, so the caller never has to know the mount point."
+    },
+    {
+      "id": "identity:no-device-serial-source",
+      "kind": "environment",
+      "measured": "2026-08-29",
+      "shape": "firmware and model have clean read-only sources. The reMarkable DEVICE serial has NONE that is readable without touching a forbidden file. /sys/devices/soc0/serial_number and /proc/device-tree/serial-number both exist and both hold 16 characters, but that is the i.MX8MM SoC unique id -- a different fact from the RM02A-form serial the tablet UI shows.",
+      "evidence": "$ ssh remarkable 'for f in family machine machine_id revision soc_id; do printf \"%s=\" $f; cat /sys/devices/soc0/$f; done' -> \"family=Freescale i.MX / machine=reMarkable Ferrari / machine_id=<32 hex chars, withheld> / revision=1.0 / soc_id=i.MX8MM\"; $ ssh remarkable 'ls -A /sys/devices/soc0' -> \"family machine machine_id power revision serial_number soc_id subsystem uevent\"; both serial paths report `wc -c` = 17 (16 characters plus a terminator), value withheld. $ ssh remarkable 'ls -A /home/root/.config/remarkable/' -> \"csl.conf memfault_project_key.conf wifi_networks.conf xochitl.conf\" (names only; nothing opened). Existence probes: /etc/remarkable.conf absent, /usr/share/remarkable/update.conf absent, /home/root/.config/remarkable/serial absent, /sys/class/dmi/id/product_serial absent.",
+      "sources": {
+        "firmware": "IMG_VERSION in /etc/os-release -> \"3.27.3.0\". /etc/version holds the build stamp \"20260612085811\", which is not what a user recognises as a firmware version.",
+        "model": "/sys/devices/soc0/machine -> \"reMarkable Ferrari\".",
+        "serial": "NO clean source. The RM02A-form serial appears only in /home/root/.config/remarkable/xochitl.conf, which no source file in this workspace may reference (tests/architecture/test_secret_containment.py), and in rm.user.auth.cli journal lines, which GET /log.txt redacts."
+      },
+      "consequence": "A DeviceFacts.serial reported from /sys/devices/soc0/serial_number would be a different fact wearing the right field's name. The field belongs in DeviceFacts.unsupported for BOTH transports, and the reason is structural -- the only sources are a file this workspace is forbidden to reference and a redacted log -- not a transient read failure.",
+      "notes": "Also newly noted: /usr/share/remarkable/update.conf, which the legacy tree's DevicePaths.UPDATE_CONF names as the firmware-version source, DOES NOT EXIST on this firmware. Any code reading it gets nothing."
     },
     {
       "id": "hostile-shell-facts",

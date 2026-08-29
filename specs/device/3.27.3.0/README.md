@@ -278,12 +278,45 @@ observations; this is the short list.
   are exactly 0 bytes; `rmscene` raises `EOFError`. Stat and skip.
 - **Counts drift; names, source files and message shapes do not.** Prefer the
   latter in any assertion you intend to keep.
+- **A negative universal must be checked against the case where the thing would
+  exist.** "The `.rmdoc` archive has no `.pdf` member" was measured on a notebook —
+  the one document class with no `.pdf` on disk. See the 2026-08-29 provenance note.
+- **`df -k` wraps when the device name is wider than the column.** `/dev/mapper/`
+  `home-encrypted-disk` is 31 characters against BusyBox's 20-character field, so the
+  numbers land on the next line and `awk 'NR==2 {print $4}'` reads nothing. Use
+  `df -Pk`.
 
 ---
 
 ## Provenance
 
 - Measured 2026-08-28, ~22:56–23:05 UTC, against the live device over USB-C.
+- **Re-measured 2026-08-29, ~15:30–15:45 UTC**, after the device was re-attached.
+  `IMG_VERSION` was still `3.27.3.0`, so the two passes describe one firmware.
+  Claims added in the second pass carry `"measured": "2026-08-29"`; every other claim
+  is from the first pass and was not re-run. `GET /documents/` reproduced
+  byte-for-byte (200, 2902 bytes, 9 entries), which is the cheapest available check
+  that the store had not moved under the spec.
+
+  The second pass added five claims and **refuted two**, one of them this spec's own:
+
+  | Added | Where |
+  |---|---|
+  | The `.rmdoc` archive carries the original underlay as a fourth member for any non-notebook document | `http.json` `artifact:.rmdoc archive shape` |
+  | The USB web API filters trashed entries out entirely; no listing ever carries `Parent == "trash"` | `http.json` `route:GET /documents/ trash filtering` |
+  | Folder nesting reaches depth 2, and a walker without a visited set never terminates | `http.json` `route:GET /documents/{parentId} nesting depth` |
+  | `df -k` wraps on this device and `df -Pk` does not; `/proc/meminfo` is the memory source | `filesystem.json` `gauges:memory-and-storage` |
+  | There is no readable source for the reMarkable *device* serial that is not forbidden | `filesystem.json` `identity:no-device-serial-source` |
+
+  The refutation of our own `.rmdoc` claim is the one worth reading. It failed in
+  exactly the way this file's own reading rules warn about — "a single introspect of
+  one object does not establish a universal" — and it failed *in the same session
+  that wrote the warning*. The original measurement sampled `40fa3080`, a **notebook**:
+  the one document class with no underlay on disk, and therefore the one sample that
+  could not exhibit the counterexample. The generalisation to "no `.pdf`" was not
+  merely unproven, it was unprovable from that sample. The rule to add is narrower and
+  more useful than the one already here: **when a claim is a negative universal
+  ("member X is never present"), check it against the case where X would exist.**
 - Where a claim could only be re-verified from a prior session — the three
   activatable systemd D-Bus services, `org.bluez`, and the search-index row
   counts — it is marked with attribution inline. Everything else in the
