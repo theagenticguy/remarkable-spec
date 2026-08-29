@@ -9,10 +9,18 @@ row) unrepresentable rather than merely discouraged.
 Three groups do the load-bearing work:
 
 ``digest``/``canonical``
-    Golden hex values pin the digest bodies. The module docstring requires
-    ``RasterImage``'s digest to stay byte-identical to its twin in
-    ``ports/export.py`` forever; a hex constant is what makes accidental drift a
-    test failure instead of a silent cache split.
+    Golden hex values pin the digest bodies, so a change of scheme is a
+    deliberate, reviewed cache miss rather than a silent one. Agreement between
+    ``RasterImage`` and its twin in ``ports/export.py`` is asserted directly
+    instead -- both types digested over equal field values, in both directions --
+    which is what retires "these two bodies must stay byte-identical forever, on
+    trust" as the reason to hoist them.
+framing
+    Every component of every digest is length-prefixed by
+    ``rmspec.domain._digest``, so a component that contains ``0x1f`` cannot move
+    a field boundary and make two different requests one cache key. Three of the
+    old separator-joined bodies were reachably ambiguous; the tests that would
+    fail against the old scheme are marked as such in their comments.
 ``answering``/``attributed``
     The echoed cache-key components must be derived from the request, the
     binding and the raster -- never hand-copied. Tests assert a double *cannot*
@@ -37,11 +45,18 @@ from hypothesis import strategies as st
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
 
+from rmspec.domain.ports.export import (
+    ImageMedia as ExportImageMedia,
+)
+from rmspec.domain.ports.export import (
+    RasterImage as ExportRasterImage,
+)
 from rmspec.domain.ports.ocr import (
-    _FIELD_SEPARATOR,
     _MAGIC_BY_MEDIA,
     Decoding,
+    HandwrittenTextIndex,
     ImageMedia,
+    IndexedHandwriting,
     PageRasterLike,
     RasterImage,
     ReasoningEffort,
@@ -58,7 +73,13 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 JPEG_MAGIC = b"\xff\xd8\xff"
 PNG_BYTES = PNG_MAGIC + b"pixels"
 JPEG_BYTES = JPEG_MAGIC + b"pixels"
+PNG_IEND = b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
 HEX_64 = re.compile(r"\A[0-9a-f]{64}\Z")
+UNIT_SEPARATOR = "\x1f"
+"""The byte every digest body used to fold components on, before framing landed."""
+
+RECORD_SEPARATOR = "\x1e"
+"""The byte the app used to join recognizer slugs on, for the same reason."""
 
 
 # ───────────────────────────── builders ─────────────────────────────
@@ -82,6 +103,24 @@ def make_raster(
         width=width,
         height=height,
         render_dpi=render_dpi,
+    )
+
+
+def make_png(width: int, height: int) -> bytes:
+    """Return PNG bytes both slices' rasters accept: signature, IHDR and an IEND trailer.
+
+    The export twin validates its declared size against the ``IHDR`` chunk and requires the
+    trailer, while the OCR copy checks only the magic. One byte string that satisfies both is
+    what lets the cross-twin digest test compare equal *field values* rather than two
+    different sets of bytes each slice happens to accept.
+    """
+    return (
+        PNG_MAGIC
+        + (13).to_bytes(4, "big")
+        + b"IHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + PNG_IEND
     )
 
 
@@ -205,6 +244,44 @@ class ScriptedVisionModel:
             fingerprint=self._fingerprint,
             text=self._replies[request.digest()],
             stop_reason=StopReason.COMPLETE,
+        )
+
+
+class SnapshotIndex:
+    """A ``HandwrittenTextIndex`` over one frozen snapshot of the device's own index.
+
+    Keyed by page, and deliberately missing most pages: absence is the state this port exists
+    to keep representable, so a double that answered every lookup would exercise two of the
+    three states the design turns on.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider_id: str,
+        rows: dict[str, tuple[str, str]],
+        generation: int,
+    ) -> None:
+        self._provider_id = provider_id
+        self._rows = dict(rows)
+        self._generation = generation
+
+    @property
+    def provider_id(self) -> str:
+        """Return this index's slug."""
+        return self._provider_id
+
+    def lookup(self, page_ref: str, /) -> IndexedHandwriting | None:
+        """Return the snapshot's row for ``page_ref``, or ``None`` when it holds none."""
+        row = self._rows.get(page_ref)
+        if row is None:
+            return None
+        entry_ref, text = row
+        return IndexedHandwriting(
+            page_ref=page_ref,
+            entry_ref=entry_ref,
+            text=text,
+            generation=self._generation,
         )
 
 
@@ -394,9 +471,11 @@ def test_raster_is_frozen_and_forbids_unknown_fields():
 
 
 def test_raster_digest_is_a_lowercase_sha256_pinned_against_drift():
-    # The export slice defines a field-for-field twin whose digest body must stay
-    # byte-identical to this one forever, or identical pixels hash to two cache
-    # keys. This constant is what turns drift in either body into a failure.
+    # The export slice defines a field-for-field twin that must answer the same digest for the
+    # same pixels, or identical pixels hash to two cache keys. Both bodies now call one framing
+    # primitive and the cross-twin test below asserts they agree; this constant is the separate
+    # guard that a change of *scheme* is a deliberate, reviewed cache miss rather than a silent
+    # one. It moved once, when framing replaced the 0x1f separator and the tag went v1 -> v2.
     raster = make_raster(
         page_ref="p1",
         media=ImageMedia.PNG,
@@ -406,7 +485,7 @@ def test_raster_digest_is_a_lowercase_sha256_pinned_against_drift():
         render_dpi=229,
     )
     assert HEX_64.match(raster.digest())
-    assert raster.digest() == "b00f243efbed6ed476e592e2120e80dee63291d7cfb1edb2b408a398f3539b8a"
+    assert raster.digest() == "91926dcc55a5068537ced890d4e45891268cf077dd0b0147ae5ddcbac339a8fc"
 
 
 def test_raster_digest_excludes_page_ref_so_identical_pixels_share_one_row():
@@ -530,6 +609,83 @@ def test_from_raster_runs_the_destinations_validators_rather_than_copying_fields
 def test_from_raster_takes_its_source_positionally_only():
     with pytest.raises(TypeError, match="positional-only"):
         RasterImage.from_raster(source=make_raster())  # ty: ignore[positional-only-parameter-as-kwarg]
+
+
+# ─────────────────── the two raster twins agree, by test not by trust ───────────────────
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "render_dpi"),
+    [(10, 20, 229), (1620, 2160, 229), (1, 1, 1), (4, 6, 300)],
+)
+def test_the_two_raster_twins_produce_equal_digests_for_equal_fields(
+    width: int,
+    height: int,
+    render_dpi: int,
+) -> None:
+    """Both slices' ``RasterImage.digest`` answer the same for the same field values.
+
+    This is what makes the hoist described in ``ports/ocr.py``'s module docstring a *cohesion*
+    question rather than a correctness one. The two bodies previously had to stay byte-identical
+    forever, on trust, or identical pixels would hash to two cache keys -- defect 3 reopened by
+    hand-mirroring. They now call one framing primitive, so the only residual risk is a
+    divergent argument list, and this asserts that risk is not real: in both directions, and
+    through ``from_raster``.
+    """
+    shared: dict[str, object] = {
+        "page_ref": "doc-1/page-3",
+        "data": make_png(width, height),
+        "width": width,
+        "height": height,
+        "render_dpi": render_dpi,
+    }
+    mine = RasterImage(media=ImageMedia.PNG, **shared)
+    theirs = ExportRasterImage(media=ExportImageMedia.PNG, **shared)
+
+    assert mine.digest() == theirs.digest()
+    assert RasterImage.model_validate(theirs.model_dump()).digest() == theirs.digest()
+    assert ExportRasterImage.model_validate(mine.model_dump()).digest() == mine.digest()
+    assert RasterImage.from_raster(theirs).digest() == theirs.digest()
+
+
+def test_the_two_raster_twins_also_agree_on_jpeg_pixels():
+    # JPEG is the encoding only the OCR slice ever receives, so it is the one a drifting export
+    # body would be least likely to be exercised on. Both media values reach the digest.
+    shared: dict[str, object] = {
+        "page_ref": "doc-1/page-4",
+        "data": JPEG_MAGIC + b"\xe0\x00\x10JFIF\x00",
+        "width": 2,
+        "height": 3,
+        "render_dpi": 229,
+    }
+    mine = RasterImage(media=ImageMedia.JPEG, **shared)
+    theirs = ExportRasterImage(media=ExportImageMedia.JPEG, **shared)
+
+    assert mine.digest() == theirs.digest()
+    assert RasterImage.from_raster(theirs).digest() == theirs.digest()
+
+
+def test_the_twins_disagree_only_when_their_pixels_do():
+    # Guard the guard: an equality test over one value pair would also pass if both bodies
+    # returned a constant. Different pixels must still separate, across the twin boundary.
+    mine = RasterImage(
+        page_ref="p",
+        media=ImageMedia.PNG,
+        data=make_png(10, 20),
+        width=10,
+        height=20,
+        render_dpi=229,
+    )
+    theirs = ExportRasterImage(
+        page_ref="p",
+        media=ExportImageMedia.PNG,
+        data=make_png(20, 10),
+        width=20,
+        height=10,
+        render_dpi=229,
+    )
+
+    assert mine.digest() != theirs.digest()
 
 
 # ─────────────────────────────── Decoding ───────────────────────────────
@@ -688,7 +844,7 @@ def test_request_digest_is_a_lowercase_sha256_pinned_against_drift():
         ),
     )
     assert HEX_64.match(request.digest())
-    assert request.digest() == "2299741b3db530fc9f16b494363efe716060d61e50c54fb2cb9fb1f98fac6c3c"
+    assert request.digest() == "8b187894bf535e3a4818587cbe937906da5f1475c7096325c110ed024a8062f5"
 
 
 def test_request_digest_hashes_the_prompt_text_so_no_version_field_is_needed():
@@ -703,10 +859,15 @@ def test_request_digest_moves_when_the_system_turn_changes():
     assert make_request(system="Be terse.").digest() != make_request(system="Be verbose.").digest()
 
 
-def test_request_digest_treats_an_empty_system_turn_as_no_system_turn():
-    # Documented consequence of `(self.system or "")`: an empty string carries no
-    # instruction, so it must not fork the cache from `None`.
-    assert make_request(system=None).digest() == make_request(system="").digest()
+def test_an_empty_system_turn_is_unconstructible_rather_than_a_synonym_for_none():
+    # `digest` folds the system turn in as `(self.system or "")`, which maps both `None` and
+    # `""` to the empty component. That is only injective while `""` cannot be constructed --
+    # otherwise a request with an empty developer turn and a request with no developer turn are
+    # one cache row while being two different API calls. `min_length=1` is what makes "absent"
+    # have exactly one spelling; it is not cosmetic.
+    assert make_request(system=None).system is None
+    with pytest.raises(ValidationError):
+        make_request(system="")
 
 
 @pytest.mark.parametrize(
@@ -753,20 +914,29 @@ def test_request_digest_frames_the_system_and_prompt_boundary():
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "framing defect: the separator is not escaped, so a field that itself contains "
-        "0x1f makes the concatenation ambiguous and two distinct requests collide on one "
-        "cache key. Reachable because prompts embed recognizer text, which is arbitrary."
-    ),
-    strict=True,
-)
 def test_request_digest_frames_fields_even_when_a_field_contains_the_separator():
-    separator = _FIELD_SEPARATOR.decode()
+    # Task #32, and the whole reason `rmspec.domain._digest` exists. Under the separator scheme
+    # these two requests produced identical bytes -- `system` + 0x1f + `prompt` is one stream,
+    # and a 0x1f *inside* a field moves the boundary -- so two different requests shared one
+    # cache key and one page's transcription could be served for another's request. Reachable
+    # rather than theoretical: prompts embed arbitrary recognizer output. Length framing makes
+    # the stream parseable back into exactly one component list, so these now differ.
     assert (
-        make_request(system="a", prompt=f"b{separator}c").digest()
-        != make_request(system=f"a{separator}b", prompt="c").digest()
+        make_request(system="a", prompt=f"b{UNIT_SEPARATOR}c").digest()
+        != make_request(system=f"a{UNIT_SEPARATOR}b", prompt="c").digest()
     )
+
+
+def test_every_split_of_one_separator_bearing_string_is_its_own_request():
+    # The general form of the same defect: no matter where the boundary between `system` and
+    # `prompt` falls inside a string that carries both old separators, each split is one key.
+    whole = f"a{UNIT_SEPARATOR}b{RECORD_SEPARATOR}c"
+    digests = {
+        make_request(system=whole[:cut], prompt=whole[cut:]).digest()
+        for cut in range(1, len(whole))
+    }
+
+    assert len(digests) == len(whole) - 1
 
 
 # ────────────────────────────── TokenUsage ──────────────────────────────
@@ -785,6 +955,55 @@ def test_token_usage_accepts_zero_and_positive_counts(
 def test_token_usage_rejects_negative_counts(input_tokens: int, output_tokens: int) -> None:
     with pytest.raises(ValidationError):
         TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def test_token_usage_reports_no_reasoning_split_by_default():
+    # `None` means the provider reported no split, never that it did no reasoning. A default of
+    # 0 would assert the second, which for most providers is a lie.
+    assert TokenUsage(input_tokens=1, output_tokens=1).reasoning_tokens is None
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens", "reasoning_tokens"),
+    [(177, 24, 24), (177, 11, 0)],
+)
+def test_token_usage_accepts_the_measured_reasoning_splits(
+    input_tokens: int,
+    output_tokens: int,
+    reasoning_tokens: int,
+) -> None:
+    # Both pairs are measured against the GPT-5.6 profiles. (24, 24) is the silent-failure run:
+    # the whole allowance went to reasoning, `finish_reason` came back "length", and the content
+    # was None -- which is exactly the case `output_tokens` alone cannot explain to a caller.
+    usage = TokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
+    )
+
+    assert usage.reasoning_tokens == reasoning_tokens
+    assert reasoning_tokens <= usage.output_tokens
+
+
+@pytest.mark.parametrize(("output_tokens", "reasoning_tokens"), [(0, 1), (24, 25), (11, 12)])
+def test_token_usage_rejects_reasoning_larger_than_the_output_it_is_part_of(
+    output_tokens: int,
+    reasoning_tokens: int,
+) -> None:
+    # Reasoning tokens are a share of `output_tokens`, not additional to it. A count above the
+    # output means whoever filled the field read it the other way, and a caller adding the two
+    # would then double-count the run's cost.
+    with pytest.raises(ValidationError, match="part of the output"):
+        TokenUsage(
+            input_tokens=177,
+            output_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
+        )
+
+
+def test_token_usage_rejects_a_negative_reasoning_count():
+    with pytest.raises(ValidationError):
+        TokenUsage(input_tokens=1, output_tokens=1, reasoning_tokens=-1)
 
 
 def test_token_usage_is_frozen_and_forbids_unknown_fields():
@@ -1129,10 +1348,181 @@ def test_the_raster_view_publishes_exactly_the_six_members_a_twin_must_supply():
     }
 
 
-@pytest.mark.parametrize("port", [VisionLanguageModel, TextRecognizer, PageRasterLike])
+def test_the_index_port_publishes_a_slug_and_a_lookup_and_nothing_else():
+    # No `read_index`, no path, no connection: transporting the database image belongs to
+    # `rmspec.domain.ports.device.SearchIndexSource`, because no one package may both move
+    # bytes over SSH and open them with sqlite3.
+    assert get_protocol_members(HandwrittenTextIndex) == {"provider_id", "lookup"}
+
+
+@pytest.mark.parametrize(
+    "port",
+    [VisionLanguageModel, TextRecognizer, PageRasterLike, HandwrittenTextIndex],
+)
 def test_the_ports_are_not_runtime_checkable(port: type) -> None:
     with pytest.raises(TypeError, match="runtime_checkable"):
         isinstance(make_raster(), port)
+
+
+# ─────────────────── tier 0: the device's own index, three states ───────────────────
+
+
+def test_an_indexed_row_carries_the_page_the_document_and_the_snapshot():
+    row = IndexedHandwriting(
+        page_ref="31833079-193f-40cd-86fc-fc78b4f26cfd",
+        entry_ref="doc-1",
+        text="a free prior",
+        generation=42,
+    )
+
+    assert (row.page_ref, row.entry_ref, row.text, row.generation) == (
+        "31833079-193f-40cd-86fc-fc78b4f26cfd",
+        "doc-1",
+        "a free prior",
+        42,
+    )
+
+
+def test_an_indexed_blank_page_is_a_row_and_not_an_absence():
+    # Measured: 90 of 92 rows carry text, 2 carry the empty string, and none is NULL. An empty
+    # reading here is the device positively saying it indexed this page and found nothing.
+    blank = IndexedHandwriting(page_ref="p", entry_ref="d", text="", generation=9)
+
+    assert blank.text == ""
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"page_ref": ""}, {"entry_ref": ""}, {"generation": -1}],
+)
+def test_an_indexed_row_refuses_an_unattributable_or_impossible_reading(
+    overrides: dict[str, object],
+) -> None:
+    fields: dict[str, object] = {
+        "page_ref": "p",
+        "entry_ref": "d",
+        "text": "t",
+        "generation": 0,
+    }
+    with pytest.raises(ValidationError):
+        IndexedHandwriting(**(fields | overrides))  # ty: ignore[invalid-argument-type]
+
+
+def test_an_indexed_row_is_frozen_and_forbids_unknown_fields():
+    row = IndexedHandwriting(page_ref="p", entry_ref="d", text="t", generation=0)
+    with pytest.raises(ValidationError):
+        row.text = "tampered"  # ty: ignore[invalid-assignment]
+    with pytest.raises(ValidationError):
+        IndexedHandwriting(
+            page_ref="p",
+            entry_ref="d",
+            text="t",
+            generation=0,
+            word_strokes="1:62;1,1:65;1",  # ty: ignore[unknown-argument]
+        )
+
+
+def test_an_indexed_row_round_trips_through_json():
+    row = IndexedHandwriting(page_ref="p", entry_ref="d", text="handwriting", generation=7)
+
+    assert IndexedHandwriting.model_validate_json(row.model_dump_json()) == row
+
+
+def test_a_page_the_index_has_never_seen_is_none_and_not_a_blank_reading():
+    # The state that makes this port not a `TextRecognizer`. The index lags the tablet -- a
+    # notebook written at 21:46 had zero rows in an index last written at 19:22 -- so a miss is
+    # the normal state for a page with fresh ink. Reporting it as `text=""` would let a stale
+    # index suppress tiers 1-3 and delete the paid read.
+    index: HandwrittenTextIndex = SnapshotIndex(
+        provider_id="device-index@1",
+        rows={"indexed": ("doc-1", "some handwriting"), "blank": ("doc-1", "")},
+        generation=42,
+    )
+
+    assert index.lookup("never-indexed") is None
+    assert index.lookup("blank") == IndexedHandwriting(
+        page_ref="blank",
+        entry_ref="doc-1",
+        text="",
+        generation=42,
+    )
+
+
+def test_the_three_index_states_are_three_distinct_answers():
+    index: HandwrittenTextIndex = SnapshotIndex(
+        provider_id="device-index@1",
+        rows={"with-text": ("doc-1", "ink"), "indexed-blank": ("doc-1", "")},
+        generation=42,
+    )
+    with_text = index.lookup("with-text")
+    indexed_blank = index.lookup("indexed-blank")
+    absent = index.lookup("written-since-the-last-build")
+
+    assert with_text is not None
+    assert indexed_blank is not None
+    assert absent is None
+    assert bool(with_text.text) is not bool(indexed_blank.text)
+
+
+def test_an_index_reading_is_never_a_recognition_so_it_cannot_be_folded_in_as_one():
+    # `Recognition` has room for two states and this source has three, so the domain keeps
+    # them separate types rather than letting an index row be passed where a paid reading is.
+    row = IndexedHandwriting(page_ref="p", entry_ref="d", text="t", generation=0)
+
+    assert not isinstance(row, Recognition)
+    assert "mean_confidence" not in IndexedHandwriting.model_fields
+
+
+def test_the_index_slug_is_folded_into_a_key_exactly_like_a_recognizer_slug():
+    # A tiering run that consulted the index must not reuse a row written by one that did not.
+    index: HandwrittenTextIndex = SnapshotIndex(
+        provider_id="device-index@1",
+        rows={},
+        generation=1,
+    )
+    request = make_request(prompt="Merge.", images=(make_raster(),))
+    consulted = cache_key(
+        rm_hash="a" * 64,
+        request=request,
+        fingerprint="fp-1",
+        provider_ids=["apple-vision@2", index.provider_id],
+    )
+    not_consulted = cache_key(
+        rm_hash="a" * 64,
+        request=request,
+        fingerprint="fp-1",
+        provider_ids=["apple-vision@2"],
+    )
+
+    assert consulted != not_consulted
+
+
+def test_the_lookup_takes_its_page_positionally_only():
+    index = SnapshotIndex(provider_id="device-index@1", rows={}, generation=1)
+    with pytest.raises(TypeError, match="positional-only"):
+        index.lookup(page_ref="p")  # ty: ignore[positional-only-parameter-as-kwarg]
+
+
+def test_two_snapshots_of_one_index_are_distinguishable_by_generation():
+    # One value for the whole database, present so a caller can tell two readings came from two
+    # different snapshots of a file the tablet is still writing.
+    early: HandwrittenTextIndex = SnapshotIndex(
+        provider_id="device-index@1",
+        rows={"p": ("doc-1", "ink")},
+        generation=41,
+    )
+    later: HandwrittenTextIndex = SnapshotIndex(
+        provider_id="device-index@1",
+        rows={"p": ("doc-1", "ink")},
+        generation=42,
+    )
+    first = early.lookup("p")
+    second = later.lookup("p")
+
+    assert first is not None
+    assert second is not None
+    assert first.text == second.text
+    assert first != second
 
 
 # ─────────────────────── cache-key composition (defect 3) ───────────────────────

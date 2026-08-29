@@ -50,7 +50,6 @@ Not modelled here, on purpose
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from datetime import UTC, datetime
@@ -58,6 +57,8 @@ from enum import IntEnum, StrEnum
 from typing import Self
 
 from pydantic import AwareDatetime, BaseModel, Field, model_validator
+
+from rmspec.domain._digest import digest_of
 
 __all__ = [
     "EXPORT_PALETTE",
@@ -110,12 +111,6 @@ _UINT8_MAX = 255
 _UINT16_MAX = 65535
 _FULL_TURN = math.pi * 2
 
-_FIELD_SEPARATOR = b"\x1f"
-"""Byte separating digest components, so concatenation cannot be ambiguous."""
-
-_ITEM_SEPARATOR = "\x1e"
-"""Character separating the items of a component that is itself a sequence."""
-
 _MS_PER_SECOND = 1000
 """Divisor turning the store's millisecond epoch into the seconds ``datetime`` wants."""
 
@@ -130,31 +125,6 @@ _IDENTIFIER_PATTERN = r"^[0-9A-Za-z._-]+$"
 
 _IDENTIFIER_MAX_LENGTH = 64
 """Longest identifier accepted. A uuid is 36; this leaves room without leaving a path."""
-
-
-def _digest(tag: bytes, parts: tuple[str, ...]) -> str:
-    """Fold a domain tag and an ordered set of components into one hex digest.
-
-    Parameters
-    ----------
-    tag
-        Domain-and-version label, so two different key types with identical components cannot
-        collide and so a future change of scheme is a mechanical miss rather than a silent
-        reinterpretation.
-    parts
-        The components, in a fixed order.
-
-    Returns
-    -------
-    str
-        Lowercase hex SHA-256.
-    """
-    hasher = hashlib.sha256()
-    hasher.update(tag)
-    for part in parts:
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update(part.encode())
-    return hasher.hexdigest()
 
 
 # ──────────────────────── Sidecar json readers ────────────────────────
@@ -2205,18 +2175,19 @@ class OcrCacheKey(BaseModel, frozen=True, extra="forbid"):
         Returns
         -------
         str
-            Lowercase hex SHA-256 over every component, in declaration order.
+            Lowercase hex SHA-256 over every component, in declaration order. Each
+            recognizer slug is its own framed component rather than one joined string, so a
+            slug containing the character the caller used to join them cannot move the
+            boundary between two engines.
         """
-        return _digest(
-            b"rmspec.cache.ocr.v1",
-            (
-                self.page_hash,
-                self.render_digest,
-                self.raster_digest,
-                _ITEM_SEPARATOR.join(self.recognizers),
-                self.model_fingerprint,
-                self.request_digest,
-            ),
+        return digest_of(
+            b"rmspec.cache.ocr.v2",
+            self.page_hash.encode(),
+            self.render_digest.encode(),
+            self.raster_digest.encode(),
+            *(slug.encode() for slug in self.recognizers),
+            self.model_fingerprint.encode(),
+            self.request_digest.encode(),
         )
 
 
@@ -2275,15 +2246,13 @@ class DiagramCacheKey(BaseModel, frozen=True, extra="forbid"):
         str
             Lowercase hex SHA-256 over every component, in declaration order.
         """
-        return _digest(
-            b"rmspec.cache.diagram.v1",
-            (
-                self.page_hash,
-                self.render_digest,
-                self.raster_digest,
-                self.model_fingerprint,
-                self.request_digest,
-            ),
+        return digest_of(
+            b"rmspec.cache.diagram.v2",
+            self.page_hash.encode(),
+            self.render_digest.encode(),
+            self.raster_digest.encode(),
+            self.model_fingerprint.encode(),
+            self.request_digest.encode(),
         )
 
 

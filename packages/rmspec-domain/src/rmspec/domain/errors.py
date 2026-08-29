@@ -32,8 +32,11 @@ from the row models into a loud, named failure at first use instead of a silentl
 object.
 
 Three copies of one Bedrock call under two names collapse into :class:`ModelError` and its
-four children, which describe what the provider did -- denied, throttled, rejected,
-answered unreadably -- rather than which copy of the call site was running.
+five children, which describe what the provider did -- unreachable, denied, throttled,
+rejected, answered unreadably -- rather than which copy of the call site was running.
+:class:`ModelUnavailable` is the fifth because four could not tell an outage from a
+throttle, and an adapter with no name for one either reports a permanently dead endpoint as
+retryable or lets ``httpx.ConnectError`` cross the port.
 
 Caches keyed on ``rm_hash`` alone are answered by omission. There is no
 ``CacheKeyMismatchError``: the model id, prompt version and render DPI are part of the
@@ -121,6 +124,7 @@ __all__ = [
     "ModelRejectedRequest",
     "ModelResponseMalformed",
     "ModelThrottled",
+    "ModelUnavailable",
     "NoTextRecognized",
     "OcrError",
     "PageNotFound",
@@ -900,26 +904,55 @@ class NoTextRecognized(OcrError):
 class ModelError(OcrError):
     """Base for failures of the vision language model port.
 
-    Never raised directly. The four children describe what the provider did, which is what
+    Never raised directly. The five children describe what the provider did, which is what
     the caller can act on. They exist as one group because the legacy code had one Bedrock
     invocation copied into three places under two names, so the same provider failure
     surfaced three different ways -- most often as an opaque client error.
+
+    No child takes a provider deployment axis as a required argument. A region is ``boto3``'s
+    ``region_name`` and nothing else has one, so requiring it obliged every non-AWS adapter to
+    fabricate ``"n/a"``; the deployment detail that makes a grant fixable travels as
+    ``remediation`` prose the adapter authors instead.
     """
+
+
+class ModelUnavailable(ModelError):
+    """Raised when the binding could not be reached or did not answer.
+
+    Refused connection to a local daemon, DNS failure, request timeout, HTTP 503/529, or
+    Bedrock's ``ModelTimeoutException`` / ``ServiceUnavailableException`` /
+    ``InternalServerException``. Distinct from a throttle because a permanently unreachable
+    endpoint reported as "throttled" sends the caller into a retry loop that cannot succeed,
+    and distinct from an entitlement failure because retrying an outage can work.
+    """
+
+    def __init__(self, *, endpoint: str, detail: str, retryable: bool) -> None:
+        msg = f"cannot reach the model at {endpoint}: {detail}"
+        super().__init__(msg, remediation="check the endpoint, the region and the network")
+        self.endpoint = endpoint
+        self.detail = detail
+        self.retryable = retryable
 
 
 class ModelAccessDenied(ModelError):
-    """Raised when the caller is not entitled to the model in this region.
+    """Raised when the caller is not entitled to the model.
 
     A missing model grant or an unknown model id: a permanent misconfiguration to report,
-    which is why it is not a throttle. Today both surface identically. Names the model and
-    the region, because the fix is in one of the two.
+    which is why it is not a throttle. Today both surface identically.
+
+    Names the model, and nothing else. It used to require a ``region`` too, which is a
+    provider deployment axis only ``boto3`` has: every non-AWS adapter had to pass
+    ``region="n/a"`` and emit "not available to this caller in n/a", and an app reading
+    ``exc.region`` back had imported AWS by another name. The deployment detail now travels
+    inside the ``remediation`` the adapter authors -- the Bedrock one passes
+    ``f"enable {model_id} in {region} in the Bedrock console"`` -- so the fix is still named
+    where a human reads it, and nothing may read it back as a field.
     """
 
-    def __init__(self, *, model_id: str, region: str) -> None:
-        msg = f"model {model_id} is not available to this caller in {region}"
-        super().__init__(msg, remediation=f"enable {model_id} in {region}")
+    def __init__(self, *, model_id: str, remediation: str) -> None:
+        msg = f"model {model_id} is not available to this caller"
+        super().__init__(msg, remediation=remediation)
         self.model_id = model_id
-        self.region = region
 
 
 class ModelThrottled(ModelError):

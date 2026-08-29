@@ -32,7 +32,6 @@ from rmspec.domain.models import (
 )
 from rmspec.domain.ports import render as render_port
 from rmspec.domain.ports.render import (
-    _FIELD_SEPARATOR,
     _JPEG_SIGNATURE,
     _PNG_HEADER_LENGTH,
     _PNG_SIGNATURE,
@@ -61,6 +60,9 @@ PNG_BYTES = _PNG_SIGNATURE + bytes(_PNG_HEADER_LENGTH - len(_PNG_SIGNATURE))
 JPEG_BYTES = _JPEG_SIGNATURE + b"\xe0\x00\x10JFIF\x00"
 
 SVG = '<svg xmlns="http://www.w3.org/2000/svg"><g/></svg>'
+
+UNIT_SEPARATOR = "\x1f"
+"""The byte this module's digests used to fold components on, before framing landed."""
 
 positive = st.floats(
     min_value=0.0,
@@ -404,23 +406,47 @@ def test_page_background_digest_separates_every_pixel_changing_component(
 
 
 def test_page_background_digest_cannot_be_confused_by_separator_smuggling():
-    # The only reason this cannot collide is that underlay bytes have min_length=1: the
-    # left stream is the right one plus a trailing, non-empty data field.
-    smuggled = _FIELD_SEPARATOR.decode() + ImageMedia.PNG.value
+    # `template_svg` is arbitrary markup, so this was one of the three reachably ambiguous
+    # bodies: under the 0x1f separator, markup ending in the separator plus an encoding name
+    # produced the same byte stream as that markup with a real underlay of those bytes. It
+    # previously survived only because underlay bytes have min_length=1, which is an argument
+    # about the length of a neighbouring field rather than about this field. Framing makes it
+    # unambiguous for the field's own reason.
+    smuggled = UNIT_SEPARATOR + ImageMedia.PNG.value
     with_underlay = PageBackground(template_svg=SVG, underlay=make_underlay())
     markup_only = PageBackground(template_svg=SVG + smuggled)
 
     assert with_underlay.digest() != markup_only.digest()
 
 
-def test_page_background_digest_treats_empty_markup_as_no_markup():
-    # Correct for a pixel identity: empty markup draws exactly what no markup draws.
+def test_page_background_digest_separates_every_arrangement_of_a_separator_bearing_markup():
+    # The general form: under a concatenation the markup could be written so that it reproduced
+    # another background's byte stream, because the separator carried the boundary. Six
+    # arrangements of one separator, one media name and one underlay are six identities.
+    underlay = make_underlay()
+    variants = [
+        PageBackground(template_svg=f"<svg/>{UNIT_SEPARATOR}{ImageMedia.PNG.value}"),
+        PageBackground(template_svg=f"<svg/>{UNIT_SEPARATOR}{ImageMedia.JPEG.value}"),
+        PageBackground(template_svg=f"{UNIT_SEPARATOR}<svg/>{ImageMedia.PNG.value}"),
+        PageBackground(template_svg="<svg/>", underlay=underlay),
+        PageBackground(template_svg=f"<svg/>{UNIT_SEPARATOR}", underlay=underlay),
+        PageBackground(underlay=underlay),
+    ]
+
+    assert len({background.digest() for background in variants}) == len(variants)
+
+
+def test_page_background_refuses_empty_markup_rather_than_aliasing_it_onto_none():
+    # `digest` folds the markup in as `(self.template_svg or "")`, so `""` and `None` would be
+    # one byte stream while being two different constructions -- and with an underlay present,
+    # `PageBackground(template_svg="", underlay=u)` is a state a caller can reach by handing
+    # `--background` an empty file. `min_length=1` removes the second spelling of "absent".
     underlay = make_underlay()
 
-    assert (
-        PageBackground(template_svg="", underlay=underlay).digest()
-        == PageBackground(underlay=underlay).digest()
-    )
+    with pytest.raises(ValidationError):
+        PageBackground(template_svg="", underlay=underlay)
+    with pytest.raises(ValidationError):
+        PageBackground(template_svg="")
 
 
 def test_page_background_digest_ignores_the_underlay_source_size():

@@ -1,6 +1,6 @@
 """The ports: every seam through which the application layer reaches a technology.
 
-Eighteen Protocols across seven slices. An adapter package binds them to ``rmscene``,
+Twenty Protocols across seven slices. An adapter package binds them to ``rmscene``,
 ``httpx``, ``paramiko``, ``sqlite3``, ``boto3``, ``pyobjc``, ``cairo`` and ``pymupdf``;
 ``rmspec.app`` imports only this package and :mod:`rmspec.domain.errors`, and
 ``rmspec.cli`` is the one place that names an adapter at all. Nothing here imports a
@@ -44,6 +44,7 @@ from rmspec.domain.ports.device import (
     DeviceFactsSource,
     DocumentUploader,
     RawBundleSource,
+    SearchIndexSource,
 )
 from rmspec.domain.ports.errors import DependencyProbe
 from rmspec.domain.ports.export import (
@@ -53,7 +54,11 @@ from rmspec.domain.ports.export import (
     SvgRasterizer,
 )
 from rmspec.domain.ports.formats import DocumentRepository, PageCodec
-from rmspec.domain.ports.ocr import TextRecognizer, VisionLanguageModel
+from rmspec.domain.ports.ocr import (
+    HandwrittenTextIndex,
+    TextRecognizer,
+    VisionLanguageModel,
+)
 from rmspec.domain.ports.persistence import (
     DiagramCache,
     DocumentSyncStore,
@@ -71,12 +76,14 @@ __all__ = [
     "DocumentRepository",
     "DocumentSyncStore",
     "DocumentUploader",
+    "HandwrittenTextIndex",
     "OcrCache",
     "PageCodec",
     "PageRenderer",
     "PdfComposer",
     "PdfPageReader",
     "RawBundleSource",
+    "SearchIndexSource",
     "SvgRasterizer",
     "SyncAuditLog",
     "TextRecognizer",

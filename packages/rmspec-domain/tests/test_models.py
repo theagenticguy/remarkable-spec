@@ -101,8 +101,9 @@ NAIVE_MOMENT = MOMENT.replace(tzinfo=None)
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 #: Pinned so a change to the digest scheme is a failing assertion, not a silent cache split.
-OCR_DIGEST_GOLDEN = "d422b5bc9c1556588542a6d3e3f3935f141935666659f454430bcaffde76505f"
-DIAGRAM_DIGEST_GOLDEN = "9538eba4c27d551116bfb39b296ee6ba9018f05535a05f6e4cf5f0c7a518adb8"
+#: Both moved once, when length framing replaced the 0x1f separator and the tags went v1 -> v2.
+OCR_DIGEST_GOLDEN = "e1678848127f7f7a36cd71b2314c29f1e27287b10d19bee661a2dbc770f60022"
+DIAGRAM_DIGEST_GOLDEN = "6d0f22509bbd372a6baa8e3a949451463cfb439f61bdc7cf97ad6d0632a4fb69"
 
 OCR_KEY_PARTS: dict[str, Any] = {
     "page_hash": "ph",
@@ -1625,9 +1626,17 @@ def test_page_text_refuses_an_unusable_component(field: str, value: object):
 
 # ──────────────────────── cache keys: defect 3 as an invariant ────────────────────────
 
-#: Printable ASCII only, which keeps the component separators out of a component's own text.
+#: Printable ASCII *plus* the two bytes the old digest scheme folded components on. Under
+#: separators this alphabet would have made the properties below flaky-by-construction, which is
+#: why it used to exclude them; under length framing a component may contain anything, and
+#: including them is what makes these properties assert that.
+UNIT_SEPARATOR = "\x1f"
+RECORD_SEPARATOR = "\x1e"
 COMPONENT = st.text(
-    alphabet=st.characters(min_codepoint=33, max_codepoint=126), min_size=1, max_size=12
+    alphabet=st.characters(min_codepoint=33, max_codepoint=126)
+    | st.sampled_from([UNIT_SEPARATOR, RECORD_SEPARATOR]),
+    min_size=1,
+    max_size=12,
 )
 RECOGNIZER_LIST = st.lists(COMPONENT, max_size=3).map(tuple)
 
@@ -1749,11 +1758,64 @@ def test_the_recognizer_fold_order_is_part_of_the_ocr_identity():
 
 
 def test_a_component_boundary_cannot_be_shifted_between_two_fields():
-    # The field separator is what stops ("ab", "c") and ("a", "bc") folding to one digest.
+    # Length framing is what stops ("ab", "c") and ("a", "bc") folding to one digest.
     left = OcrCacheKey(**ocr_parts(page_hash="ab", render_digest="c"))
     right = OcrCacheKey(**ocr_parts(page_hash="a", render_digest="bc"))
 
     assert left.digest != right.digest
+
+
+@pytest.mark.parametrize(
+    ("left_parts", "right_parts"),
+    [
+        pytest.param(
+            {"model_fingerprint": "a", "request_digest": f"b{UNIT_SEPARATOR}c"},
+            {"model_fingerprint": f"a{UNIT_SEPARATOR}b", "request_digest": "c"},
+            id="fingerprint_and_request",
+        ),
+        pytest.param(
+            {"page_hash": "a", "render_digest": f"b{UNIT_SEPARATOR}c"},
+            {"page_hash": f"a{UNIT_SEPARATOR}b", "render_digest": "c"},
+            id="page_hash_and_render",
+        ),
+    ],
+)
+def test_a_separator_inside_a_component_cannot_move_a_field_boundary(
+    left_parts: dict[str, Any],
+    right_parts: dict[str, Any],
+):
+    # This is the reachable case that made framing a defect fix rather than a tidy-up:
+    # `model_fingerprint` is contractually opaque and adapter-authored, so it is an open string
+    # that may contain any byte. Under the old separator scheme these two keys folded to one
+    # digest, so a row computed for one binding could be served for another.
+    left = OcrCacheKey(**ocr_parts(**left_parts))
+    right = OcrCacheKey(**ocr_parts(**right_parts))
+
+    assert left != right
+    assert left.digest != right.digest
+
+
+def test_a_recognizer_slug_carrying_the_join_byte_cannot_forge_another_engine_set():
+    # The app used to join surviving slugs on 0x1e and hash one string, so a slug containing
+    # 0x1e could impersonate two engines: ("a\x1eb",) and ("a", "b") were one cache key, and a
+    # Textract-only degraded run could reuse a Vision-plus-Textract row. Each slug is now its
+    # own framed component, and the component *count* is folded in, so the split is recoverable.
+    smuggled = OcrCacheKey(**ocr_parts(recognizers=(f"a{RECORD_SEPARATOR}b",)))
+    genuine = OcrCacheKey(**ocr_parts(recognizers=("a", "b")))
+
+    assert smuggled.digest != genuine.digest
+
+
+def test_the_recognizer_count_is_recoverable_so_a_slug_cannot_absorb_a_neighbour():
+    # `OcrCacheKey` has 3 fixed components, then N slugs, then 2 more, so N = count - 5 is
+    # determined by the framed count. Without that, an empty slug or a slug spanning what were
+    # two would leave two distinct component lists sharing one byte stream.
+    digests = {
+        OcrCacheKey(**ocr_parts(recognizers=recognizers)).digest
+        for recognizers in [(), ("a",), ("a", "b"), ("ab",), ("a", "b", "c"), ("", "ab")]
+    }
+
+    assert len(digests) == 6
 
 
 @pytest.mark.parametrize("field", sorted(set(OCR_KEY_PARTS) - {"recognizers"}))

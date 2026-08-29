@@ -16,6 +16,7 @@ status.
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Final, cast
 
 import pytest
@@ -58,6 +59,7 @@ from rmspec.domain.errors import (
     ModelRejectedRequest,
     ModelResponseMalformed,
     ModelThrottled,
+    ModelUnavailable,
     NoTextRecognized,
     OcrError,
     PageNotFound,
@@ -169,7 +171,15 @@ SAMPLES: Final[tuple[RmspecError, ...]] = (
     AllRecognizersFailed(failures={"vision": "no handler", "textract": "throttled"}),
     NoTextRecognized(page_ref="9c1e-page", providers=("vision", "textract")),
     ModelError("a base instance, which only a test ever builds"),
-    ModelAccessDenied(model_id="global.anthropic.claude-opus-4-6-v1", region="us-west-2"),
+    ModelUnavailable(
+        endpoint="bedrock-runtime.us-west-2.amazonaws.com",
+        detail="connect timeout after 10s",
+        retryable=True,
+    ),
+    ModelAccessDenied(
+        model_id="global.openai.gpt-5.6-luna",
+        remediation="enable global.openai.gpt-5.6-luna in us-west-2 in the Bedrock console",
+    ),
     ModelThrottled(model_id="global.anthropic.claude-opus-4-6-v1", retry_after_s=1.5),
     ModelRejectedRequest(model_id="global.anthropic.claude-opus-4-6-v1", detail="payload too big"),
     ModelResponseMalformed(
@@ -230,6 +240,7 @@ EXPECTED_STATUS: Final[dict[type[RmspecError], int]] = {
     AllRecognizersFailed: 69,
     NoTextRecognized: 69,
     ModelError: 69,
+    ModelUnavailable: 69,
     ModelAccessDenied: 77,
     ModelThrottled: 75,
     ModelRejectedRequest: 65,
@@ -299,6 +310,7 @@ CARRIES_REMEDIATION: Final = frozenset(
         AmbiguousDocument,
         DeviceUnreachable,
         DeviceOperationUnsupported,
+        ModelUnavailable,
         ModelAccessDenied,
     }
 )
@@ -352,8 +364,8 @@ def test_no_two_samples_share_a_class() -> None:
 
 
 def test_the_tree_has_the_documented_size() -> None:
-    assert len(TREE) == 47
-    assert len(LEAVES) == 36
+    assert len(TREE) == 48
+    assert len(LEAVES) == 37
 
 
 def test_exported_names_all_resolve() -> None:
@@ -402,8 +414,10 @@ def test_catching_store_unavailable_still_catches_a_schema_mismatch() -> None:
 
 
 def test_model_failures_are_caught_by_the_ocr_slice_base() -> None:
+    # Five children, not four: `ModelUnavailable` is what stops an adapter reporting a
+    # permanently dead endpoint as a throttle, or letting `httpx.ConnectError` cross the port.
     model_classes = [cls for cls in TREE if issubclass(cls, ModelError)]
-    assert len(model_classes) == 5
+    assert len(model_classes) == 6
     assert all(issubclass(cls, OcrError) for cls in model_classes)
 
 
@@ -858,10 +872,63 @@ def test_no_text_recognized_lists_the_engines_that_all_came_back_empty() -> None
     assert err.providers == ("vision", "textract")
 
 
-def test_model_access_denied_names_the_model_and_the_region_to_fix() -> None:
-    err = ModelAccessDenied(model_id="opus", region="us-west-2")
-    assert err.remediation == "enable opus in us-west-2"
-    assert (err.model_id, err.region) == ("opus", "us-west-2")
+def test_model_access_denied_names_the_model_and_takes_its_remediation_as_prose() -> None:
+    # No `region` argument. A region is `boto3`'s `region_name` and nothing else has one, so
+    # requiring it forced every non-AWS adapter to fabricate "n/a" and emit "not available to
+    # this caller in n/a". The deployment detail now travels as prose the adapter authors.
+    err = ModelAccessDenied(
+        model_id="opus",
+        remediation="enable opus in us-west-2 in the Bedrock console",
+    )
+    assert err.model_id == "opus"
+    assert err.remediation == "enable opus in us-west-2 in the Bedrock console"
+    assert "us-west-2" not in err.message
+
+
+def test_nothing_can_read_a_region_back_off_an_access_denial() -> None:
+    # An app that reads `exc.region` has imported AWS by another name, so the attribute does not
+    # exist to be read -- and the constructor has no parameter that could put one there.
+    err = ModelAccessDenied(model_id="opus", remediation="ask the account admin")
+    parameters = inspect.signature(ModelAccessDenied.__init__).parameters
+
+    assert not hasattr(err, "region")
+    assert set(parameters) == {"self", "model_id", "remediation"}
+
+
+def test_an_unreachable_model_is_not_a_throttle_and_says_whether_to_retry() -> None:
+    # The distinction the fifth error exists for: an outage reported as a throttle sends the
+    # caller into a retry loop that cannot succeed, and one reported as an entitlement failure
+    # stops a run that a retry would have completed.
+    transient = ModelUnavailable(
+        endpoint="localhost:11434",
+        detail="connect refused",
+        retryable=True,
+    )
+    permanent = ModelUnavailable(
+        endpoint="localhost:11434",
+        detail="no such host",
+        retryable=False,
+    )
+    assert transient.retryable is True
+    assert permanent.retryable is False
+    assert (transient.endpoint, transient.detail) == ("localhost:11434", "connect refused")
+    assert not isinstance(transient, ModelThrottled)
+    assert not isinstance(transient, ModelAccessDenied)
+    assert transient.remediation == "check the endpoint, the region and the network"
+
+
+def test_an_unreachable_model_takes_the_shape_the_device_slice_already_established() -> None:
+    # An unreachable endpoint is a house-wide failure mode, not a model-slice novelty, so this
+    # error carries the same three facts `DeviceUnreachable` does -- minus the transport, which
+    # is a device concept -- rather than inventing a second vocabulary for one situation.
+    model = ModelUnavailable(endpoint="10.11.99.1", detail="connect refused", retryable=True)
+    device = DeviceUnreachable(
+        transport=TransportKind.USB_WEB_API,
+        endpoint="10.11.99.1",
+        detail="connect refused",
+    )
+    assert (model.endpoint, model.detail) == (device.endpoint, device.detail)
+    assert not hasattr(model, "transport")
 
 
 def test_a_rejected_request_and_a_malformed_answer_read_differently() -> None:

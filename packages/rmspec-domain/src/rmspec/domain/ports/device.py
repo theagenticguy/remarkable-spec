@@ -96,6 +96,7 @@ __all__ = [
     "DocumentUploader",
     "LibraryRefresh",
     "RawBundleSource",
+    "SearchIndexSource",
     "SkipReason",
     "SkippedEntry",
     "UploadMedia",
@@ -862,5 +863,47 @@ class DeviceFactsSource(Protocol):
             The tablet refused the supplied credentials.
         DeviceProtocolError
             The tablet answered with something this transport cannot interpret.
+        """
+        ...
+
+
+class SearchIndexSource(Protocol):
+    """Hand over the device's own search-index database image, as bytes.
+
+    Scope: REQUEST. One image per command, read once and reused for every page.
+
+    Bytes rather than a path, like every other byte-carrying port here, and bytes rather
+    than a query interface because **there is no sqlite3 binary on the device and no
+    BusyBox applet for one** -- an on-device query is not an available shape on firmware
+    3.27.3.0. The image is 503,808 bytes on the measured device, so one read per command is
+    cheap; per-page reads would not be.
+
+    There is deliberately no USB binding. The firmware's HTTP route table is closed at six
+    families and none of them serves a file from the xochitl tree, so a USB adapter here
+    would be a method that cannot be implemented -- the same capability asymmetry
+    ``DocumentUploader`` expresses by having exactly one binding. The composition root
+    fails to bind and raises ``DeviceOperationUnsupported``.
+    """
+
+    def read_index(self) -> bytes | None:
+        """Return the search-index image, or ``None`` when the device has none.
+
+        Returns
+        -------
+        bytes | None
+            The whole database image. ``None`` -- never ``b""`` -- when no index file
+            exists, which is the honest state of a device that has not built one yet and is
+            distinguishable by the caller from an index that exists and holds no row for a
+            page.
+
+        Raises
+        ------
+        DeviceUnreachable
+            The transport died. A per-path read failure is *not* this: an absent index is
+            ``None``.
+        DeviceAuthFailed
+            The device refused the credentials offered.
+        DeviceProtocolError
+            The transport answered in a shape this adapter cannot read.
         """
         ...

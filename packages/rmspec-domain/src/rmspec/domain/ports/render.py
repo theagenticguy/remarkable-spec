@@ -114,7 +114,10 @@ Malformed template markup has exactly *one* exit channel, and it is
 ``--background`` receive a pydantic ``ValidationError`` for a file with no ``<svg`` in it and
 a typed ``BackgroundUnreadable`` for a file that has one but does not parse -- the same user
 mistake arriving at the same edge as two unrelated types, chosen by accident of which
-half-measure noticed first.
+half-measure noticed first. The field's ``min_length=1`` is not that half-measure: "no bytes
+at all" is not a claim about well-formedness, and refusing it is what keeps ``None`` the only
+spelling of "no template" for :meth:`PageBackground.digest`, which folds the field in as
+``(template_svg or "")``.
 
 Note for whoever writes ``ports/__init__.py``
 ---------------------------------------------
@@ -138,12 +141,13 @@ in ``ports/formats.py``: nothing in this module needs them at runtime.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from rmspec.domain._digest import digest_of
 
 if TYPE_CHECKING:
     from rmspec.domain.models import Page, Palette, ScreenSpec
@@ -160,9 +164,6 @@ __all__ = [
     "RenderedPage",
     "TextStyle",
 ]
-
-_FIELD_SEPARATOR = b"\x1f"
-"""Byte separating digest components, so concatenation cannot be ambiguous."""
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 """First eight bytes of every PNG file."""
@@ -368,17 +369,25 @@ class PageBackground(BaseModel):
     and ``BackgroundUnreadable`` for markup that has one but still will not parse -- and the
     edge reading ``--background`` would get whichever the accident of ordering produced.
 
+    It is nonetheless constrained to be non-empty, which is a different rule for a different
+    reason: :meth:`digest` folds it in as ``(self.template_svg or "")``, so ``""`` and
+    ``None`` would be one byte stream. Length is a fact about the field, not a verdict on the
+    markup, so checking it here creates no second exit channel for a malformed template --
+    ``--background`` pointing at an empty file is not markup this port can carry, and saying
+    so is honest.
+
     Attributes
     ----------
     template_svg
-        SVG markup to draw beneath the ink, or ``None``. Validity is the renderer's verdict.
+        SVG markup to draw beneath the ink, or ``None``. Validity is the renderer's verdict;
+        emptiness is refused here, so "no template" has exactly one spelling.
     underlay
         Rasterized pixels to draw beneath the ink, or ``None``.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
-    template_svg: str | None = None
+    template_svg: str | None = Field(default=None, min_length=1)
     underlay: PageUnderlay | None = None
 
     @model_validator(mode="after")
@@ -406,18 +415,18 @@ class PageBackground(BaseModel):
         Returns
         -------
         str
-            Lowercase hex SHA-256 over the markup, the underlay encoding and its bytes.
+            Lowercase hex SHA-256 over the markup, the underlay encoding and its bytes. Three
+            components always, so an absent underlay is two empty components rather than two
+            missing ones -- and ``template_svg`` cannot be ``""``, so ``(x or "")`` maps
+            exactly one input to the empty component.
         """
-        hasher = hashlib.sha256()
-        hasher.update(b"rmspec.render.background.v1")
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update((self.template_svg or "").encode())
-        hasher.update(_FIELD_SEPARATOR)
-        if self.underlay is not None:
-            hasher.update(self.underlay.media.value.encode())
-            hasher.update(_FIELD_SEPARATOR)
-            hasher.update(self.underlay.data)
-        return hasher.hexdigest()
+        underlay = self.underlay
+        return digest_of(
+            b"rmspec.render.background.v2",
+            (self.template_svg or "").encode(),
+            b"" if underlay is None else underlay.media.value.encode(),
+            b"" if underlay is None else underlay.data,
+        )
 
 
 class TextStyle(BaseModel):
@@ -540,18 +549,13 @@ class RenderStyle(BaseModel):
             background. Compose it with the source-file hash, the model id, the prompt
             version and the rasterization DPI to key an OCR or diagram cache row.
         """
-        hasher = hashlib.sha256()
-        hasher.update(b"rmspec.render.style.v1")
-        parts = (
-            _canonical_json(self),
-            _canonical_json(screen),
-            _canonical_json(palette),
-            "none" if background is None else background.digest(),
+        return digest_of(
+            b"rmspec.render.style.v2",
+            _canonical_json(self).encode(),
+            _canonical_json(screen).encode(),
+            _canonical_json(palette).encode(),
+            b"none" if background is None else background.digest().encode(),
         )
-        for part in parts:
-            hasher.update(_FIELD_SEPARATOR)
-            hasher.update(part.encode())
-        return hasher.hexdigest()
 
 
 class RenderedPage(BaseModel):

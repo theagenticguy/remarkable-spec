@@ -169,11 +169,12 @@ intended wiring, not a wiring that type-checks.
 
 from __future__ import annotations
 
-import hashlib
 from enum import StrEnum
 from typing import ClassVar, Final, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from rmspec.domain._digest import digest_of
 
 __all__ = [
     "PAGE_SIZE_TOLERANCE_MM",
@@ -204,9 +205,6 @@ round trip exactly. One shared figure, imported by the contract suite, is what l
 :meth:`PdfComposer.compose`'s size clause be an assertion instead of a judgement call; a
 per-adapter epsilon would let each adapter pick the tolerance that makes it pass.
 """
-
-_FIELD_SEPARATOR = b"\x1f"
-"""Byte that separates digest components, so concatenation cannot be ambiguous."""
 
 _MM_PER_INCH = 25.4
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -506,17 +504,17 @@ class RasterImage(BaseModel):
         Returns
         -------
         str
-            Lowercase hex SHA-256 over encoding, dimensions, DPI and bytes.
+            Lowercase hex SHA-256 over encoding, dimensions, DPI and bytes. Textually
+            identical to :meth:`rmspec.domain.ports.ocr.RasterImage.digest`, and equal for
+            equal field values -- which ``test_ports_ocr``'s cross-twin equality test
+            asserts rather than trusting.
         """
-        hasher = hashlib.sha256()
-        hasher.update(b"rmspec.raster.v1")
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update(self.media.value.encode())
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update(f"{self.width}x{self.height}@{self.render_dpi}".encode())
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update(self.data)
-        return hasher.hexdigest()
+        return digest_of(
+            b"rmspec.raster.v2",
+            self.media.value.encode(),
+            f"{self.width}x{self.height}@{self.render_dpi}".encode(),
+            self.data,
+        )
 
 
 class SvgPage(BaseModel):

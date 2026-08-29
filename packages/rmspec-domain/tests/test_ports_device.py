@@ -17,6 +17,7 @@ subprocess or the filesystem.
 from __future__ import annotations
 
 import datetime
+from typing import get_protocol_members
 
 import pytest
 from hypothesis import given
@@ -45,6 +46,7 @@ from rmspec.domain.ports.device import (
     DocumentUploader,
     LibraryRefresh,
     RawBundleSource,
+    SearchIndexSource,
     SkippedEntry,
     SkipReason,
     UploadMedia,
@@ -117,6 +119,7 @@ def test_all_names_resolve_and_cover_every_public_name():
         "RawBundleSource",
         "DocumentUploader",
         "DeviceFactsSource",
+        "SearchIndexSource",
     }
     assert device_port.__all__ == sorted(device_port.__all__)
 
@@ -128,6 +131,7 @@ def test_capability_asymmetry_is_not_data_a_caller_branches_on():
         RawBundleSource,
         DocumentUploader,
         DeviceFactsSource,
+        SearchIndexSource,
         DeviceFacts,
         DeviceResources,
     ):
@@ -741,6 +745,23 @@ class _StubUploader:
         )
 
 
+class _StubIndexSource:
+    """A :class:`SearchIndexSource` over one in-memory image, or none at all.
+
+    The image is bytes rather than a path or a cursor because there is no ``sqlite3`` binary on
+    the device and no BusyBox applet for one, so an on-device query is not an available shape.
+    """
+
+    def __init__(self, image: bytes | None) -> None:
+        self.reads = 0
+        self._image = image
+
+    def read_index(self) -> bytes | None:
+        """Return the whole database image, or ``None`` when the device has no index."""
+        self.reads += 1
+        return self._image
+
+
 class _StubFactsSource:
     """A :class:`DeviceFactsSource` with fixed facts and a draining storage gauge."""
 
@@ -978,3 +999,53 @@ def test_neither_facts_method_takes_a_shell_command():
     assert DeviceFactsSource.read_facts.__code__.co_varnames[:1] == ("self",)
     assert DeviceFactsSource.read_facts.__code__.co_argcount == 1
     assert DeviceFactsSource.read_resources.__code__.co_argcount == 1
+
+
+# ───────────────────────────── search index source contract ─────────────────────────────
+
+
+def test_the_index_source_hands_over_the_whole_image_as_bytes():
+    # 503,808 bytes on the measured device, with no -wal and no -shm sidecar, so the file is a
+    # self-contained image and one read per command is cheap. Bytes rather than a path because no
+    # port here touches a filesystem, and rather than a query interface because the device has no
+    # sqlite3 binary and no BusyBox applet for one.
+    image = b"SQLite format 3\x00" + bytes(48)
+    source: SearchIndexSource = _StubIndexSource(image)
+
+    assert source.read_index() == image
+
+
+def test_a_device_with_no_index_answers_none_and_never_empty_bytes():
+    # `None` is the honest state of a device that has not built an index yet, and it is what a
+    # caller distinguishes from an index that exists and holds no row for a page. `b""` would
+    # collapse the two -- and would then reach the reader, where an empty image raises
+    # `MemoryError` rather than a database error.
+    source: SearchIndexSource = _StubIndexSource(None)
+    answer = source.read_index()
+
+    assert answer is None
+    assert answer != b""
+
+
+def test_the_index_read_takes_no_arguments_so_it_cannot_become_a_per_page_read():
+    # One image per command, read once and reused for every page. A parameter here would invite
+    # a per-page transport read of a half-megabyte file.
+    assert SearchIndexSource.read_index.__code__.co_varnames[:1] == ("self",)
+    assert SearchIndexSource.read_index.__code__.co_argcount == 1
+
+
+def test_the_index_source_publishes_transport_and_nothing_about_reading():
+    # The split the sqlite3 ban forces: this half moves bytes, and `HandwrittenTextIndex` in the
+    # OCR slice opens them. A `lookup` or a `provider_id` here would put both in one package.
+    assert get_protocol_members(SearchIndexSource) == {"read_index"}
+
+
+@pytest.mark.parametrize(
+    "port",
+    [DeviceCatalog, RawBundleSource, DocumentUploader, DeviceFactsSource, SearchIndexSource],
+)
+def test_the_device_ports_are_not_runtime_checkable(port: type):
+    # Nothing needs `isinstance` against them, and a structural check at runtime would only
+    # verify member names -- so the type gate, not the interpreter, is what checks conformance.
+    with pytest.raises(TypeError, match="runtime_checkable"):
+        isinstance(_StubIndexSource(None), port)

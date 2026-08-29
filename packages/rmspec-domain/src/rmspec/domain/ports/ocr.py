@@ -68,9 +68,10 @@ on-device binding. Two shape requirements follow, and they are requirements *on 
 tree*, not preferences:
 
 1. No provider deployment axis may be a required constructor argument. A region is
-   ``boto3``'s ``region_name`` and nothing else has one, so a non-AWS adapter with a
-   genuine entitlement failure must pass ``region="n/a"`` and emit "not available to this
-   caller in n/a"; an app that reads ``exc.region`` back has imported AWS by another name.
+   ``boto3``'s ``region_name`` and nothing else has one, so under the old signature a
+   non-AWS adapter with a genuine entitlement failure had to pass ``region="n/a"`` and emit
+   "not available to this caller in n/a"; an app that reads ``exc.region`` back has imported
+   AWS by another name.
    Model identity for the app is :attr:`VisionLanguageModel.fingerprint` -- an
    ``except`` block here reads only ``str(exc)``, ``exc.remediation`` and, where the error
    publishes it, ``retryable``.
@@ -90,10 +91,16 @@ takes only two actions (report-and-stop, retry-once), because the retryable set 
 situation -- ``DeviceUnreachable(transport, endpoint, detail)`` -- since an unreachable
 endpoint is a house-wide failure mode, not a model-slice novelty.
 
-Follow-up this contract requires in :mod:`rmspec.domain.errors`, which cannot be made
-from this file: add ``ModelUnavailable``, and stop requiring ``region`` on
-``ModelAccessDenied``. Until both land, an adapter cannot satisfy the ``Raises`` clause of
-:meth:`VisionLanguageModel.complete` truthfully.
+Both follow-ups this contract required in :mod:`rmspec.domain.errors` have landed, and the
+argument for their shape is recorded here rather than deleted, because it is the reason the
+error tree looks the way it does. ``ModelUnavailable`` now exists, shaped on
+``DeviceUnreachable`` -- ``endpoint``, ``detail`` and a published ``retryable`` -- so an
+outage is neither a fabricated throttle nor an ``httpx.ConnectError`` crossing the port.
+``ModelAccessDenied`` no longer takes ``region``: it is ``(model_id, remediation)``, and the
+Bedrock adapter supplies the deployment axis as prose in the remediation it authors
+(``f"enable {model_id} in {region} in the Bedrock console"``), so no non-AWS adapter has to
+invent ``"n/a"`` and nothing may read ``exc.region`` back. The ``Raises`` clause of
+:meth:`VisionLanguageModel.complete` is therefore satisfiable truthfully by any provider.
 
 Recognition collapses to one: ``RecognitionFailed``, carrying ``provider_id`` and
 ``retryable: bool``.
@@ -108,35 +115,55 @@ relocate the 27 legacy function-local ``ImportError`` raises. A degraded binding
 (recognizer omitted, null recognizer substituted) is likewise a wiring decision visible
 in the composition root, never something an adapter reaches from its own ``except``.
 
-Required follow-up: hoist ``RasterImage``
------------------------------------------
+Open follow-up: hoist ``RasterImage`` -- now for cohesion, not for correctness
+-----------------------------------------------------------------------------
 :class:`RasterImage` and :class:`ImageMedia` are defined here because the OCR ports need
-them and this module may not import a sibling ports module. ``ports/export.py`` now
-defines a field-for-field twin, and two nominal pydantic models is one too many:
+them and this module may not import a sibling ports module. ``ports/export.py`` defines a
+field-for-field twin, and two nominal pydantic models is still one too many:
 ``SvgRasterizer.to_png``'s output is not assignable to :attr:`VisionRequest.images` or to
-:meth:`TextRecognizer.recognize`, and two ``digest`` bodies must stay byte-identical
-forever or identical pixels hash to two cache keys -- defect 3 reopened by hand-mirroring.
-Both classes must be hoisted into one ``rmspec.domain.values`` module that both port
-modules import; that edit spans two files and so is not made here.
+:meth:`TextRecognizer.recognize`. Both classes belong in one ``rmspec.domain.values``
+module that both port modules import; that edit moves public import addresses across four
+adapter packages, so it is not made here.
 
-Until it lands, :meth:`RasterImage.from_raster` is the single sanctioned conversion. It is
-structural (:class:`PageRasterLike`), so any slice's twin satisfies it without this module
-importing that slice, and it goes through validation, so it cannot drop a check the way a
-``RasterImage(**other.model_dump())`` splat does. The shared adapter contract suite must
-assert ``RasterImage.from_raster(x).digest() == x.digest()`` for every producer ``x``: that
-one assertion is what catches drift between the two digest bodies.
+The *urgent* half of that case is retired. It used to be that two ``digest`` bodies had to
+stay byte-identical forever or identical pixels would hash to two cache keys -- defect 3
+reopened by hand-mirroring, held off by trust. Both bodies now call
+:func:`~rmspec.domain._digest.digest_of` with the same tag and the same three arguments, so
+agreement is mechanical, and the residual risk -- a divergent *argument list* -- is covered
+by ``test_ports_ocr``'s cross-twin equality test, which digests both types over equal field
+values and asserts one answer. What is left is a cohesion argument: one concept, two names.
+
+:meth:`RasterImage.from_raster` remains the single sanctioned conversion. It is structural
+(:class:`PageRasterLike`), so any slice's twin satisfies it without this module importing
+that slice, and it goes through validation, so it cannot drop a check the way a
+``RasterImage(**other.model_dump())`` splat does. The shared adapter contract suite still
+asserts ``RasterImage.from_raster(x).digest() == x.digest()`` for every producer ``x``.
+
+Tier 0: the device's own index is not a ``TextRecognizer``
+---------------------------------------------------------
+:class:`HandwrittenTextIndex` reads the recognition the tablet already performed, and it is
+deliberately not a :class:`TextRecognizer`. That port's ``text=""`` means "the engine read
+the page and found nothing", and this source's dominant state is "no row at all": the index
+is rebuilt on the tablet's own schedule, so a page written since the last build is absent
+from it, measured directly (a notebook written at 21:46 had zero rows in an index last
+written at 19:22). Collapsing absent onto ``""`` would let a stale index report a page with
+ink as blank and suppress the paid read -- the free prior deleting the answer. Three states
+need three answers, so the lookup returns ``IndexedHandwriting | None``.
+
+It is also only half the capability. Transporting the database image and reading it are two
+packages: the ``sqlite3`` ban puts reading in ``rmspec-persistence``, the ``paramiko`` ban
+puts transport in ``rmspec-device``, and :class:`~rmspec.domain.ports.device.SearchIndexSource`
+is the other half.
 """
 
 from __future__ import annotations
 
-import hashlib
 from enum import StrEnum
 from typing import ClassVar, Final, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-_FIELD_SEPARATOR = b"\x1f"
-"""Byte that separates digest components, so concatenation cannot be ambiguous."""
+from rmspec.domain._digest import digest_of
 
 
 class ImageMedia(StrEnum):
@@ -349,17 +376,17 @@ class RasterImage(BaseModel):
         Returns
         -------
         str
-            Lowercase hex SHA-256 over encoding, dimensions, DPI and bytes.
+            Lowercase hex SHA-256 over encoding, dimensions, DPI and bytes. Textually
+            identical to :meth:`rmspec.domain.ports.export.RasterImage.digest`, and equal for
+            equal field values -- which ``test_ports_ocr``'s cross-twin equality test
+            asserts rather than trusting.
         """
-        hasher = hashlib.sha256()
-        hasher.update(b"rmspec.raster.v1")
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update(self.media.value.encode())
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update(f"{self.width}x{self.height}@{self.render_dpi}".encode())
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update(self.data)
-        return hasher.hexdigest()
+        return digest_of(
+            b"rmspec.raster.v2",
+            self.media.value.encode(),
+            f"{self.width}x{self.height}@{self.render_dpi}".encode(),
+            self.data,
+        )
 
 
 class Decoding(BaseModel):
@@ -420,7 +447,8 @@ class VisionRequest(BaseModel):
     decoding
         Generation settings for this call.
     system
-        Optional system-turn text.
+        Optional system-turn text. ``None`` means no system turn; ``""`` is refused, so
+        the two cannot become one cache row while being two different API calls.
     images
         Rasters to attach, in the order the prompt refers to them.
     """
@@ -429,7 +457,7 @@ class VisionRequest(BaseModel):
 
     prompt: str = Field(min_length=1)
     decoding: Decoding
-    system: str | None = None
+    system: str | None = Field(default=None, min_length=1)
     images: tuple[RasterImage, ...] = ()
 
     def digest(self) -> str:
@@ -440,20 +468,18 @@ class VisionRequest(BaseModel):
         str
             Lowercase hex SHA-256 over system text, prompt text, decoding settings and
             each image's content digest. Half of the cache key; the model's
-            :attr:`VisionLanguageModel.fingerprint` is the other half.
+            :attr:`VisionLanguageModel.fingerprint` is the other half. Every component is
+            length-framed by :func:`~rmspec.domain._digest.digest_of`, so a prompt that
+            embeds arbitrary recognizer output -- separator bytes included -- cannot shift
+            the boundary between ``system`` and ``prompt`` onto another request's key.
         """
-        hasher = hashlib.sha256()
-        hasher.update(b"rmspec.vision.request.v1")
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update((self.system or "").encode())
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update(self.prompt.encode())
-        hasher.update(_FIELD_SEPARATOR)
-        hasher.update(self.decoding.canonical().encode())
-        for image in self.images:
-            hasher.update(_FIELD_SEPARATOR)
-            hasher.update(image.digest().encode())
-        return hasher.hexdigest()
+        return digest_of(
+            b"rmspec.vision.request.v2",
+            (self.system or "").encode(),
+            self.prompt.encode(),
+            self.decoding.canonical().encode(),
+            *(image.digest().encode() for image in self.images),
+        )
 
 
 class TokenUsage(BaseModel):
@@ -465,12 +491,46 @@ class TokenUsage(BaseModel):
         Tokens consumed by system text, prompt and images.
     output_tokens
         Tokens generated, including any reasoning tokens.
+    reasoning_tokens
+        The share of ``output_tokens`` spent on latent reasoning, when the provider reports
+        the split. See the field's own note for why ``None`` is not zero.
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    """Tokens the provider spent on latent reasoning, when it reports the split.
+
+    Part of ``output_tokens``, not additional to it -- ``None`` means the provider reported no
+    split, never that it did no reasoning. Present because a run whose whole budget went to
+    reasoning returns no content at all, and a caller told only ``output_tokens=24`` cannot see
+    why.
+    """
+
+    @model_validator(mode="after")
+    def _check_reasoning_fits_the_output(self) -> Self:
+        """Reject a reasoning count larger than the output it is a part of.
+
+        Returns
+        -------
+        TokenUsage
+            The validated model.
+
+        Raises
+        ------
+        ValueError
+            If ``reasoning_tokens`` exceeds ``output_tokens``, which would mean the field was
+            read as additional to the output rather than as a share of it.
+        """
+        if self.reasoning_tokens is not None and self.reasoning_tokens > self.output_tokens:
+            msg = (
+                f"reasoning_tokens={self.reasoning_tokens} exceeds "
+                f"output_tokens={self.output_tokens}, and reasoning is part of the output"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class VisionCompletion(BaseModel):
@@ -884,5 +944,71 @@ class TextRecognizer(Protocol):
             is no "engine unavailable" error: a missing optional dependency is a
             composition failure that names the package and its extra, and a deliberately
             degraded set of engines is a visible binding in the composition root.
+        """
+        ...
+
+
+class IndexedHandwriting(BaseModel):
+    """One row of the device's own handwriting index, as a domain value.
+
+    The tablet already ran a recognizer over every page it indexed, so this is a free prior
+    and a cross-check against a paid read -- not a validation gate, and not a substitute for
+    one: the index lags the tablet, so it is silent about the page the user just wrote.
+
+    Attributes
+    ----------
+    page_ref
+        The page this row describes. Matches the ``.rm`` filename exactly, which is what
+        makes it comparable to ``RasterImage.page_ref`` with no translation table.
+    entry_ref
+        The document the page belongs to.
+    text
+        The device's own reading. May be empty, and an empty reading here is a positive
+        statement -- the device indexed this page and found nothing -- because an
+        unindexed page has no row at all and is reported as ``None`` by the lookup.
+    generation
+        The index's own generation counter, one value for the whole database. Present so a
+        caller can tell two readings came from two different snapshots of the index.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    page_ref: str = Field(min_length=1)
+    entry_ref: str = Field(min_length=1)
+    text: str
+    generation: int = Field(ge=0)
+
+
+class HandwrittenTextIndex(Protocol):
+    """Look up the device's own recognition of one page, for free.
+
+    Scope: REQUEST, because it is backed by one snapshot of a database the tablet is still
+    writing.
+
+    Not a :class:`TextRecognizer`: that port's ``text=""`` means "read the page, found
+    nothing", and this source's dominant state is "no row at all", which must not suppress
+    a paid read. Three states need three answers, and ``Recognition`` has room for two.
+    """
+
+    @property
+    def provider_id(self) -> str:
+        """Return this index's stable identity slug, e.g. ``"device-index@1"``.
+
+        Folded into the cache key by the app exactly like a recognizer slug, so a tiering
+        run that consulted the index cannot reuse a row written by one that did not.
+        """
+        ...
+
+    def lookup(self, page_ref: str, /) -> IndexedHandwriting | None:
+        """Return the index's row for one page, or ``None`` when it has none.
+
+        Raises
+        ------
+        StoreUnavailableError
+            The image could not be opened, or failed its integrity check. A torn read of a
+            database the tablet is writing can otherwise answer with another page's
+            handwriting and no error.
+        StoreSchemaMismatchError
+            The image opened and does not have the columns this reader needs.
         """
         ...
