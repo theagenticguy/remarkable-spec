@@ -1,0 +1,30 @@
+# serializer version: 1
+# name: test_the_written_sidecars_are_exactly_these_bytes
+  dict({
+    '.content': '''
+      {
+          "cPages": {
+              "pages": []
+          },
+          "fileType": "pdf",
+          "formatVersion": 2,
+          "orientation": "portrait",
+          "pageCount": 0,
+          "tags": [],
+          "extraMetadata": {}
+      }
+    ''',
+    '.metadata': '''
+      {
+          "createdTime": "1755000000000",
+          "lastModified": "1755000000000",
+          "lastOpened": "",
+          "lastOpenedPage": 0,
+          "parent": "3c9f1a55-7b2e-4c6d-9a18-5f0e1d2c3b4a",
+          "pinned": false,
+          "type": "DocumentType",
+          "visibleName": "Monthly Report"
+      }
+    ''',
+  })
+# ---
