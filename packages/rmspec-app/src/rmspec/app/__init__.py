@@ -117,6 +117,11 @@ from rmspec.app.facts import (
     ReportedFact,
     ReportedGauge,
 )
+from rmspec.app.history import (
+    ReportSyncHistory,
+    ReportSyncHistoryRequest,
+    ReportSyncHistoryResult,
+)
 from rmspec.app.page_annotations import (
     PageAnnotations,
     ReadAnnotations,
@@ -130,12 +135,19 @@ from rmspec.app.render import (
     RenderPagesResult,
 )
 from rmspec.app.resolve import ResolveDocument, ResolveDocumentRequest, ResolveDocumentResult
+from rmspec.app.search import SearchText, SearchTextRequest, SearchTextResult, TextMatch
 from rmspec.app.selection import PageSelection
 from rmspec.app.sync import (
     SyncDocuments,
     SyncDocumentsRequest,
     SyncDocumentsResult,
     SyncedDocumentOutcome,
+)
+from rmspec.app.transcribe import (
+    TranscribedPage,
+    TranscribePages,
+    TranscribePagesRequest,
+    TranscribePagesResult,
 )
 
 __all__ = [
@@ -168,13 +180,24 @@ __all__ = [
     "ReportDeviceFacts",
     "ReportDeviceFactsRequest",
     "ReportDeviceFactsResult",
+    "ReportSyncHistory",
+    "ReportSyncHistoryRequest",
+    "ReportSyncHistoryResult",
     "ReportedFact",
     "ReportedGauge",
     "ResolveDocument",
     "ResolveDocumentRequest",
     "ResolveDocumentResult",
+    "SearchText",
+    "SearchTextRequest",
+    "SearchTextResult",
     "SyncDocuments",
     "SyncDocumentsRequest",
     "SyncDocumentsResult",
     "SyncedDocumentOutcome",
+    "TextMatch",
+    "TranscribePages",
+    "TranscribePagesRequest",
+    "TranscribePagesResult",
+    "TranscribedPage",
 ]
