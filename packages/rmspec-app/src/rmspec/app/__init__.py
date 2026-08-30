@@ -67,16 +67,114 @@ What is public here
 Use cases, their request and result models, and :mod:`rmspec.app.selection`, which the
 CLI constructs. :mod:`rmspec.app._degradations` is private: use cases import it, and
 nothing outside this package should need to.
+
+Enums and the structural Protocols a use case declares for a collaborator are public
+*module* names and deliberately stay out of ``__all__``. ``_use_cases()`` in
+``tests/test_app_public_surface.py`` classifies every exported class that is not a
+``BaseModel`` as a use case and then asserts keyword-only collaborators over its
+``__init__``, which no ``StrEnum`` or ``Protocol`` can satisfy -- so re-exporting one
+would fail three of that file's gates. Reach them at their module.
+
+Why the annotation reader is :mod:`rmspec.app.page_annotations`
+--------------------------------------------------------------
+Because every module in this workspace begins ``from __future__ import annotations``, this
+package's own namespace binds the name ``annotations`` to a ``__future__._Feature``. A
+module called ``annotations`` therefore made ``from rmspec.app import annotations`` resolve
+to the feature flag rather than the module -- silently, and depending on whether the
+submodule had already been imported, so it was order-dependent at run time. The obvious
+answer is a test forbidding that import form, but this codebase prefers a wrong thing that
+cannot be written to a wrong thing that is documented, and a name is the only fix that
+holds for code nobody has written yet.
 """
 
 from __future__ import annotations
 
+from rmspec.app.capabilities import (
+    OperationLimit,
+    PortBinding,
+    RefusedOperation,
+    ReportCapabilities,
+    ReportCapabilitiesRequest,
+    ReportCapabilitiesResult,
+)
+from rmspec.app.catalog import (
+    CatalogFolder,
+    ListDocuments,
+    ListDocumentsRequest,
+    ListDocumentsResult,
+)
+from rmspec.app.create import CreateDocument, CreateDocumentRequest, CreateDocumentResult
+from rmspec.app.diagrams import (
+    ExtractDiagrams,
+    ExtractDiagramsRequest,
+    ExtractDiagramsResult,
+    PageDiagram,
+)
+from rmspec.app.facts import (
+    ReportDeviceFacts,
+    ReportDeviceFactsRequest,
+    ReportDeviceFactsResult,
+    ReportedFact,
+    ReportedGauge,
+)
+from rmspec.app.page_annotations import (
+    PageAnnotations,
+    ReadAnnotations,
+    ReadAnnotationsRequest,
+    ReadAnnotationsResult,
+)
+from rmspec.app.render import (
+    RenderedPageArtifact,
+    RenderPages,
+    RenderPagesRequest,
+    RenderPagesResult,
+)
 from rmspec.app.resolve import ResolveDocument, ResolveDocumentRequest, ResolveDocumentResult
 from rmspec.app.selection import PageSelection
+from rmspec.app.sync import (
+    SyncDocuments,
+    SyncDocumentsRequest,
+    SyncDocumentsResult,
+    SyncedDocumentOutcome,
+)
 
 __all__ = [
+    "CatalogFolder",
+    "CreateDocument",
+    "CreateDocumentRequest",
+    "CreateDocumentResult",
+    "ExtractDiagrams",
+    "ExtractDiagramsRequest",
+    "ExtractDiagramsResult",
+    "ListDocuments",
+    "ListDocumentsRequest",
+    "ListDocumentsResult",
+    "OperationLimit",
+    "PageAnnotations",
+    "PageDiagram",
     "PageSelection",
+    "PortBinding",
+    "ReadAnnotations",
+    "ReadAnnotationsRequest",
+    "ReadAnnotationsResult",
+    "RefusedOperation",
+    "RenderPages",
+    "RenderPagesRequest",
+    "RenderPagesResult",
+    "RenderedPageArtifact",
+    "ReportCapabilities",
+    "ReportCapabilitiesRequest",
+    "ReportCapabilitiesResult",
+    "ReportDeviceFacts",
+    "ReportDeviceFactsRequest",
+    "ReportDeviceFactsResult",
+    "ReportedFact",
+    "ReportedGauge",
     "ResolveDocument",
     "ResolveDocumentRequest",
     "ResolveDocumentResult",
+    "SyncDocuments",
+    "SyncDocumentsRequest",
+    "SyncDocumentsResult",
+    "SyncedDocumentOutcome",
 ]
