@@ -3,10 +3,14 @@
 ``test_device_conformance.py`` proves the doubles satisfy the same contract as the adapters.
 This file covers what is left, and everything in it is here for one of three reasons.
 
-**A seam only a double has.** ``refresh=ALREADY_VISIBLE`` is unreachable in every shipped
-adapter -- the SSH uploader restarts the tablet UI unconditionally and there is no USB
-uploader -- so the second :class:`~rmspec.domain.ports.device.LibraryRefresh` member is
-tested here or nowhere. Same for ``reject_with`` and ``honours_parent``.
+**A seam a double has, whether or not an adapter shares it.** ``refresh=ALREADY_VISIBLE`` and
+``honours_parent=False`` were unreachable in every shipped adapter when this file was written
+-- the SSH uploader restarts the tablet UI unconditionally and honours every destination, and
+there was no second uploader. Both became reachable on 2026-08-29 when ``POST /upload`` was
+measured and :class:`~rmspec.device.usb.UsbUploader` was bound, so the assertions below are no
+longer the only cover for them; they stay because a double that could produce only one of each
+would silently narrow the port to whichever adapter it copied. ``reject_with`` remains a seam
+only a double has.
 
 **An ordering only a double can establish.** The port says
 ``DeviceOperationUnsupported`` is "raised before anything is written". Proving that needs a
@@ -35,6 +39,7 @@ from rmspec.device.testing import (
     IN_MEMORY_TRANSPORT,
     UPLOAD_OPERATION,
     FakeRemoteShell,
+    FakeSearchIndexSource,
     InMemoryDeviceCatalog,
     InMemoryDeviceFactsSource,
     InMemoryDocumentUploader,
@@ -325,8 +330,10 @@ def test_a_whole_transport_failure_precedes_even_the_catalog():
 def test_both_library_refresh_members_are_reportable(refresh: LibraryRefresh):
     """Both library refresh members are reportable.
 
-    The SSH adapter only ever produces ``VISIBILITY_FORCED`` and there is no USB uploader,
-    so ``ALREADY_VISIBLE`` is reachable here and nowhere else in the workspace.
+    One double reports either outcome, which is what lets a use-case test exercise both without
+    choosing a transport. Each is also produced by a real adapter now: ``SshUploader`` forces
+    visibility and ``UsbUploader`` does not need to, and ``test_device_conformance.py`` asserts
+    that pair.
     """
     uploader = InMemoryDocumentUploader(refresh=refresh)
 
@@ -445,6 +452,61 @@ def test_the_seeded_failure_is_the_object_that_arrives():
         source.read_facts()
 
     assert caught.value is DEAD
+
+
+# ─────────────────────────── FakeSearchIndexSource ───────────────────────────
+
+
+def test_the_default_index_source_is_a_device_that_has_never_built_one():
+    """The default index source is a device that has never built one.
+
+    Not an error and not an empty image: the tablet builds its index on its own schedule, so
+    "no index yet" is an ordinary condition and the seedless double is a legal device.
+    """
+    source = FakeSearchIndexSource()
+
+    assert source.read_index() is None
+
+
+def test_an_empty_image_is_seedable_and_is_not_the_same_state_as_no_index():
+    """An empty image is seedable and is not the same state as no index.
+
+    The reading half turns an image it cannot open into ``StoreUnavailableError``, and
+    ``deserialize(b"")`` raises ``MemoryError`` rather than a database error -- so a device
+    holding a zero-length index file is a store failure, while a device holding none is a
+    cache miss. Collapsing the two would report a fresh tablet as a broken one.
+    """
+    assert FakeSearchIndexSource(image=b"").read_index() == b""
+
+
+def test_the_seeded_image_arrives_unchanged_and_every_read_is_counted():
+    """The seeded image arrives unchanged and every read is counted.
+
+    Through a total port a memoised image and a re-read one are equal, so the counter is the
+    only evidence a caller read once -- which is what the port's ``Scope.REQUEST`` asks of it
+    for a 503,808-byte payload.
+    """
+    image = b"SQLite format 3\x00seeded"
+    source = FakeSearchIndexSource(image=image)
+
+    assert source.read_index() is image
+    assert source.read_index() is image
+    assert source.read_calls == 2
+
+
+def test_a_faulting_index_source_raises_the_object_it_was_seeded_with_and_counts_the_call():
+    """A faulting index source raises the object it was seeded with and counts the call.
+
+    An unplugged tablet must not read as a tablet with no index: that would suppress the free
+    prior silently and look identical to a cache miss on every page, forever.
+    """
+    source = FakeSearchIndexSource(fail_with=DEAD)
+
+    with pytest.raises(DeviceUnreachable) as caught:
+        source.read_index()
+
+    assert caught.value is DEAD
+    assert source.read_calls == 1
 
 
 # ─────────────────────────── FakeRemoteShell ───────────────────────────

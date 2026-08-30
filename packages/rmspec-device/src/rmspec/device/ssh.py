@@ -1,9 +1,30 @@
-"""The four device ports bound to SSH: catalog, bundles, uploads and facts.
+"""The five device ports bound to SSH: catalog, bundles, uploads, facts and the search index.
 
 Every adapter here takes a :class:`~rmspec.device._shell.RemoteShell` and nothing else that
-touches a wire, so all four are exercised against an in-memory double. What they add on top
+touches a wire, so all five are exercised against an in-memory double. What they add on top
 of the shell is knowledge of the xochitl store's layout, of the ``.metadata``/``.content``
 sidecar pair, and of the seven BusyBox commands this package is allowed to send.
+
+SSH is the documented-hazard fallback, not the default
+------------------------------------------------------
+reMarkable's own documentation states that *"Xochitl must not run when manually accessing
+document files"*, and nothing in this module stops it. So every read here is a read of a
+store its owner is still writing. The default read path in this project is therefore the USB
+web API: ``GET /download/{id}/rmdoc`` is served by xochitl itself, which makes its answer a
+consistent snapshot by construction rather than by timing. Three of the five adapters here --
+:class:`SshCatalog`, :class:`SshBundleSource` and, since ``POST /upload`` was measured on
+2026-08-29, :class:`SshUploader` -- therefore duplicate a capability the USB transport also
+has and are the fallback for it, while the other two exist because that firmware's six route
+families do not serve their capability at all: reporting the device's own facts and gauges,
+and handing over the search-index image. :class:`SshSearchIndexSource` restates the hazard at
+its own docstring rather than leaving a reader of one class to find it here.
+
+The two uploaders are not interchangeable and neither is redundant. This one honours a
+destination folder, so it can place a document anywhere in the tree; the USB one cannot,
+because no folder parameter exists in its route. This one cannot place an ``.rmdoc`` archive;
+the USB one can, because xochitl unpacks it. So "the default read path is USB" does not extend
+to "the default write path is USB": the request decides, and each adapter raises rather than
+degrading when handed the half it cannot serve.
 
 Relocated from ``src/remarkable_spec/device/sync.py`` and ``device/push.py``
 ---------------------------------------------------------------------------
@@ -146,6 +167,7 @@ from rmspec.device.addresses import (
     OS_RELEASE,
     PROC_MEMINFO,
     SCENE_SUFFIX,
+    SEARCH_INDEX_NAME,
     SOC_MACHINE,
     RemoteCommand,
     RemotePath,
@@ -155,6 +177,7 @@ from rmspec.domain.errors import (
     DeviceAuthFailed,
     DeviceDocumentNotFound,
     DeviceError,
+    DeviceOperationUnsupported,
     DeviceProtocolError,
     DeviceTransferInterrupted,
     DeviceUnreachable,
@@ -174,6 +197,7 @@ from rmspec.domain.ports.device import (
     LibraryRefresh,
     SkippedEntry,
     SkipReason,
+    UploadMedia,
     UploadReceipt,
 )
 
@@ -183,7 +207,7 @@ if TYPE_CHECKING:
     from rmspec.device._pages import PageOrderEntry
     from rmspec.device._shell import RemoteShell
     from rmspec.device.addresses import DocumentPaths
-    from rmspec.domain.ports.device import UploadMedia, UploadRequest
+    from rmspec.domain.ports.device import UploadRequest
 
 __all__ = [
     "AFTER_COMMIT_NOTE",
@@ -202,9 +226,12 @@ __all__ = [
     "REFRESH_TEMPLATE",
     "SERIAL_FIELD",
     "STORAGE_TEMPLATE",
+    "UNPLACEABLE_MEDIA",
+    "UNPLACEABLE_OPERATION",
     "SshBundleSource",
     "SshCatalog",
     "SshFacts",
+    "SshSearchIndexSource",
     "SshUploader",
 ]
 
@@ -256,6 +283,24 @@ JSON_INDENT: Final = 4
 #: The one :class:`~rmspec.domain.ports.device.DeviceFacts` field this transport
 #: structurally cannot answer. See divergence 6.
 SERIAL_FIELD: Final = "serial"
+
+#: The one :class:`~rmspec.domain.ports.device.UploadMedia` member :class:`SshUploader`
+#: refuses. See its docstring: an archive is a container of a whole document, so placing one
+#: here would mean unpacking it and writing the sidecars this module composes for the other
+#: two -- a different operation with different failure modes, not a media conversion.
+UNPLACEABLE_MEDIA: Final = UploadMedia.RMDOC
+
+#: What the refusal of :data:`UNPLACEABLE_MEDIA` is called. Derived from the member's own
+#: value rather than spelled, so the two cannot disagree, and shaped like the USB uploader's
+#: ``upload`` so a shell sees one vocabulary for both refusals.
+UNPLACEABLE_OPERATION: Final = f"upload {UNPLACEABLE_MEDIA.value}"
+
+#: The xochitl root :class:`SshSearchIndexSource` reads when its caller names none. A module
+#: constant rather than a ``RemotePath.root()`` call written into the signature: a call in a
+#: default argument is evaluated once at import whatever it looks like, and ruff's ``B008``
+#: refuses the spelling that hides that. The other four adapters take ``root`` without a
+#: default because each is constructed next to a catalog that must be given the same one.
+_DEFAULT_ROOT: Final = RemotePath.root()
 
 _ORIENTATION: Final = "portrait"
 _MEM_TOTAL_LABEL: Final = "MemTotal:"
@@ -835,11 +880,31 @@ class SshBundleSource:
 class SshUploader:
     """Place one document in the xochitl store, sidecars and all, over SSH.
 
-    Implements :class:`~rmspec.domain.ports.device.DocumentUploader`. Both
-    :class:`~rmspec.domain.ports.device.UploadMedia` members are placeable and
-    ``parent_uuid`` is honoured, written into the ``.metadata`` as ``parent``, so this
-    adapter never raises ``DeviceOperationUnsupported`` and never degrades a request to the
-    library root -- which ``ports/device.py`` forbids outright.
+    Implements :class:`~rmspec.domain.ports.device.DocumentUploader`. ``parent_uuid`` is
+    always honoured -- written into the ``.metadata`` this class composes, as ``parent`` -- so
+    a destination is never degraded to the library root, which ``ports/device.py`` forbids
+    outright. This is the half of the write surface the USB uploader does not have.
+
+    What it will not place: :data:`UNPLACEABLE_MEDIA`
+    -----------------------------------------------
+    :attr:`~rmspec.domain.ports.device.UploadMedia.RMDOC` raises
+    ``DeviceOperationUnsupported`` naming ``TransportKind.USB_WEB_API``, which is where an
+    archive *can* be placed -- xochitl's own import route accepts one, measured 2026-08-29.
+
+    It is refused here rather than supported because it is not a media this class could
+    substitute into the sidecars it writes. The two placeable members are **underlays**: the
+    payload is written to one path and this module composes the ``.content`` and ``.metadata``
+    that describe it. An archive is a container of a whole document -- its own ``.metadata``,
+    its own ``.content``, one ``.rm`` per page -- so placing one means unzipping it, deciding
+    what to do when a member's uuid collides with a document already in the store, re-keying
+    the pages if it does, and writing the result. That is a different operation with different
+    failure modes, and pretending it is a third value of ``media`` would hide every one of
+    them behind a signature that promises none.
+
+    ``DeviceOperationUnsupported`` and not a silent conversion for the same reason
+    ``parent_uuid`` is honoured rather than dropped: the port forbids substituting a media the
+    adapter does prefer, because the receipt would then report success for something the
+    caller did not ask for.
 
     Order, so a failure cannot leave a document the tablet will index
     ----------------------------------------------------------------
@@ -914,6 +979,9 @@ class SshUploader:
 
         Raises
         ------
+        DeviceOperationUnsupported
+            ``request.media`` is :data:`UNPLACEABLE_MEDIA`. Raised before anything is written,
+            and naming the transport that can place one.
         DeviceTransferInterrupted
             A write landed short. Never a receipt reporting fewer bytes than were offered.
         DeviceUnreachable
@@ -923,6 +991,12 @@ class SshUploader:
         DeviceProtocolError
             A command exited non-zero, or the session misbehaved.
         """
+        if request.media is UNPLACEABLE_MEDIA:
+            raise DeviceOperationUnsupported(
+                transport=TransportKind.SSH,
+                operation=UNPLACEABLE_OPERATION,
+                supported_by=(TransportKind.USB_WEB_API,),
+            )
         doc_uuid = self._new_uuid()
         paths = document_paths(self._root, doc_uuid)
         stamp = self._now_ms()
@@ -1051,6 +1125,115 @@ class SshFacts:
             available_storage_bytes=storage[1],
             unsupported=frozenset(),
         )
+
+
+class SshSearchIndexSource:
+    """The tablet's own handwriting search index, moved across as one database image.
+
+    Implements :class:`~rmspec.domain.ports.device.SearchIndexSource`. One read of one file,
+    and that is deliberately the whole of it.
+
+    Why this port hands over bytes rather than rows
+    ----------------------------------------------
+    **There is no ``sqlite3`` binary on the device and no BusyBox applet for one**, measured
+    2026-08-29 on firmware 3.27.3.0 against ``busybox --list``. Querying on-device is
+    therefore not an available shape, and transport-the-image-read-it-here is the only one
+    left. The reading half is :class:`rmspec.persistence.DeviceSearchIndex`, in the one
+    package allowed to import ``sqlite3``; this one may not, so it cannot look inside what it
+    carries even to sanity-check it.
+
+    The bytes stay in memory. Nothing here opens a local file, and the port takes no path,
+    so the image goes straight to a caller that deserialises it in process. An earlier
+    session ``scp``-ed this file onto local disk to inspect it; that is what this shape
+    replaced, and it matters because the index holds the user's handwriting -- 90 of the 92
+    rows on the measured device carry recognised text.
+
+    The bytes may be a torn snapshot, and the reader must check
+    ----------------------------------------------------------
+    reMarkable's own documentation states that *"Xochitl must not run when manually accessing
+    document files"*, and this file is xochitl's **live** search index. So this adapter reads
+    a database that may be mid-write, and it is deliberately **not** its job to detect that:
+    it moves bytes, and a per-page integrity opinion formed by a transport would be a second
+    opinion the reader could disagree with.
+
+    Saying so here is the load-bearing part, because the failure is silent. Measured locally
+    against CPython 3.13 and SQLite 3.50.4: an image truncated to ~99% of its length
+    **deserialises cleanly, answers queries, and returns confidently wrong rows** -- one page's
+    handwriting attributed to another, with no exception anywhere. ``PRAGMA quick_check``
+    catches it, reporting ``Rowid ... out of order`` where ``select count(*)`` happily
+    returned 500. :class:`rmspec.persistence.DeviceSearchIndex` is therefore **required** to
+    run that pragma and require exactly ``[("ok",)]`` before trusting a row, and a second
+    consumer of these bytes that skips it is the same defect wearing a new name.
+
+    Why there is no USB binding
+    ---------------------------
+    SSH file access is this project's documented-hazard *fallback*, not its default: the
+    default read path is the USB web API, whose ``GET /download/{id}/rmdoc`` is served by
+    xochitl itself and is a consistent snapshot by construction. This adapter exists because
+    the search index has **no** USB route at all -- that firmware's route table is closed at
+    six families and none of them serves a file from the xochitl tree. So there is nothing to
+    bind on the USB side, and ``test_device_conformance.py`` asserts that no other name in this
+    package satisfies this port, so a later reader cannot "fix" the absence without failing a
+    test.
+
+    This used to cite :class:`~rmspec.domain.ports.device.DocumentUploader` as the sibling case
+    of a port with one binding. It is no longer one: ``POST /upload`` was measured on
+    2026-08-29 and :class:`~rmspec.device.usb.UsbUploader` exists, which sharpens rather than
+    weakens the argument here -- an absence justified by "unprobed" is provisional and turned
+    out to be, while an absence justified by "the route table has no such family" is not.
+
+    Parameters
+    ----------
+    shell
+        The transport. Nothing else in this class touches a wire.
+    root
+        The xochitl root the index sits directly under, defaulting to
+        :data:`~rmspec.device.addresses.XOCHITL_ROOT`. A parameter, like every other root in
+        this module, so a test can build a synthetic tree anywhere; defaulted, unlike the
+        others, because this adapter is bound alone rather than paired with a catalog that
+        has to agree with it.
+    """
+
+    def __init__(self, shell: RemoteShell, *, root: RemotePath = _DEFAULT_ROOT) -> None:
+        self._shell = shell
+        self._root = root
+
+    def read_index(self) -> bytes | None:
+        """Read the whole search-index image, or report that the device has none.
+
+        Returns
+        -------
+        bytes | None
+            The image, or ``None`` when the file is not there. A device that has never built
+            an index is the honest cause of that, and the port spells it ``None`` so a caller
+            can tell it apart from an index that exists and holds no row for a page -- which
+            is the dominant state, since the index lags the tablet.
+
+            A file that exists at **zero length** reads as ``b""`` and not as ``None``, which
+            is the opposite of the rule :class:`SshBundleSource` applies to a scene artifact
+            and deliberately so. There, ``None`` means "this page carries no ink" and a
+            zero-byte artifact is the routine way the firmware says it -- 86 of the 194 real
+            ones are exactly that. Here, ``None`` means "this device has no index", so a
+            zero-length index file is a device that *has* one and whose one is unusable. That
+            is a different fact, and the reader reports it as ``StoreUnavailableError`` when
+            it tries to open it rather than as "no index".
+
+        Raises
+        ------
+        DeviceUnreachable
+            The transport died, or the shell was never connected. A per-path read failure is
+            *not* this: an absent or refused index is ``None``, because
+            :class:`~rmspec.device._shell.PathUnreadableError` separates the two and this is
+            the case that separation exists for.
+        DeviceAuthFailed
+            The device refused the credentials.
+        DeviceProtocolError
+            The channel misbehaved.
+        """
+        try:
+            return self._shell.read_file(self._root.child(SEARCH_INDEX_NAME))
+        except PathUnreadableError:
+            return None
 
 
 def _contradiction(

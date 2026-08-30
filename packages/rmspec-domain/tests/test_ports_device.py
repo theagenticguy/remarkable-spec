@@ -162,10 +162,17 @@ def test_device_file_type_is_a_closed_set_of_string_values():
         DeviceFileType("folder")
 
 
-def test_upload_media_omits_notebook_because_a_notebook_has_no_underlay():
-    assert {member.value for member in UploadMedia} == {"pdf", "epub"}
+def test_upload_media_is_two_underlays_and_one_archive():
+    # This assertion used to require UploadMedia to be a *strict subset* of DeviceFileType, on
+    # the argument that everything uploadable is an underlay and a notebook has none. The
+    # subset half is retired by measurement (2026-08-29, firmware 3.27.3.0): a notebook .rmdoc
+    # answers 201 and is imported as a notebook, and an archive is not an underlay. The
+    # underlay half survives, which is why `notebook` is still absent and is still asserted.
+    assert {member.value for member in UploadMedia} == {"pdf", "epub", "rmdoc"}
     assert "notebook" not in {member.value for member in UploadMedia}
-    assert {member.value for member in UploadMedia} < {member.value for member in DeviceFileType}
+    underlays = {UploadMedia.PDF.value, UploadMedia.EPUB.value}
+    assert underlays < {member.value for member in DeviceFileType}
+    assert UploadMedia.RMDOC.value not in {member.value for member in DeviceFileType}
 
 
 def test_library_refresh_is_a_closed_two_member_outcome():
@@ -617,6 +624,21 @@ def test_an_empty_payload_is_the_uploader_s_problem_not_the_model_s():
     assert UploadRequest(name="n", media=UploadMedia.EPUB, data=b"").data == b""
 
 
+@pytest.mark.parametrize("media", list(UploadMedia))
+def test_every_media_crosses_the_request_and_the_receipt_unchanged(media: UploadMedia):
+    # Including the archive, which is the member the measurement added: a value object that
+    # accepted only the two underlays would make the third unreportable in a receipt.
+    request = UploadRequest(name=f"doc.{media.value}", media=media, data=b"payload")
+    receipt = UploadReceipt(
+        doc_uuid=None,
+        name=request.name,
+        media=request.media,
+        byte_count=len(request.data),
+        library_refresh=LibraryRefresh.ALREADY_VISIBLE,
+    )
+    assert (receipt.media, receipt.byte_count) == (media, len(request.data))
+
+
 def test_a_receipt_states_an_absent_identifier_explicitly():
     with pytest.raises(ValidationError) as excinfo:
         UploadReceipt.model_validate(
@@ -873,8 +895,13 @@ def test_an_unknown_document_has_no_bundle():
 # ───────────────────────────── uploader contract ─────────────────────────────
 
 
-def _ssh_uploader() -> _StubUploader:
-    """Return an uploader whose wire has a destination parameter."""
+def _unrestricted_uploader() -> _StubUploader:
+    """Return an uploader at the permissive end of what this port allows.
+
+    A destination parameter and no media limit. Deliberately not a model of any shipped
+    adapter -- both of those refuse something, and the two stubs below say which -- so that
+    the rules every uploader keeps are asserted somewhere nothing is being refused.
+    """
     return _StubUploader(
         transport=TransportKind.SSH,
         accepts_destination=True,
@@ -884,17 +911,37 @@ def _ssh_uploader() -> _StubUploader:
 
 
 def _usb_uploader() -> _StubUploader:
-    """Return an uploader modelled on the firmware's single-route POST /upload."""
+    """Return an uploader modelled on the firmware's single-route POST /upload.
+
+    Every media, because the measured route accepts all three; no destination, because no
+    folder parameter exists anywhere in it; and ``ALREADY_VISIBLE``, because the new entry is
+    in ``GET /documents/`` before the request returns. Measured 2026-08-29.
+    """
     return _StubUploader(
         transport=TransportKind.USB_WEB_API,
         accepts_destination=False,
-        media=frozenset({UploadMedia.PDF}),
+        media=frozenset(UploadMedia),
         refresh=LibraryRefresh.ALREADY_VISIBLE,
     )
 
 
+def _sidecar_writing_uploader() -> _StubUploader:
+    """Return an uploader modelled on a transport that composes the sidecars itself.
+
+    It honours a destination -- it writes ``parent`` into the metadata it composes -- and
+    cannot place :attr:`UploadMedia.RMDOC`, because unpacking an archive and writing its
+    sidecars by hand is a different operation and not a media conversion.
+    """
+    return _StubUploader(
+        transport=TransportKind.SSH,
+        accepts_destination=True,
+        media=frozenset({UploadMedia.PDF, UploadMedia.EPUB}),
+        refresh=LibraryRefresh.VISIBILITY_FORCED,
+    )
+
+
 def test_a_receipt_reports_exactly_the_bytes_that_were_offered():
-    uploader: DocumentUploader = _ssh_uploader()
+    uploader: DocumentUploader = _unrestricted_uploader()
     request = UploadRequest(name="spec.pdf", media=UploadMedia.PDF, data=b"%PDF-1.7 body")
     receipt = uploader.upload(request)
     assert receipt.byte_count == len(request.data)
@@ -904,7 +951,7 @@ def test_a_receipt_reports_exactly_the_bytes_that_were_offered():
 
 
 def test_visibility_is_per_upload_so_n_documents_give_n_receipts():
-    stub = _ssh_uploader()
+    stub = _unrestricted_uploader()
     uploader: DocumentUploader = stub
     receipts = [
         uploader.upload(UploadRequest(name=f"d{index}.pdf", media=UploadMedia.PDF, data=b"x"))
@@ -931,16 +978,20 @@ def test_a_destination_a_wire_cannot_express_is_refused_not_dropped():
 
 
 def test_a_media_a_wire_cannot_place_is_refused_before_anything_is_written():
-    stub = _usb_uploader()
+    # The refused media used to be EPUB against a PDF-only USB stub. Retired by measurement:
+    # the real route places all three, and the media a real transport cannot place is the
+    # archive over SSH. The rule under test is unchanged -- refused at the call, nothing
+    # written, and never substituted for a media the wire does prefer.
+    stub = _sidecar_writing_uploader()
     uploader: DocumentUploader = stub
     with pytest.raises(DeviceOperationUnsupported) as excinfo:
-        uploader.upload(UploadRequest(name="book.epub", media=UploadMedia.EPUB, data=b"PK"))
-    assert excinfo.value.operation == "upload epub"
+        uploader.upload(UploadRequest(name="notes.rmdoc", media=UploadMedia.RMDOC, data=b"PK"))
+    assert excinfo.value.operation == "upload rmdoc"
     assert stub.placed == []
 
 
 def test_the_same_request_succeeds_over_the_transport_that_can_honor_it():
-    stub = _ssh_uploader()
+    stub = _unrestricted_uploader()
     uploader: DocumentUploader = stub
     request = UploadRequest(
         name="book.epub", media=UploadMedia.EPUB, data=b"PK\x03\x04", parent_uuid="folder"
@@ -948,6 +999,21 @@ def test_the_same_request_succeeds_over_the_transport_that_can_honor_it():
     receipt = uploader.upload(request)
     assert receipt.media is UploadMedia.EPUB
     assert stub.placed == [request]
+
+
+def test_an_archive_is_placed_by_the_wire_that_imports_it_and_refused_by_the_one_that_unpacks():
+    # The two shipped transports refuse different halves of the same request, which is the
+    # whole reason `DeviceOperationUnsupported` is raised at the call and names `supported_by`.
+    importing = _usb_uploader()
+    unpacking = _sidecar_writing_uploader()
+    request = UploadRequest(name="notes.rmdoc", media=UploadMedia.RMDOC, data=b"PK\x03\x04")
+
+    assert importing.upload(request).media is UploadMedia.RMDOC
+    with pytest.raises(DeviceOperationUnsupported) as excinfo:
+        unpacking.upload(request)
+
+    assert unpacking.placed == []
+    assert TransportKind.SSH in excinfo.value.supported_by
 
 
 def test_an_upload_at_the_library_root_needs_no_destination_support():

@@ -16,7 +16,14 @@ Four things carry this suite, and the sections below follow them:
   that it terminates, and that one refused folder is one skipped entry rather than a
   vanished subtree;
 * the bundle -- the three page states, the dropped orphan layer, and all-or-nothing;
-* the deliberate absences -- no uploader, no write verb, and every fact ``unsupported``.
+* the write route measured on 2026-08-29 -- the multipart shape, the name semantics, the two
+  refusals, and the one fact that stays an absence: every device fact is ``unsupported``.
+
+Nothing here sends a real request, which for the write route is not merely hygiene. ``POST
+/upload`` **creates** a document and the firmware's six route families include no delete, so a
+run against the attached tablet would leave entries in the author's own library. That is why
+this adapter has no hardware test -- see ``test_device_hardware.py`` -- and why every
+assertion below is made against ``httpx.MockTransport`` and the recorded measurement.
 """
 
 from __future__ import annotations
@@ -34,21 +41,36 @@ from rmspec.device._archive import RMDOC_ROUTE
 from rmspec.device._wire import COLLECTION_TYPE, DOCUMENT_TYPE, LISTING_ROUTE
 from rmspec.device.addresses import DEFAULT_USB_HOST, Endpoint
 from rmspec.device.usb import (
+    UPLOAD_CREATED,
+    UPLOAD_FIELD,
+    UPLOAD_MEDIA_TYPES,
+    UPLOAD_OPERATION,
+    UPLOAD_ROUTE,
+    UPLOAD_TIMEOUT_SECONDS,
     UsbBundleSource,
     UsbCatalog,
     UsbFacts,
+    UsbUploader,
     UsbWebApi,
     _only_children_of,
 )
 from rmspec.domain.errors import (
     DeviceDocumentNotFound,
+    DeviceOperationUnsupported,
     DeviceProtocolError,
     DeviceTransferInterrupted,
     DeviceUnreachable,
+    DeviceUploadRejected,
     MalformedDeviceMetadata,
     TransportKind,
 )
-from rmspec.domain.ports.device import DeviceFileType, SkipReason
+from rmspec.domain.ports.device import (
+    DeviceFileType,
+    LibraryRefresh,
+    SkipReason,
+    UploadMedia,
+    UploadRequest,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -1154,32 +1176,274 @@ def test_a_probe_the_tablet_refuses_is_a_protocol_error(reading: str):
         getattr(facts, reading)()
 
 
-# ─────────────────────── the absence that is the design (D5) ───────────────────────
+# ─────────────────────── the write route, measured 2026-08-29 ───────────────────────
 
 
-def test_the_module_exports_no_usb_uploader():
-    """``POST /upload`` has never been probed in any form, and a guess would risk the notes.
+def upload_tablet(
+    *,
+    answer: Callable[[], httpx.Response] | None = None,
+    seen: list[httpx.Request] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Build a handler serving only ``POST /upload``, and recording what it was sent.
 
-    The server ignores the request method, so a ``GET`` to that path could not have been
-    proven non-mutating, and its field name, content types and response body are all
-    unmeasured. ``ports/device.py`` expresses capability asymmetry as which ports exist, so
-    the composition root fails to bind and the shell says "retry over SSH". This test is
-    what stops a later reader "fixing" the omission.
+    Narrower than :func:`tablet` on purpose: the uploader is allowed to touch one route, so
+    anything else fails the test rather than being answered.
     """
-    assert usb.__all__ == ["UsbBundleSource", "UsbCatalog", "UsbFacts", "UsbWebApi"]
-    # The one upload-shaped name in the namespace is the error class the shared error seam
-    # can produce, which is translation vocabulary rather than a capability. Nothing else.
-    assert {name for name in dir(usb) if "upload" in name.lower()} == {"DeviceUploadRejected"}
-    assert not [
-        name
-        for name, value in vars(usb).items()
-        if "upload" in name.lower() and getattr(value, "__module__", None) == usb.__name__
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(request)
+        path = request.url.raw_path.decode()
+        if request.method == "POST" and path == UPLOAD_ROUTE:
+            return created() if answer is None else answer()
+        pytest.fail(f"the fake tablet was asked for {request.method} {path!r}, which it refuses")
+
+    return handler
+
+
+def created() -> httpx.Response:
+    """Answer as measured: ``201`` and a body carrying no identifier."""
+    return httpx.Response(
+        UPLOAD_CREATED,
+        content=json.dumps({"status": "Upload successful"}).encode(),
+        headers={"content-type": JSON_CONTENT_TYPE},
+    )
+
+
+def an_upload(
+    *,
+    name: str = "Design review.pdf",
+    media: UploadMedia = UploadMedia.PDF,
+    parent_uuid: str | None = None,
+    data: bytes = PDF_BYTES,
+) -> UploadRequest:
+    """Build one upload request."""
+    return UploadRequest(name=name, media=media, data=data, parent_uuid=parent_uuid)
+
+
+def test_the_measured_client_shape_is_what_goes_on_the_wire():
+    """One part named ``file``, ``POST``, ``/upload``, and the caller's own filename.
+
+    The shape came out of the device's own SPA bundle -- ``new FormData; append("file", e)``
+    against ``/upload`` with ``method:"post"`` -- and the field name is a *contract*: the same
+    payload under ``document`` is answered ``400 {"error": "No file sent"}``.
+    """
+    seen: list[httpx.Request] = []
+    uploader = UsbUploader(api=web_api(upload_tablet(seen=seen)))
+
+    uploader.upload(an_upload(name="Design review.pdf"))
+
+    request = seen[0]
+    body = request.content.decode("latin-1")
+    assert (request.method, request.url.raw_path.decode()) == ("POST", UPLOAD_ROUTE)
+    assert f'name="{UPLOAD_FIELD}"' in body
+    assert 'filename="Design review.pdf"' in body
+    assert body.count("Content-Disposition") == 1
+    assert PDF_BYTES.decode("latin-1") in body
+
+
+@pytest.mark.parametrize("media", list(UploadMedia))
+def test_every_media_is_sent_under_the_type_that_describes_its_bytes(media: UploadMedia):
+    """Including the archive, which is the member the measurement added."""
+    seen: list[httpx.Request] = []
+    uploader = UsbUploader(api=web_api(upload_tablet(seen=seen)))
+
+    receipt = uploader.upload(an_upload(media=media))
+
+    assert UPLOAD_MEDIA_TYPES[media] in seen[0].content.decode("latin-1")
+    assert receipt.media is media
+
+
+def test_the_name_is_sent_verbatim_and_no_extension_is_invented():
+    """A name with no suffix produces a tablet entry with no suffix, and that is the caller's.
+
+    For a PDF the multipart filename *becomes* ``visibleName`` verbatim -- ``probe-upload.pdf``
+    and ``Probe Named Doc.pdf`` both appeared under exactly those names -- so appending an
+    extension here would make the receipt describe a document that does not exist.
+    """
+    seen: list[httpx.Request] = []
+    uploader = UsbUploader(api=web_api(upload_tablet(seen=seen)))
+
+    receipt = uploader.upload(an_upload(name="Design review"))
+
+    assert 'filename="Design review"' in seen[0].content.decode("latin-1")
+    assert ".pdf" not in receipt.name
+
+
+def test_the_receipt_reports_no_identifier_because_the_body_carries_none():
+    seen: list[httpx.Request] = []
+    request = an_upload()
+    uploader = UsbUploader(api=web_api(upload_tablet(seen=seen)))
+
+    receipt = uploader.upload(request)
+
+    assert receipt.doc_uuid is None
+    assert receipt.name == request.name
+    assert receipt.byte_count == len(request.data)
+    assert receipt.library_refresh is LibraryRefresh.ALREADY_VISIBLE
+    # And nothing re-listed /documents/ to guess which new entry was ours: two concurrent
+    # uploads make that answer wrong, so the honest report is that we do not know.
+    assert [entry.url.raw_path.decode() for entry in seen] == [UPLOAD_ROUTE]
+
+
+def test_the_upload_carries_its_own_timeout_rather_than_the_clients():
+    """The one ceiling this module spells. See ``UPLOAD_TIMEOUT_SECONDS`` for why 120."""
+    seen: list[httpx.Request] = []
+    uploader = UsbUploader(api=web_api(upload_tablet(seen=seen)))
+
+    uploader.upload(an_upload())
+
+    assert seen[0].extensions["timeout"] == {
+        "connect": UPLOAD_TIMEOUT_SECONDS,
+        "pool": UPLOAD_TIMEOUT_SECONDS,
+        "read": UPLOAD_TIMEOUT_SECONDS,
+        "write": UPLOAD_TIMEOUT_SECONDS,
+    }
+
+
+def test_a_read_still_carries_the_clients_own_ceiling_and_not_this_modules():
+    """The other arm of the same branch: a read must not have a timeout spelled here."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return json_response(b"[]")
+
+    web_api(handler).get(LISTING_ROUTE)
+
+    assert seen[0].extensions["timeout"] == {
+        "connect": 5.0,
+        "pool": 5.0,
+        "read": 5.0,
+        "write": 5.0,
+    }
+
+
+def test_a_destination_is_refused_before_a_single_byte_leaves_the_process():
+    """No folder parameter exists in the route, so the request is never sent at all.
+
+    Stronger than "no document was created": this route cannot be undone over HTTP -- the
+    firmware's six route families include no delete -- so the refusal has to happen before the
+    body goes out rather than being detected in the answer.
+    """
+    seen: list[httpx.Request] = []
+    uploader = UsbUploader(api=web_api(upload_tablet(seen=seen)))
+
+    with pytest.raises(DeviceOperationUnsupported) as raised:
+        uploader.upload(an_upload(parent_uuid=WORK))
+
+    assert raised.value.operation == UPLOAD_OPERATION
+    assert raised.value.supported_by == (TransportKind.SSH,)
+    assert raised.value.transport is TransportKind.USB_WEB_API
+    assert seen == []
+
+
+def test_no_file_sent_is_reported_as_our_defect_and_not_as_the_device_refusing():
+    """``400 {"error": "No file sent"}`` means this adapter built the multipart body wrongly.
+
+    Measured twice -- no body at all, and one part named ``document`` -- so by the time the
+    real adapter provokes it, the body is one *this module* composed. Reporting it as
+    ``DeviceUploadRejected`` would send the user to inspect their PDF for a fault in our
+    request.
+    """
+    uploader = UsbUploader(
+        api=web_api(upload_tablet(answer=lambda: error_response(400, "No file sent")))
+    )
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader.upload(an_upload())
+
+    assert raised.value.route == UPLOAD_ROUTE
+    assert "file" in raised.value.expected
+    assert "No file sent" in raised.value.got
+
+
+def test_any_other_refusal_carries_the_devices_own_message():
+    """The write route's default is the opposite of the read routes'.
+
+    A message this adapter has not met means the device received the document and declined it,
+    which is the one thing a caller who just tried to place a file needs told. On a read route
+    the same unmeasured message means "we cannot interpret the answer", which is why there are
+    two translators.
+    """
+    uploader = UsbUploader(
+        api=web_api(upload_tablet(answer=lambda: error_response(507, "Insufficient Storage")))
+    )
+
+    with pytest.raises(DeviceUploadRejected) as raised:
+        uploader.upload(an_upload(name="Design review.pdf"))
+
+    assert raised.value.name == "Design review.pdf"
+    assert raised.value.device_message == "Insufficient Storage"
+
+
+def test_a_body_that_is_not_the_error_shape_is_a_protocol_error():
+    """A captive portal or an intercepting proxy on the USB interface produces exactly this."""
+    uploader = UsbUploader(
+        api=web_api(
+            upload_tablet(answer=lambda: httpx.Response(302, content=b"<html>login</html>"))
+        )
+    )
+
+    with pytest.raises(DeviceProtocolError):
+        uploader.upload(an_upload())
+
+
+def test_a_two_hundred_is_not_a_created_document():
+    """The tablet's own SPA checks ``r.status !== 201``, and so does this.
+
+    This route table answers ``200`` to plenty of requests that created nothing, so accepting
+    any 2xx would let a cheerful proxy response read as a placed document.
+    """
+    uploader = UsbUploader(
+        api=web_api(upload_tablet(answer=lambda: httpx.Response(200, content=b'{"error": "ok"}')))
+    )
+
+    with pytest.raises(DeviceUploadRejected):
+        uploader.upload(an_upload())
+
+
+def test_a_dead_cable_mid_upload_is_unreachable_and_never_a_short_receipt():
+    """HTTP has no partial-acceptance state, so there is no receipt reporting fewer bytes."""
+    detail = "the link died while the body was going out"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.WriteError(detail, request=request)
+
+    uploader = UsbUploader(api=web_api(handler))
+
+    with pytest.raises(DeviceUnreachable):
+        uploader.upload(an_upload())
+
+
+def test_the_module_exports_exactly_one_usb_uploader():
+    """One name here creates a document, and ``post_file`` on the transport is not it.
+
+    This test asserted that the module exported *nothing* that could write, on the premise that
+    ``POST /upload`` had never been probed in any form. Retired by measurement on 2026-08-29
+    (``specs/device/3.27.3.0/http.json`` claims[14]). The replacement is the same kind of
+    guard, one binding further along: a *second* uploader, or an adapter growing an ``upload``
+    method, still fails here.
+    """
+    assert usb.__all__ == [
+        "UPLOAD_CREATED",
+        "UPLOAD_FIELD",
+        "UPLOAD_MEDIA_TYPES",
+        "UPLOAD_OPERATION",
+        "UPLOAD_ROUTE",
+        "UPLOAD_TIMEOUT_SECONDS",
+        "UsbBundleSource",
+        "UsbCatalog",
+        "UsbFacts",
+        "UsbUploader",
+        "UsbWebApi",
     ]
-    for exported in usb.__all__:
-        assert not hasattr(getattr(usb, exported), "upload")
+    writers = [name for name in usb.__all__ if hasattr(getattr(usb, name), "upload")]
+    assert writers == ["UsbUploader"]
 
 
-def test_the_transport_has_exactly_two_verbs_and_neither_writes():
+def test_the_transport_has_two_read_verbs_and_exactly_one_write_verb():
+    """``== {"get", "head"}`` was retired by the same measurement; the count replaces it."""
     verbs = {name for name in vars(UsbWebApi) if not name.startswith("_")}
 
-    assert verbs == {"get", "head"}
+    assert verbs == {"get", "head", "post_file"}

@@ -1,9 +1,9 @@
-"""The four device port contracts, written once and run against every implementation.
+"""The five device port contracts, written once and run against every implementation.
 
 Each class here holds every assertion one port in :mod:`rmspec.domain.ports.device` makes,
 and declares its subject through a fixture annotated with the *Protocol* rather than with an
 adapter. ``test_device_conformance.py`` binds them to the USB adapters over
-``httpx.MockTransport``, to the SSH adapters over an in-memory shell, and to the four
+``httpx.MockTransport``, to the SSH adapters over an in-memory shell, and to the five
 in-memory doubles -- so one assertion set proves that an adapter which quietly narrowed its
 behaviour, or a double that quietly widened its own, fails here rather than three packages
 away in step 6.
@@ -48,6 +48,15 @@ since that is the only entry whose children a routed failure can refuse, so that
 identifier appears in both ``folders`` and ``skipped``; ``get_document`` still raises
 ``MalformedDeviceMetadata`` for it, because both real catalogs search ``skipped`` before
 falling through.
+
+The search index is bytes, and this file never opens one
+-------------------------------------------------------
+:data:`SEARCH_INDEX_IMAGE` is a synthetic byte string carrying the real format's magic and
+nothing else that a database reader would recognise. It is deliberately not a database: this
+package may not import ``sqlite3``, the port it belongs to is a transport, and the real image
+on the measured device holds the user's handwriting on 90 of its 92 rows. What
+:class:`SearchIndexSourceContract` asserts is that the bytes cross unchanged and that absence
+is spelled ``None`` -- never that they parse.
 """
 
 from __future__ import annotations
@@ -86,6 +95,7 @@ if TYPE_CHECKING:
         DeviceFactsSource,
         DocumentUploader,
         RawBundleSource,
+        SearchIndexSource,
     )
 
 NOTEBOOK_UUID = "aaaaaaaa-0000-4000-8000-000000000001"
@@ -124,6 +134,20 @@ UNDERLAY = b"%PDF-1.7 synthetic underlay"
 
 UPLOAD_PAYLOAD = b"%PDF-1.7 synthetic upload"
 """The bytes every upload assertion offers. Not empty, so ``byte_count`` is falsifiable."""
+
+SQLITE_MAGIC = b"SQLite format 3\x00"
+"""The 16 bytes every SQLite database image begins with, NUL terminator included.
+
+Spelled once for the whole suite: ``test_device_hardware.py`` checks the real
+``rm-search-index.db`` against it, and :data:`SEARCH_INDEX_IMAGE` is prefixed with it so the
+synthetic value is recognisably an image rather than arbitrary text."""
+
+SEARCH_INDEX_IMAGE = SQLITE_MAGIC + b"synthetic index image, not a database"
+"""Stand-in for the device's search-index image, which nothing in this package decodes.
+
+Not a real database, and not captured from the device: the measured file is 503,808 bytes and
+carries the user's own handwriting. Not empty either, so "the whole image crossed" is
+falsifiable against the ``None`` that spells absence."""
 
 FACT_FIELDS = frozenset(DeviceFacts.model_fields) - {"unsupported"}
 """Every field :class:`~rmspec.domain.ports.device.DeviceFacts` can answer. Derived from the
@@ -651,7 +675,14 @@ class DeviceFactsSourceContract:
 
 
 class DocumentUploaderContract:
-    """Every assertion ``DocumentUploader`` makes about its implementations."""
+    """Every assertion ``DocumentUploader`` makes about its implementations.
+
+    Two per-request asymmetries run through this port and every binding refuses one of them,
+    which is why the seams below are shaped as "produce an uploader with *this* behaviour, or
+    say you cannot". A refusal a binding cannot produce is skipped rather than faked, and a
+    refusal it *does* produce is asserted -- so the skip list is a statement about the wire
+    rather than about the test's ambition.
+    """
 
     # ── seams a binding must provide ────────────────────────────────────────
 
@@ -672,6 +703,22 @@ class DocumentUploaderContract:
         """
         raise NotImplementedError
 
+    def unplaceable_media(self) -> frozenset[UploadMedia]:
+        """Return the media this implementation's wire structurally cannot place.
+
+        Empty for most bindings. The SSH adapter overrides it with
+        :attr:`~rmspec.domain.ports.device.UploadMedia.RMDOC`, because placing an archive
+        there means unpacking it and writing the sidecars by hand rather than converting a
+        media -- and stating it here is what makes the *refusal* assertable rather than merely
+        absent from the happy path.
+
+        Returns
+        -------
+        frozenset[UploadMedia]
+            The refused members.
+        """
+        return frozenset()
+
     def _require(self, *, honours_parent: bool) -> BoundUploader:
         """Return the uploader, or skip when this implementation cannot produce it.
 
@@ -691,12 +738,65 @@ class DocumentUploaderContract:
             pytest.skip(f"this implementation has no uploader that {behaviour} a destination")
         return bound
 
+    def _any(self) -> BoundUploader:
+        """Return this implementation's uploader, whatever it does with a destination.
+
+        Every assertion about a *receipt* runs through here rather than through
+        :meth:`_require`, because a receipt's rules hold for both destination behaviours and
+        gating them on one would have skipped them entirely for the binding that cannot
+        express it.
+
+        Returns
+        -------
+        BoundUploader
+            The subject.
+        """
+        for honours in (True, False):
+            bound = self.uploader_for(honours_parent=honours)
+            if bound is not None:
+                return bound
+        pytest.fail("this implementation provides no uploader at all")
+
+    def _placing(self, media: UploadMedia) -> BoundUploader:
+        """Return an uploader that can place *media*, or skip.
+
+        Parameters
+        ----------
+        media
+            The media the caller wants placed.
+
+        Returns
+        -------
+        BoundUploader
+            The subject.
+        """
+        if media in self.unplaceable_media():
+            pytest.skip(f"this implementation cannot place {media.value}")
+        return self._any()
+
+    def _refusing(self, media: UploadMedia) -> BoundUploader:
+        """Return an uploader that cannot place *media*, or skip.
+
+        Parameters
+        ----------
+        media
+            The media the caller wants refused.
+
+        Returns
+        -------
+        BoundUploader
+            The subject.
+        """
+        if media not in self.unplaceable_media():
+            pytest.skip(f"this implementation places {media.value}")
+        return self._any()
+
     # ── a receipt restates the request ──────────────────────────────────────
 
     @pytest.mark.parametrize("media", list(UploadMedia))
     def test_a_receipt_restates_the_request_it_was_given(self, media: UploadMedia) -> None:
         """A receipt restates the request it was given."""
-        bound = self._require(honours_parent=True)
+        bound = self._placing(media)
         request = an_upload(name="Design review", media=media)
         receipt = bound.uploader.upload(request)
         assert receipt.name == request.name
@@ -708,8 +808,7 @@ class DocumentUploaderContract:
         """Every receipt names a library refresh."""
         # Reported as a post-condition of upload rather than through a separate refresh
         # port, so "uploaded but never made visible" is unrepresentable.
-        bound = self._require(honours_parent=True)
-        assert bound.uploader.upload(an_upload()).library_refresh in set(LibraryRefresh)
+        assert self._any().uploader.upload(an_upload()).library_refresh in set(LibraryRefresh)
 
     # ── degrading a request is forbidden ────────────────────────────────────
 
@@ -741,3 +840,102 @@ class DocumentUploaderContract:
         # refused by the same adapter that refuses one which does.
         bound = self._require(honours_parent=False)
         assert bound.uploader.upload(an_upload()).byte_count == len(UPLOAD_PAYLOAD)
+
+    @pytest.mark.parametrize("media", list(UploadMedia))
+    def test_a_media_this_wire_cannot_place_is_refused_before_anything_is_written(
+        self,
+        media: UploadMedia,
+    ) -> None:
+        """A media this wire cannot place is refused before anything is written."""
+        # The other half of "degrading a request is forbidden": an adapter may not substitute a
+        # media it does prefer any more than it may drop a destination. The refusal names the
+        # media, so a shell can say what to retry and where.
+        bound = self._refusing(media)
+        with pytest.raises(DeviceOperationUnsupported) as caught:
+            bound.uploader.upload(an_upload(media=media))
+        assert media.value in caught.value.operation
+        assert caught.value.supported_by != ()
+        assert bound.placed() == 0
+
+
+class SearchIndexSourceContract:
+    """Every assertion ``SearchIndexSource`` makes about its implementations."""
+
+    # ── seams a binding must provide ────────────────────────────────────────
+
+    @pytest.fixture
+    def source(self) -> SearchIndexSource:
+        """Return a source over a device that holds :data:`SEARCH_INDEX_IMAGE`.
+
+        Returns
+        -------
+        SearchIndexSource
+            The subject.
+        """
+        raise NotImplementedError
+
+    def absent_source(self) -> SearchIndexSource:
+        """Return a source over a device that has no index at all.
+
+        Returns
+        -------
+        SearchIndexSource
+            The subject. Not an exceptional state: the index is built by the tablet on its
+            own schedule, so a device that has never built one is a device in a normal
+            condition.
+        """
+        raise NotImplementedError
+
+    def failing_source(self, failure: DeviceError) -> SearchIndexSource:
+        """Return a source whose whole transport fails with *failure*.
+
+        Parameters
+        ----------
+        failure
+            What the transport raises.
+
+        Returns
+        -------
+        SearchIndexSource
+            The subject.
+        """
+        raise NotImplementedError
+
+    # ── the image crosses whole, and nothing here reads it ──────────────────
+
+    def test_the_whole_image_crosses_as_bytes(self, source: SearchIndexSource) -> None:
+        """The whole image crosses as bytes."""
+        # Bytes and not a path, and not a query interface: there is no sqlite3 binary on the
+        # device and no BusyBox applet for one, so transport-the-image is the only shape
+        # available. Equality against the seeded value is what makes "whole" falsifiable --
+        # a truncating adapter would still return `bytes` of a plausible length.
+        assert source.read_index() == SEARCH_INDEX_IMAGE
+
+    def test_a_second_read_answers_the_same_image(self, source: SearchIndexSource) -> None:
+        """A second read answers the same image."""
+        # The port is Scope.REQUEST -- one image per command, read once and reused for every
+        # page -- so an implementation that memoises and one that re-reads must be
+        # indistinguishable through the port. Whether a caller memoises is asserted on the
+        # double's own counter, which is the only place the difference is visible.
+        assert source.read_index() == source.read_index()
+
+    # ── absence is None, and never empty bytes ──────────────────────────────
+
+    def test_a_device_with_no_index_answers_none_and_never_empty_bytes(self) -> None:
+        """A device with no index answers none and never empty bytes."""
+        # b"" would be an image the reader then fails to open, which is a different report
+        # from "this device has not built one yet" -- and collapsing the two would let a
+        # fresh device look like a corrupt store.
+        assert self.absent_source().read_index() is None
+
+    # ── a dead transport raises rather than reporting no index ──────────────
+
+    def test_a_whole_transport_failure_raises_rather_than_reporting_no_index(self) -> None:
+        """A whole transport failure raises rather than reporting no index."""
+        # The distinction the port draws in its own Raises clause: a per-path read failure is
+        # None, and everything that describes the session propagates. An unplugged tablet
+        # reported as "no index" would silently disable a free prior and look like a cache
+        # miss forever.
+        source = self.failing_source(a_dead_transport())
+        with pytest.raises(DeviceUnreachable):
+            source.read_index()

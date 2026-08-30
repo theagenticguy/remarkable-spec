@@ -2,7 +2,7 @@
 
 Everything in this package that reaches the tablet over SSH goes through
 :class:`RemoteShell`. It is a ``Protocol`` with four methods and no others, and
-:class:`ParamikoShell` is the one implementation that owns a socket. The four adapters in
+:class:`ParamikoShell` is the one implementation that owns a socket. The five adapters in
 ``rmspec.device.ssh`` accept the Protocol, so every one of them is testable against an
 in-memory double -- which matters because ``paramiko`` ships no fake, and a test that
 accidentally opened a real session against an attached tablet would *pass*.
@@ -106,9 +106,10 @@ in two halves.
   That is sound because :class:`RemoteShell` is an *internal* Protocol rather than a port:
   ``ports/device.py`` constrains what ``rmspec.device`` raises at its public surface, and
   this seam is two modules inside it, free to speak a narrower vocabulary that the port's
-  error tree has no member for. ``rmspec.device.ssh`` catches it at every one of the six
+  error tree has no member for. ``rmspec.device.ssh`` catches it at every one of the seven
   places it can arise and converts -- to a ``SkippedEntry`` where an entry-level answer
-  exists, and to ``DeviceProtocolError`` where the store has contradicted itself.
+  exists, to ``None`` where the port's own return type spells absence, and to
+  ``DeviceProtocolError`` where the store has contradicted itself.
 
 Everything else still goes through the translator untouched, including
 :meth:`ParamikoShell.write_file`: an uploader has no per-path answer to give, so it wants a

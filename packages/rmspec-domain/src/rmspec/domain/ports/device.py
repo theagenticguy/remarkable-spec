@@ -43,7 +43,11 @@ destination parameter and no media negotiation, so an adapter that cannot honor
 ``DeviceOperationUnsupported`` from :meth:`DocumentUploader.upload`. Dropping the
 destination and reporting success -- the caller asks for ``/Books`` and gets the root --
 is forbidden by this module, because a silent wrong placement is exactly the failure the
-"no ``accepts()``" rule exists to prevent.
+"no ``accepts()``" rule exists to prevent. Both halves of that rule now have a binding,
+which is what keeps them from being theoretical: the USB uploader refuses a destination
+its route cannot express, and the SSH uploader refuses :attr:`UploadMedia.RMDOC`, because
+placing an archive over SSH means unpacking it and writing the sidecars by hand rather
+than converting a media.
 
 No wire format crosses this boundary. The device's ``.content`` and ``.pagedata`` files
 are decoded by the transport adapter, which reads them anyway to report a page count, so
@@ -208,17 +212,36 @@ class DeviceFileType(StrEnum):
 
 
 class UploadMedia(StrEnum):
-    """Media a tablet accepts as a new document, and stores as an underlay.
+    """What a tablet accepts as a new document: two underlays, and one whole-document archive.
 
     A domain enum, so no adapter sniffs a file extension and no port signature carries
-    an HTTP ``Content-Type``; each adapter maps a member to whatever its wire needs. The
-    same closed set describes the underlay a pulled document carries, because a notebook
-    -- the third :class:`DeviceFileType` member -- has no underlay and cannot be
-    uploaded as one.
+    an HTTP ``Content-Type``; each adapter maps a member to whatever its wire needs.
+
+    :attr:`PDF` and :attr:`EPUB` are also exactly the underlay a pulled document can carry,
+    and the reason a notebook is absent still holds: a notebook has no underlay, so there is
+    nothing to place *as* one. What an earlier revision of this docstring then concluded --
+    that a notebook therefore "cannot be uploaded" -- is measured false, and :attr:`RMDOC`
+    is that refutation. An archive is not an underlay: it is the tablet's own container for a
+    whole document, sidecars and pages included, and it is the third thing the import route
+    accepts. So this set is no longer a subset of :class:`DeviceFileType` -- two members name
+    an underlay and one names a container, and the two sets merely overlap.
+
+    Measured 2026-08-29 on firmware 3.27.3.0: ``POST /upload`` carrying one multipart part
+    named ``file`` whose payload was a notebook ``.rmdoc`` answered ``201 {"status": "Upload
+    successful"}``, and ``GET /documents/`` then reported one more root entry -- a notebook --
+    with no restart and no stop of xochitl. See ``specs/device/3.27.3.0/http.json``,
+    claims[14].
+
+    The two container kinds disagree about where the title comes from, which is why
+    :attr:`UploadRequest.name` states what the *caller* wants rather than what the tablet
+    will show: with a PDF or EPUB the multipart filename becomes ``visibleName`` verbatim,
+    while a ``.rmdoc``'s own ``.metadata`` wins and the filename is ignored. Each adapter
+    says which of the two its wire does.
     """
 
     PDF = "pdf"
     EPUB = "epub"
+    RMDOC = "rmdoc"
 
 
 class LibraryRefresh(StrEnum):
@@ -229,8 +252,10 @@ class LibraryRefresh(StrEnum):
     instead of being one mis-paired binding away.
 
     Both members name an observed outcome, not the mechanism that produced it: the SSH
-    adapter forces visibility by restarting the tablet's UI process, a future adapter
-    might call a reindex route, and a caller branches on neither. Visibility is
+    adapter forces visibility by restarting the tablet's UI process, the USB adapter needs
+    to do nothing at all because that firmware's import route is served by the tablet's own
+    UI process and the new entry is listed before the request returns, and a caller
+    branches on neither. Visibility is
     per-upload, so a batch of N documents over SSH forces it N times; a use case that
     wants one refresh for a batch is asking for a different port than this one.
     """
@@ -449,7 +474,13 @@ class UploadRequest(BaseModel, frozen=True, extra="forbid"):
     """
 
     name: str = Field(min_length=1)
-    """The name the document should show in the tablet UI."""
+    """The name the caller wants the document to show in the tablet UI.
+
+    What a wire *does* with it differs by media, and each adapter states which: with a PDF
+    or EPUB underlay firmware 3.27.3.0's import route takes this verbatim, extension
+    included, while an :attr:`UploadMedia.RMDOC` archive carries its own ``visibleName``
+    and that one wins. Measured 2026-08-29; see :class:`UploadMedia`.
+    """
 
     media: UploadMedia
     """What kind of document ``data`` holds."""

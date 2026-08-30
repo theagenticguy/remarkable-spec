@@ -1,23 +1,30 @@
-"""The USB web API transport, and the three ports it can honestly bind.
+"""The USB web API transport, and the four ports it can honestly bind.
 
 Firmware 3.27.3.0 answers on ``10.11.99.1:80`` over the USB-C gadget interface with a
-route table closed at six path families. This module binds three of the four Protocols in
+route table closed at six path families. This module binds four of the five Protocols in
 ``rmspec.domain.ports.device`` to that table -- :class:`UsbCatalog`,
-:class:`UsbBundleSource` and :class:`UsbFacts` -- over one injected ``httpx.Client``. It
+:class:`UsbBundleSource`, :class:`UsbFacts` and :class:`UsbUploader` -- over one injected
+``httpx.Client``. It
 decodes nothing itself: entry shapes belong to ``_wire``, archive members to ``_archive``,
 the page order to ``_pages``, and failure classification to ``_errors``. What is left here
 is the part that is genuinely about *moving bytes over HTTP*: the request, the breadth-first
-walk the route table forces, and the assembly of a bundle from members somebody else routed.
+walk the route table forces, the assembly of a bundle from members somebody else routed,
+and the one multipart body this package builds.
 
 The client is injected and never constructed
 --------------------------------------------
-:class:`UsbWebApi` takes an ``httpx.Client``. It does not build one, does not set a
-timeout, and does not own a lifetime -- the composition root in step 6 does, and a test
-passes ``httpx.Client(transport=httpx.MockTransport(handler))``. Legacy
+:class:`UsbWebApi` takes an ``httpx.Client``. It does not build one and does not own a
+lifetime -- the composition root in step 6 does, and a test passes
+``httpx.Client(transport=httpx.MockTransport(handler))``. Legacy
 ``WebAPI._get_client`` built a fresh client per call behind a lazy ``import httpx``, so
 every request paid a connection setup, the timeout was a constructor default nobody could
 override per call, and a missing extra surfaced as an ``ImportError`` from inside a command
 body rather than as ``MissingDependencyError`` at composition.
+
+No *read* here spells a timeout, for the same reason: the client's own ceiling is tuned for
+listings that answer in milliseconds and it belongs to whoever built the client. The upload
+is the one exception and it is a per-request override, because its ceiling is a property of
+that route rather than of this link -- see :data:`UPLOAD_TIMEOUT_SECONDS`.
 
 Relocated from ``src/remarkable_spec/device/web_api.py``, with every divergence named
 ------------------------------------------------------------------------------------
@@ -48,27 +55,62 @@ are all changed.
    output ``Path`` and called ``output.write_bytes``. No port in this system touches a
    filesystem, so ``get`` returns bytes and the CLI owns every sink -- which is also why no
    method here declares ``OSError``.
-5. **``download_pdf``, ``get_thumbnail``, ``upload_pdf`` and ``upload_epub`` are absent.**
-   The device-rendered PDF is an export concern, not a source one; ``/thumbnail/{id}``
-   advertises ``image/jpeg`` and returns PNG and no port consumes it; and the two uploads
-   are the subject of the next section.
+5. **``download_pdf`` and ``get_thumbnail`` are absent.** The device-rendered PDF is an
+   export concern, not a source one, and ``/thumbnail/{id}`` advertises ``image/jpeg``,
+   returns PNG, and no port consumes it. ``upload_pdf`` and ``upload_epub`` have a
+   successor -- :class:`UsbUploader` -- but not their shape: both took a ``Path``, and
+   neither checked the status the route actually answers on success.
 6. **``raise_for_status()`` is gone from all seven call sites.** Every failed response goes
    through ``_errors.translate_http``, which classifies on the device's own
    ``{"error": ...}`` message rather than on the status code.
 
-There is no USB uploader, and that absence is the design
---------------------------------------------------------
-``DocumentUploader`` is **not** bound here, and this module exports nothing that writes.
-``POST /upload`` has never been probed in any form: the server ignores the request method
-(``protocol:methods``), so a ``GET`` to that path could not have been proven non-mutating,
-and its multipart field name, accepted content types and response body are all unmeasured.
-Shipping a guessed multipart body against the user's only copy of their notes is not a
-trade this package makes. ``ports/device.py`` opens by arguing that capability asymmetry is
-expressed as *which ports exist*, so the composition root fails to bind and raises
-``DeviceOperationUnsupported(operation="upload", supported_by=(TransportKind.SSH,))``, and
-the shell says "retry over SSH". :class:`UsbWebApi` therefore has exactly two verbs, ``get``
-and ``head``, and ``test_device_usb.py`` asserts that set so a later reader cannot "fix"
-the omission without failing a test.
+There is a USB uploader, and until 2026-08-29 this section argued there could not be
+-----------------------------------------------------------------------------------
+What stood here claimed that ``DocumentUploader`` had exactly one binding and that the
+absence of a second **was** the design, resting entirely on one premise: that
+``POST /upload`` "has never been probed in any form", so its multipart field name, accepted
+content types and response body were unmeasured, and that shipping a guessed body against
+the user's only copy of their notes was not a trade this package would make. That premise is
+gone. The route was read out of the firmware's own SPA bundle and then probed four ways on
+2026-08-29 (``specs/device/3.27.3.0/http.json`` claims[14]), and the caution it justified was
+about *guessing*, not about writing.
+
+The reasoning survives and now cuts the other way. Capability asymmetry is still expressed
+as which bindings exist and what each refuses, and the two uploaders differ in exactly two
+places:
+
+* **Destination.** No folder parameter exists anywhere in the route or in the SPA's own call
+  to it, and the created entry has ``Parent == ""``. So :class:`UsbUploader` raises
+  ``DeviceOperationUnsupported`` for a non-``None`` ``parent_uuid`` and
+  :class:`~rmspec.device.ssh.SshUploader`, which composes the ``.metadata`` itself, honours
+  it.
+* **Visibility.** ``GET /documents/`` went 10 to 11 root entries with no restart and no stop
+  of xochitl, because xochitl performs the import itself. So this uploader reports
+  ``LibraryRefresh.ALREADY_VISIBLE`` while the SSH one restarts the tablet UI and reports
+  ``VISIBILITY_FORCED``.
+
+Media runs the other way: this route accepts a ``.rmdoc`` archive and the SSH uploader does
+not, because placing an archive over SSH means unpacking it and writing the sidecars by
+hand. ``test_device_conformance.py`` asserts all of it -- two bindings, each refusal, and the
+two refresh outcomes -- which is the replacement for the assertion that used to say no name
+here could write at all.
+
+The route is create-only, and that is the constraint a caller has to plan around
+-------------------------------------------------------------------------------
+Uploading a document's own archive back produced a **new** document uuid *and* a new page
+uuid while preserving the page bytes exactly. So ``POST /upload`` adds and never updates: a
+round trip makes a copy, and editing an existing page is a different operation over a
+different transport. The 201 body is ``{"status": "Upload successful"}`` and carries no
+identifier, which is why :attr:`~rmspec.domain.ports.device.UploadReceipt.doc_uuid` is
+``None`` here and why this module does not re-list ``/documents/`` to guess which new entry
+is its own -- two concurrent uploads make that answer wrong.
+
+There is also no hardware test for this adapter, alone among the ports here, and the reason
+is in ``test_device_hardware.py``: the route creates a document, the firmware's route table
+is closed at six families and none of them deletes, so an automated test would leave entries
+in the user's library that only a manual delete on the tablet can remove. The ``httpx``
+request hook in that module that refuses anything but a read of the listing route therefore
+stays, and it is now load-bearing rather than precautionary.
 
 The breadth-first walk, and the silent root fallback that makes it subtle
 ------------------------------------------------------------------------
@@ -176,11 +218,12 @@ from urllib.parse import quote
 import httpx
 
 from rmspec.device._archive import RMDOC_ROUTE, read_rmdoc
-from rmspec.device._errors import translate_http, translate_httpx
+from rmspec.device._errors import translate_http, translate_httpx, translate_upload
 from rmspec.device._pages import decode_page_order
 from rmspec.device._wire import LISTING_ROUTE, decode_entries, entry_parent
 from rmspec.domain.errors import (
     DeviceDocumentNotFound,
+    DeviceOperationUnsupported,
     DeviceProtocolError,
     DeviceTransferInterrupted,
     DeviceUploadRejected,
@@ -194,24 +237,87 @@ from rmspec.domain.ports.device import (
     DevicePageSource,
     DeviceResources,
     DocumentSourceBundle,
+    LibraryRefresh,
     SkippedEntry,
     SkipReason,
+    UploadMedia,
+    UploadReceipt,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from rmspec.device._archive import ArchiveMembers
     from rmspec.device._pages import PageOrderEntry
     from rmspec.device._wire import DecodedEntries
     from rmspec.device.addresses import Endpoint
-    from rmspec.domain.ports.device import DeviceDocument, DeviceFolder
+    from rmspec.domain.ports.device import DeviceDocument, DeviceFolder, UploadRequest
 
-__all__ = ["UsbBundleSource", "UsbCatalog", "UsbFacts", "UsbWebApi"]
+__all__ = [
+    "UPLOAD_CREATED",
+    "UPLOAD_FIELD",
+    "UPLOAD_MEDIA_TYPES",
+    "UPLOAD_OPERATION",
+    "UPLOAD_ROUTE",
+    "UPLOAD_TIMEOUT_SECONDS",
+    "UsbBundleSource",
+    "UsbCatalog",
+    "UsbFacts",
+    "UsbUploader",
+    "UsbWebApi",
+]
 
 _GET: Final = "GET"
 """The verb for every route this transport reads."""
 
 _HEAD: Final = "HEAD"
 """The verb for the existence probe. Same status and ``Content-Type``, no body."""
+
+_POST: Final = "POST"
+"""The verb for the one route this transport writes.
+
+The firmware ignores the request method (``protocol:methods``), so this spelling buys nothing
+from the device. It is written anyway because it is what the tablet's own SPA sends and
+because it is what an ``httpx`` event hook -- the guard in ``test_device_hardware.py`` -- can
+refuse. A verb no client sends is a guard no guard can catch.
+"""
+
+#: The one route on this firmware that creates a document. Spelled here rather than in a
+#: ``_``-prefixed sibling because no module decodes its payload: the body this package sends
+#: is one it builds, and the body it receives carries nothing to decode.
+UPLOAD_ROUTE: Final = "/upload"
+
+#: The multipart field name the handler checks. Measured: one part named ``document`` is
+#: answered ``400 {"error": "No file sent"}`` while the same payload under ``file`` is
+#: answered ``201``, so this string is not a convention -- it is the contract.
+UPLOAD_FIELD: Final = "file"
+
+#: The status that means a document was created. Compared for equality, not through
+#: ``is_success``: the tablet's own SPA checks ``r.status !== 201`` and this route table
+#: answers ``200`` to plenty of requests that created nothing, so accepting any 2xx would let
+#: an intercepting proxy's cheerful ``200`` read as a placed document.
+UPLOAD_CREATED: Final = 201
+
+#: The operation name a refusal carries. ``rmspec.device.testing.doubles`` spells the same
+#: literal and the conformance suite asserts the two agree: the doubles deliberately import
+#: nothing from this module, because that would pull ``httpx`` into every fake's import graph.
+UPLOAD_OPERATION: Final = "upload"
+
+#: Seconds one upload may take, applied per request rather than taken from the client -- the
+#: only ceiling this module spells, and the one that is not the client's business.
+#:
+#: 120, not the 30 the tablet's own SPA uses, and the same figure ``remarkable-mcp``
+#: independently chose for this route. The SPA can afford to fail fast: a human is watching a
+#: file they just picked and can click again. This adapter is driven by an agent placing a
+#: document the caller may have spent minutes producing, and the request does not return until
+#: xochitl has parsed the container and written five sidecars -- work that scales with page
+#: count, not with link speed. The asymmetry of the two failure modes decides it. Too low and
+#: a slow-but-succeeding import is reported as a dead tablet *while the document lands*, so
+#: the caller retries and creates a duplicate that only a manual delete on the tablet can
+#: remove, because the route table has no delete. Too high and a genuinely unplugged cable
+#: takes longer to report -- and that case is already answered in milliseconds by the connect
+#: timeout the client owns.
+UPLOAD_TIMEOUT_SECONDS: Final = 120.0
 
 _CONTENT_LENGTH: Final = "content-length"
 """The header naming how many bytes the device said it was sending."""
@@ -228,6 +334,24 @@ _UNANSWERABLE_FACTS: Final = frozenset(DeviceFacts.model_fields) - {_UNSUPPORTED
 _UNANSWERABLE_RESOURCES: Final = frozenset(DeviceResources.model_fields) - {_UNSUPPORTED_FIELD}
 """Every gauge the port can report, none of which the closed route table reaches."""
 
+UPLOAD_MEDIA_TYPES: Final[Mapping[UploadMedia, str]] = {
+    UploadMedia.PDF: "application/pdf",
+    UploadMedia.EPUB: "application/epub+zip",
+    UploadMedia.RMDOC: "application/zip",
+}
+"""Each :class:`~rmspec.domain.ports.device.UploadMedia` member's ``Content-Type``.
+
+Total over a closed enum and subscripted rather than ``get``-ed, like ``ssh._FILE_TYPES``: a
+missing key would mean the domain grew a media this adapter has not been taught, which is a
+change to review and not a runtime condition to degrade around.
+
+``application/zip`` for the archive because a ``.rmdoc`` *is* a zip -- the download route
+that serves one answers ``application/zip`` -- and reMarkable registers no type of its own.
+Nothing measured says the handler reads this header at all: the four probes varied the field
+name and the payload and never the content type, so the honest thing to send is the type that
+describes the bytes rather than a value chosen to satisfy a check nobody has observed.
+"""
+
 _ROUTED_FAILURES: Final = (DeviceProtocolError, DeviceDocumentNotFound, DeviceUploadRejected)
 """Exactly what ``translate_http`` can produce: the device answered, about this request.
 
@@ -243,14 +367,15 @@ library of unreadable folders.
 class UsbWebApi:
     """One request against the tablet's web API, with every failure already translated.
 
-    Two verbs, both read-only, and no third -- see the module docstring on why there is no
-    USB uploader. Nothing here knows what a route *means*: it takes the path, returns the
-    body, and raises a domain error for every way that can fail, so the three ports below
-    contain no ``httpx`` and no status codes.
+    Three verbs: two that read and exactly one that writes, which is the shape of the route
+    table -- six families, one of which creates a document. Nothing here knows what a route
+    *means*: it takes the path, returns the body, and raises a domain error for every way that
+    can fail, so the four ports below contain no ``httpx`` and no status codes.
 
     The client is a constructor argument and is never built here, which is what lets a test
     pass an ``httpx.MockTransport`` and the composition root own the real client's lifetime.
-    No timeout is spelled in this module for the same reason.
+    No *read* spells a timeout for the same reason; :meth:`post_file` overrides one per
+    request, and :data:`UPLOAD_TIMEOUT_SECONDS` carries the argument for the value.
     """
 
     def __init__(self, *, client: httpx.Client, endpoint: Endpoint) -> None:
@@ -357,7 +482,90 @@ class UsbWebApi:
                 endpoint=self._endpoint.base_url,
             )
 
-    def _answer(self, method: str, route: str, /) -> httpx.Response:
+    def post_file(
+        self,
+        route: str,
+        /,
+        *,
+        field: str,
+        filename: str,
+        content_type: str,
+        data: bytes,
+        subject: str,
+    ) -> None:
+        """Send one multipart body carrying exactly one part, and require a ``201``.
+
+        The only write in this package's HTTP surface. It returns nothing on purpose: the
+        measured ``201`` body is ``{"status": "Upload successful"}`` and carries no
+        identifier, so a caller given those bytes could only be tempted to parse a promise out
+        of them that the device did not make.
+
+        The response is deliberately **not** length-checked, unlike :meth:`get`. That check
+        exists to catch a *download* that arrived short; here the announced length describes
+        the device's own acknowledgement rather than the document that was sent, so a short
+        read of it would say nothing about whether the document landed.
+
+        Parameters
+        ----------
+        route
+            The path to post to.
+        field
+            The multipart field name. The handler checks it -- see :data:`UPLOAD_FIELD`.
+        filename
+            The part's filename. Whether the device does anything with it is the route's
+            business, not this method's.
+        content_type
+            The part's media type.
+        data
+            The part's whole payload. Sent in one body; this transport does not stream.
+        subject
+            What the caller was placing, used as the subject of a refusal. The device has no
+            identifier to name yet, so this is the only subject available.
+
+        Returns
+        -------
+        None
+            Nothing. A return means the device answered :data:`UPLOAD_CREATED`.
+
+        Raises
+        ------
+        DeviceUnreachable
+            The tablet did not answer, or the link died while the body was going out. Not
+            ``DeviceTransferInterrupted``: HTTP has no partial-acceptance state to report, so
+            a dropped upload produces an exception from the client and never a short receipt.
+        DeviceUploadRejected
+            The device answered something other than ``201`` with a message this adapter has
+            not met, which on the write route means the payload was declined. Carries the
+            device's own words.
+        DeviceProtocolError
+            The device said it received no file -- which is a defect in the body *this*
+            module built, not a refusal of the caller's document -- or answered something that
+            is not the uniform error shape at all.
+        """
+        response = self._answer(
+            _POST,
+            route,
+            part={field: (filename, data, content_type)},
+            timeout=UPLOAD_TIMEOUT_SECONDS,
+        )
+        if response.status_code != UPLOAD_CREATED:
+            raise translate_upload(
+                route=route,
+                status=response.status_code,
+                body=response.content,
+                endpoint=self._endpoint.base_url,
+                name=subject,
+            )
+
+    def _answer(
+        self,
+        method: str,
+        route: str,
+        /,
+        *,
+        part: dict[str, tuple[str, bytes, str]] | None = None,
+        timeout: float | None = None,
+    ) -> httpx.Response:
         """Send one request, letting no ``httpx`` exception escape.
 
         The ``except`` clause names the four bases that between them cover everything
@@ -373,9 +581,14 @@ class UsbWebApi:
         Parameters
         ----------
         method
-            ``GET`` or ``HEAD``.
+            ``GET``, ``HEAD`` or ``POST``.
         route
             The path to request.
+        part
+            The one multipart part to send, as ``{field: (filename, payload, content type)}``,
+            or ``None`` for a request with no body.
+        timeout
+            Seconds this one request may take, or ``None`` to use the client's own ceiling.
 
         Returns
         -------
@@ -389,8 +602,16 @@ class UsbWebApi:
         DeviceProtocolError
             The client failed for a reason that is not an unreachable tablet.
         """
+        url = f"{self._endpoint.base_url}{route}"
+        # The two calls are written out rather than passing `timeout` through, because httpx
+        # spells "use the client's own ceiling" with a sentinel *instance* and spells `None` as
+        # "no ceiling at all". Passing this method's `None` on would silently disable the
+        # timeout on every read, which is the opposite of leaving it to the client.
         try:
-            response = self._client.request(method, f"{self._endpoint.base_url}{route}")
+            if timeout is None:
+                response = self._client.request(method, url, files=part)
+            else:
+                response = self._client.request(method, url, files=part, timeout=timeout)
         except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError, OSError) as exc:
             raise translate_httpx(exc, endpoint=self._endpoint.base_url) from exc
         return response
@@ -552,6 +773,140 @@ class UsbBundleSource:
             document=document,
             pages=_pages_of(members),
             base=members.underlay,
+        )
+
+
+class UsbUploader:
+    """Place one document through ``POST /upload``, which is xochitl's own import route.
+
+    Implements :class:`~rmspec.domain.ports.device.DocumentUploader`. The evidence for every
+    claim below is ``specs/device/3.27.3.0/http.json`` claims[14]: the client shape was read
+    out of the device's own SPA bundle -- ``const n = new FormData; n.append("file", e);
+    fetch("/upload", {method:"post", body:n})``, with ``r.status !== 201`` as its own success
+    test -- and then four probes measured the handler.
+
+    This is the *supported* write path, and the only one. reMarkable's own documentation says
+    "Xochitl must not run when manually accessing document files", and this route is served by
+    xochitl itself: it parses the container, writes ``.metadata``, ``.content``, ``.local``,
+    ``.pagedata``, the underlay and an empty ``<uuid>/``, and updates ``.tree``. The client
+    supplies none of them, which is the whole reason to prefer it over
+    :class:`~rmspec.device.ssh.SshUploader`.
+
+    What it cannot do, and why each is a raise rather than a degradation
+    -------------------------------------------------------------------
+    **No destination.** No folder parameter exists in the route, in the SPA's call to it, or
+    anywhere in the response; the created entry carries ``Parent == ""``. The SPA's
+    pre-flight ``GET /documents/{parent}`` is a view refresh, not a parent argument. So a
+    non-``None`` ``parent_uuid`` raises ``DeviceOperationUnsupported`` **before anything is
+    sent**, and is never quietly placed at the root -- which ``ports/device.py`` forbids
+    outright, because a receipt reporting success for a placement the caller did not ask for
+    is the exact failure the "no ``accepts()``" rule exists to prevent.
+
+    **No identifier.** The ``201`` body is ``{"status": "Upload successful"}`` and carries no
+    id, so ``UploadReceipt.doc_uuid`` is ``None`` -- the field is typed nullable for precisely
+    this wire. This adapter does not re-list ``/documents/`` to work out which new entry is
+    its own: two concurrent uploads make that answer wrong, and a use case that needs the
+    identifier resolves it against :class:`~rmspec.domain.ports.device.DeviceCatalog` as an
+    explicit, testable step.
+
+    **No update.** Uploading a document's own archive back produced a new document uuid *and*
+    a new page uuid while preserving the page bytes exactly. The route creates; it cannot
+    replace, so a round trip is a copy.
+
+    What the name means, which differs by media
+    ------------------------------------------
+    For :attr:`~rmspec.domain.ports.device.UploadMedia.PDF` and
+    :attr:`~rmspec.domain.ports.device.UploadMedia.EPUB` the multipart filename **becomes the
+    visible name verbatim**, extension included: ``probe-upload.pdf`` and ``Probe Named
+    Doc.pdf`` both appeared under exactly those names. So ``request.name`` is sent as the
+    filename unchanged, and a name with no extension produces a tablet entry with no
+    extension. Nothing is appended to compensate -- the caller chose the name, and silently
+    editing it would make the receipt describe a document that does not exist.
+
+    For :attr:`~rmspec.domain.ports.device.UploadMedia.RMDOC` **``request.name`` is ignored by
+    the firmware.** The archive's own ``.metadata`` ``visibleName`` wins: a notebook archive
+    posted under the filename ``Probe Rmdoc.rmdoc`` was imported as ``TestNb``. The receipt
+    still restates ``request.name``, because a receipt reports what was asked for and this
+    transport is not told what the archive contained. A caller that needs the tablet's name
+    for an archive reads it from the archive, or from the catalog afterwards. This paragraph
+    exists because a caller who does not know it will file a bug against us.
+
+    Visibility, which is measured rather than hoped for
+    --------------------------------------------------
+    ``LibraryRefresh.ALREADY_VISIBLE``, and it is a measurement: ``GET /documents/`` went from
+    10 to 11 root entries immediately after the ``201``, with **no restart and no stop of
+    xochitl**. That is not an optimistic reading of a 201 -- the import is synchronous with
+    the request, which is what makes this route safe to use while the human is holding the
+    tablet.
+
+    Not covered by a hardware test, deliberately
+    --------------------------------------------
+    Every other port here has one. This one must not: the route creates a document and the
+    route table is closed at six families with none that deletes, so a test run would leave
+    entries in the user's own library that only a manual delete on the tablet can remove. It
+    is verified by fakes against the recorded measurement instead, and
+    ``test_device_hardware.py`` keeps the request hook that makes this route unreachable from
+    there.
+    """
+
+    def __init__(self, *, api: UsbWebApi) -> None:
+        self._api = api
+
+    def upload(self, request: UploadRequest, /) -> UploadReceipt:
+        """Place one document at the library root and report what the device said.
+
+        Parameters
+        ----------
+        request
+            The document to place, with its media and destination folder.
+
+        Returns
+        -------
+        UploadReceipt
+            ``doc_uuid`` ``None``, the request's own ``name`` and ``media``,
+            ``byte_count == len(request.data)``, and
+            :attr:`~rmspec.domain.ports.device.LibraryRefresh.ALREADY_VISIBLE`.
+
+        Raises
+        ------
+        DeviceOperationUnsupported
+            ``request.parent_uuid`` is not ``None``. Raised before the first byte is sent, and
+            never replaced by a placement at the root.
+        DeviceUploadRejected
+            The device answered something other than ``201``, carrying a message this adapter
+            has not met. On this route that means the document itself was declined.
+        DeviceUnreachable
+            The tablet did not answer, or the link died mid-body.
+        DeviceProtocolError
+            The device reported that no file arrived -- a defect in the multipart body this
+            adapter built -- or answered in a shape this adapter cannot read.
+        DeviceTransferInterrupted
+            Never, over this wire, and named here only because the port declares it. HTTP has
+            no partial-acceptance state: the handler answers ``201`` after parsing the whole
+            body, so there is no observation under which a receipt could report fewer bytes
+            than were offered. A link that dies mid-upload is ``DeviceUnreachable`` from the
+            shared translation seam, which is a different fact and a better one.
+        """
+        if request.parent_uuid is not None:
+            raise DeviceOperationUnsupported(
+                transport=TransportKind.USB_WEB_API,
+                operation=UPLOAD_OPERATION,
+                supported_by=(TransportKind.SSH,),
+            )
+        self._api.post_file(
+            UPLOAD_ROUTE,
+            field=UPLOAD_FIELD,
+            filename=request.name,
+            content_type=UPLOAD_MEDIA_TYPES[request.media],
+            data=request.data,
+            subject=request.name,
+        )
+        return UploadReceipt(
+            doc_uuid=None,
+            name=request.name,
+            media=request.media,
+            byte_count=len(request.data),
+            library_refresh=LibraryRefresh.ALREADY_VISIBLE,
         )
 
 

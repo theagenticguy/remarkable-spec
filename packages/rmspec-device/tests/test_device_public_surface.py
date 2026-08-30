@@ -1,6 +1,6 @@
 """The package's public surface, pinned as an invariant rather than a convention.
 
-``rmspec.device`` exports two transports and seven adapters, and everything that decodes a
+``rmspec.device`` exports two transports and nine adapters, and everything that decodes a
 wire format lives behind a leading underscore. That is held in place by nothing but module
 naming and a hand-written ``__all__``, and the obvious next change -- "let the CLI show which
 entries were skipped and why" -- would re-export ``rmspec.device._wire.DecodedEntries`` and
@@ -35,10 +35,12 @@ EXPECTED = [
     "SshBundleSource",
     "SshCatalog",
     "SshFacts",
+    "SshSearchIndexSource",
     "SshUploader",
     "UsbBundleSource",
     "UsbCatalog",
     "UsbFacts",
+    "UsbUploader",
     "UsbWebApi",
 ]
 
@@ -47,6 +49,7 @@ EXPECTED_TESTING = [
     "IN_MEMORY_TRANSPORT",
     "UPLOAD_OPERATION",
     "FakeRemoteShell",
+    "FakeSearchIndexSource",
     "InMemoryDeviceCatalog",
     "InMemoryDeviceFactsSource",
     "InMemoryDocumentUploader",
@@ -93,11 +96,16 @@ CLAIMED_METHODS = {
     "SshBundleSource": ("load_bundle",),
     "SshCatalog": ("get_document", "list_documents"),
     "SshFacts": ("read_facts", "read_resources"),
+    "SshSearchIndexSource": ("read_index",),
     "SshUploader": ("upload",),
     "UsbBundleSource": ("load_bundle",),
     "UsbCatalog": ("get_document", "list_documents"),
     "UsbFacts": ("read_facts", "read_resources"),
-    "UsbWebApi": ("get", "head"),
+    "UsbUploader": ("upload",),
+    # Two reads and exactly one write. `UsbWebApi` claimed only ("get", "head") until
+    # POST /upload was measured on 2026-08-29; the entry is widened rather than loosened, so a
+    # second write verb appearing here still fails this test.
+    "UsbWebApi": ("get", "head", "post_file"),
 }
 
 

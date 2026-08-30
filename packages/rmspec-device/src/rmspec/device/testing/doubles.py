@@ -1,4 +1,4 @@
-"""In-memory doubles for the four device ports, plus the shell seam all four share.
+"""In-memory doubles for the five device ports, plus the shell seam all five share.
 
 Test doubles, not second product adapters. They ship under ``src/`` rather than in a
 ``tests/`` helper for the reason ``rmspec.persistence.testing.doubles`` gives and this
@@ -11,7 +11,10 @@ against every double *and* every real adapter, so a double that quietly narrowed
 behaviour fails here rather than three packages away.
 
 Nothing here opens a file, opens a socket, or imports ``sqlite3``, and no double's behaviour
-depends on ``httpx`` or a live ``paramiko`` session. The four port doubles need only
+depends on ``httpx`` or a live ``paramiko`` session. That is worth stating twice for
+:class:`FakeSearchIndexSource`: it carries a *database image* as bytes and does not decode
+one, because the port it satisfies is a transport and the reader lives in
+``rmspec-persistence``. The five port doubles need only
 ``rmspec.domain``. :class:`FakeRemoteShell` additionally imports
 :class:`~rmspec.device._shell.PathUnreadableError`, because the Protocol it satisfies raises
 that type and a double that substituted something else would be a different contract; the
@@ -39,22 +42,37 @@ Every seam is here because it makes one port guarantee assertable
     carries both byte counts.
 
 ``refresh`` on the uploader
-    Both :class:`~rmspec.domain.ports.device.LibraryRefresh` members. The SSH adapter only
-    ever produces ``VISIBILITY_FORCED`` -- it restarts the tablet UI unconditionally -- and
-    there is no USB uploader, so ``ALREADY_VISIBLE`` is otherwise unreachable and therefore
-    untested anywhere in the workspace.
+    Both :class:`~rmspec.domain.ports.device.LibraryRefresh` members. This seam was
+    introduced when ``ALREADY_VISIBLE`` was unreachable in the workspace -- the SSH adapter
+    restarts the tablet UI unconditionally and there was no USB uploader -- which stopped
+    being true on 2026-08-29 when ``POST /upload`` was measured and
+    :class:`~rmspec.device.usb.UsbUploader` began reporting it. It stays because a use case
+    that branches on visibility must be exercisable against either outcome without choosing a
+    transport, and because a double that hard-coded one member would silently narrow the port
+    to whichever adapter it happened to copy.
 
 ``reject_with``
     ``DeviceUploadRejected`` carrying the device's own message, which is the only diagnosis
     that error has and the only thing a shell can show a user.
 
+``image`` on the search-index source
+    Both states the port distinguishes, held as data. ``None`` is a device that has never
+    built an index, and it must never be spelled ``b""``: the reading half turns an image it
+    cannot open into ``StoreUnavailableError``, so collapsing "no index" onto "empty image"
+    would turn the honest state of a fresh device into a store failure. Over SSH the two
+    arrive by different routes -- an absent path and a zero-length file -- and a double that
+    could only produce one of them would leave the other asserted nowhere.
+
 ``honours_parent``
     ``DeviceOperationUnsupported`` from ``upload`` when the destination cannot be honoured.
     ``DocumentUploader`` forbids degrading a request -- placing at the root and reporting
-    success is the exact failure the "no ``accepts()``" rule exists to prevent -- and no
-    shipped adapter can produce it: the SSH uploader always writes ``parent`` into the
-    ``.metadata``, and the USB uploader deliberately does not exist. Without this seam the
-    rule is stated by the port and checked by nothing.
+    success is the exact failure the "no ``accepts()``" rule exists to prevent. This seam
+    likewise predates a shipped adapter that could produce the refusal at all: the SSH
+    uploader always writes ``parent`` into the ``.metadata`` it composes, and until the upload
+    route was measured there was no second uploader. :class:`~rmspec.device.usb.UsbUploader`
+    now refuses a destination for real, so the rule is no longer checked here alone -- and
+    this seam stays because a use case has to be exercisable against both behaviours from one
+    double, which is what keeps a test from having to pick a transport to make its point.
 
 Call counters, on every double
     That one command is one handshake. ``list_documents()`` followed by ``get_document()``
@@ -118,6 +136,7 @@ __all__ = [
     "IN_MEMORY_TRANSPORT",
     "UPLOAD_OPERATION",
     "FakeRemoteShell",
+    "FakeSearchIndexSource",
     "InMemoryDeviceCatalog",
     "InMemoryDeviceFactsSource",
     "InMemoryDocumentUploader",
@@ -137,6 +156,11 @@ IN_MEMORY_ENDPOINT: Final = "in-memory"
 #: The operation name ``DeviceOperationUnsupported`` carries out of ``upload``. The same
 #: literal the composition root uses when no uploader is bindable at all, so a shell
 #: matching on it sees one spelling.
+#:
+#: :data:`rmspec.device.usb.UPLOAD_OPERATION` spells it a second time and
+#: ``test_device_conformance.py`` asserts the two agree. They are not shared because importing
+#: the adapter module here would pull ``httpx`` into the import graph of every fake, and the
+#: docstring above promises the five port doubles need only ``rmspec.domain``.
 UPLOAD_OPERATION: Final = "upload"
 
 
@@ -629,11 +653,75 @@ class InMemoryDeviceFactsSource:
         return self.resources
 
 
+class FakeSearchIndexSource:
+    """The device's search-index image held as bytes, or its absence held as ``None``.
+
+    Satisfies :class:`~rmspec.domain.ports.device.SearchIndexSource`. The simplest double
+    here, and it stays simple on purpose: the port is a transport with one total method, so
+    the only states worth seeding are "an image", "no index" and "the transport died".
+
+    It does not decode what it carries and neither does anything else in this package.
+    Integrity is the reader's job -- :class:`rmspec.persistence.DeviceSearchIndex` must run
+    ``PRAGMA quick_check`` before trusting a row, because an image truncated to ~99% of its
+    length deserialises cleanly and returns confidently wrong rows. A double that validated
+    the bytes it was handed would let a test pass an image the real adapter would have carried
+    across untouched.
+
+    Parameters
+    ----------
+    image
+        What :meth:`read_index` returns. Defaults to ``None``: a device that has never built
+        an index, which is a real and unremarkable state, so the seedless double is a legal
+        device rather than an empty one.
+    fail_with
+        A whole-transport failure raised instead of answering, or ``None``. Distinct from
+        ``image=None``, which is the point: an unplugged tablet must not read as a tablet with
+        no index.
+    """
+
+    def __init__(
+        self,
+        *,
+        image: bytes | None = None,
+        fail_with: DeviceError | None = None,
+    ) -> None:
+        self.image = image
+        """The image :meth:`read_index` returns, or ``None`` for a device with no index."""
+
+        self.fail_with = fail_with
+        """The whole-transport failure :meth:`read_index` raises, or ``None``."""
+
+        self.read_calls = 0
+        """How many times :meth:`read_index` was entered, faults included. The port is
+        ``Scope.REQUEST`` and its caller is expected to read once and reuse, including
+        memoising a ``None``, so this is the only evidence a caller did."""
+
+    def read_index(self) -> bytes | None:
+        """Return the seeded image, or the seeded absence.
+
+        Returns
+        -------
+        bytes | None
+            ``image``, unchanged. Never ``b""`` in place of ``None``, and never ``None`` in
+            place of a seeded ``b""`` -- the two are different device states and the port
+            distinguishes them.
+
+        Raises
+        ------
+        DeviceError
+            ``fail_with`` was set. A dead transport raises rather than reporting no index,
+            which is the same rule every other double here follows.
+        """
+        self.read_calls += 1
+        _raise_if(self.fail_with)
+        return self.image
+
+
 class FakeRemoteShell:
     """An in-memory :class:`~rmspec.device._shell.RemoteShell` with one seam per property.
 
-    Satisfies the Protocol structurally and owns no socket. The four SSH adapters take the
-    Protocol and nothing else that reaches a wire, so binding this exercises all four end to
+    Satisfies the Protocol structurally and owns no socket. The five SSH adapters take the
+    Protocol and nothing else that reaches a wire, so binding this exercises all five end to
     end -- which matters because the tablet is attached to the machine this suite runs on,
     and a test that opened a real session would *pass*.
 

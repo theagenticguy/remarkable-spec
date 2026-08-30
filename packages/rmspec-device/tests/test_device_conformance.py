@@ -1,7 +1,7 @@
 """The port contracts, bound to every implementation this package ships.
 
-Eleven bindings: the three USB adapters over ``httpx.MockTransport``, the four SSH adapters
-over the shipped in-memory shell, and the four doubles. The assertions are literally the same
+Fourteen bindings: the four USB adapters over ``httpx.MockTransport``, the five SSH adapters
+over the shipped in-memory shell, and the five doubles. The assertions are literally the same
 objects, imported from ``device_contracts.py``, so a double that quietly narrowed or widened
 its behaviour fails here rather than three packages away -- and so does an adapter.
 
@@ -16,8 +16,12 @@ a handler that raises ``httpx.ConnectError`` and lets ``_errors.translate_httpx`
 -- which is a better test than injection would have been, because the translation is on the
 path being asserted.
 
-The deliberate absence is asserted too. ``DocumentUploader`` has exactly one binding, and the
-last section of this file fails if a later reader "fixes" that.
+The last section asserts the shape of the write surface and one genuine absence. It used to
+assert that ``DocumentUploader`` and ``SearchIndexSource`` each had exactly one binding, for
+two different reasons -- an unprobed write route and a route family that does not exist. Only
+the second reason survived: ``POST /upload`` was measured on 2026-08-29, so the uploader
+assertion is replaced by one that pins **two** bindings and the different half each of them
+refuses, while the search-index assertion stands unchanged.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from device_contracts import (
     PAGE_THREE,
     PAGE_TWO,
     PDF_UUID,
+    SEARCH_INDEX_IMAGE,
     UNDERLAY,
     BoundCatalog,
     BoundUploader,
@@ -47,6 +52,7 @@ from device_contracts import (
     DeviceFactsSourceContract,
     DocumentUploaderContract,
     RawBundleSourceContract,
+    SearchIndexSourceContract,
     SkipCase,
     an_upload,
 )
@@ -56,10 +62,12 @@ from rmspec.device import (
     SshBundleSource,
     SshCatalog,
     SshFacts,
+    SshSearchIndexSource,
     SshUploader,
     UsbBundleSource,
     UsbCatalog,
     UsbFacts,
+    UsbUploader,
     UsbWebApi,
     usb,
 )
@@ -71,6 +79,7 @@ from rmspec.device.addresses import (
     OS_RELEASE,
     PROC_MEMINFO,
     SCENE_SUFFIX,
+    SEARCH_INDEX_NAME,
     SOC_MACHINE,
     Endpoint,
     RemoteCommand,
@@ -84,15 +93,24 @@ from rmspec.device.ssh import (
     REFRESH_TEMPLATE,
     SERIAL_FIELD,
     STORAGE_TEMPLATE,
+    UNPLACEABLE_MEDIA,
+    UNPLACEABLE_OPERATION,
 )
 from rmspec.device.testing import (
     FakeRemoteShell,
+    FakeSearchIndexSource,
     InMemoryDeviceCatalog,
     InMemoryDeviceFactsSource,
     InMemoryDocumentUploader,
     InMemoryRawBundleSource,
 )
-from rmspec.domain.errors import DeviceTransferInterrupted, TransportKind
+from rmspec.device.testing import doubles as device_doubles
+from rmspec.device.usb import UPLOAD_CREATED, UPLOAD_FIELD, UPLOAD_MEDIA_TYPES, UPLOAD_ROUTE
+from rmspec.domain.errors import (
+    DeviceOperationUnsupported,
+    DeviceTransferInterrupted,
+    TransportKind,
+)
 from rmspec.domain.ports.device import (
     DeviceDocument,
     DeviceFacts,
@@ -100,18 +118,30 @@ from rmspec.domain.ports.device import (
     DeviceFolder,
     DevicePageSource,
     DeviceResources,
+    LibraryRefresh,
     SkippedEntry,
     SkipReason,
+    UploadMedia,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from rmspec.domain.errors import DeviceError
-    from rmspec.domain.ports.device import DeviceCatalog, DeviceFactsSource, RawBundleSource
+    from rmspec.domain.ports.device import (
+        DeviceCatalog,
+        DeviceFactsSource,
+        RawBundleSource,
+        SearchIndexSource,
+    )
 
 ROOT = RemotePath.root()
-"""The xochitl root both SSH bindings build their synthetic store under."""
+"""The xochitl root every SSH binding builds its synthetic store under."""
+
+INDEX_PATH = ROOT.child(SEARCH_INDEX_NAME)
+"""Where the search index sits: directly under the root, no document directory involved.
+Composed here rather than spelled, so the binding cannot pass while the adapter reads a path
+this file does not agree with."""
 
 SKIPPED_UUID = "ffffffff-0000-4000-8000-000000000006"
 """The entry each binding makes unrepresentable, one way per ``SkipReason``."""
@@ -439,6 +469,22 @@ def archive_response(payload: bytes, *, announced: int | None = None) -> httpx.R
     )
 
 
+def created() -> httpx.Response:
+    """Answer one ``POST /upload`` as measured: ``201`` and a body carrying no identifier.
+
+    Returns
+    -------
+    httpx.Response
+        ``201 {"status": "Upload successful"}``, which is verbatim what firmware 3.27.3.0
+        answered to a part named ``file`` -- for a PDF and for a ``.rmdoc`` alike.
+    """
+    return httpx.Response(
+        UPLOAD_CREATED,
+        content=json.dumps({"status": "Upload successful"}).encode(),
+        headers={"content-type": JSON_CONTENT_TYPE},
+    )
+
+
 def refused() -> httpx.Response:
     """Answer a routed refusal: the folder is listed, and its children are not served.
 
@@ -546,6 +592,43 @@ def dead_tablet(failure: DeviceError) -> Callable[[httpx.Request], httpx.Respons
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError(str(failure), request=request)
+
+    return handler
+
+
+def _upload_tablet(
+    placed: list[str],
+    *,
+    recorder: list[httpx.Request] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Build a handler that accepts one upload and routes nothing else.
+
+    Deliberately narrower than :func:`tablet`: this fake serves exactly the one route the
+    uploader is allowed to touch, so a request to any other path fails the test rather than
+    being answered by a listing.
+
+    Parameters
+    ----------
+    placed
+        Appended to once per accepted upload, which is the uploader binding's placement
+        counter.
+    recorder
+        Every request, for the assertions about the multipart body this package builds.
+
+    Returns
+    -------
+    Callable[[httpx.Request], httpx.Response]
+        The handler, for ``httpx.MockTransport``.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if recorder is not None:
+            recorder.append(request)
+        path = request.url.raw_path.decode()
+        if request.method == "POST" and path == UPLOAD_ROUTE:
+            placed.append(path)
+            return created()
+        pytest.fail(f"the fake tablet was asked for {request.method} {path!r}, which it refuses")
 
     return handler
 
@@ -922,6 +1005,77 @@ class TestUsbFacts(DeviceFactsSourceContract):
         )
 
 
+class TestUsbUploader(DocumentUploaderContract):
+    """The uploader contract over ``POST /upload``, the route xochitl imports through."""
+
+    def uploader_for(self, *, honours_parent: bool) -> BoundUploader | None:
+        """Return the uploader, or ``None`` when the behaviour asked for is unreachable.
+
+        Parameters
+        ----------
+        honours_parent
+            Whether the uploader must honour a destination folder.
+
+        Returns
+        -------
+        BoundUploader | None
+            The adapter, or ``None`` when a destination is required: no folder parameter
+            exists in the route, in the SPA's own call to it, or in the response, and the
+            created entry carries ``Parent == ""``. This is the implementation the contract's
+            "cannot honour a destination" branch was written for -- it used to be reachable
+            only through the double.
+        """
+        if honours_parent:
+            return None
+        placed: list[str] = []
+        uploader = UsbUploader(api=web_api(_upload_tablet(placed)))
+        return BoundUploader(uploader=uploader, placed=lambda: len(placed))
+
+    def test_the_multipart_body_is_one_part_named_file(self) -> None:
+        """The multipart body is one part named file."""
+        # Measured: one part named `document` carrying the same PDF is answered
+        # 400 {"error": "No file sent"}, so the field name is the contract and not a
+        # convention. The filename is `request.name` verbatim, because for a PDF that string
+        # *becomes* the visible name -- extension included, or missing if the caller left it
+        # out.
+        sent: list[httpx.Request] = []
+        uploader = UsbUploader(api=web_api(_upload_tablet([], recorder=sent)))
+
+        uploader.upload(an_upload(name="Design review.pdf"))
+
+        body = sent[0].content.decode("latin-1")
+        assert sent[0].method == "POST"
+        assert sent[0].url.raw_path.decode() == UPLOAD_ROUTE
+        assert f'name="{UPLOAD_FIELD}"' in body
+        assert 'filename="Design review.pdf"' in body
+        assert UPLOAD_MEDIA_TYPES[UploadMedia.PDF] in body
+
+    def test_the_receipt_reports_no_identifier_and_no_forced_refresh(self) -> None:
+        """The receipt reports no identifier and no forced refresh."""
+        # The 201 body is {"status": "Upload successful"} and carries no id, and
+        # GET /documents/ went 10 -> 11 root entries with no restart and no stop of xochitl.
+        # Both halves are measurements, not readings of a status code.
+        bound = self._require(honours_parent=False)
+
+        receipt = bound.uploader.upload(an_upload())
+
+        assert receipt.doc_uuid is None
+        assert receipt.library_refresh is LibraryRefresh.ALREADY_VISIBLE
+
+    def test_a_refused_destination_sends_nothing_at_all(self) -> None:
+        """A refused destination sends nothing at all."""
+        # Stronger than the contract's `placed() == 0`, which only proves no document was
+        # created: this proves no *request* left the process, which is what "raised before
+        # anything is written" has to mean for a route that cannot be undone.
+        sent: list[httpx.Request] = []
+        uploader = UsbUploader(api=web_api(_upload_tablet([], recorder=sent)))
+
+        with pytest.raises(DeviceOperationUnsupported):
+            uploader.upload(an_upload(parent_uuid=FOLDER_UUID))
+
+        assert sent == []
+
+
 # ───────────────────────────── the SSH bindings ─────────────────────────────
 
 
@@ -1100,7 +1254,20 @@ class TestSshFacts(DeviceFactsSourceContract):
 
 
 class TestSshUploader(DocumentUploaderContract):
-    """The uploader contract over the one transport that can write to the tablet."""
+    """The uploader contract over the transport that composes the sidecars itself."""
+
+    def unplaceable_media(self) -> frozenset[UploadMedia]:
+        """Name the one media this transport refuses.
+
+        Returns
+        -------
+        frozenset[UploadMedia]
+            The archive. It is a container of a whole document rather than an underlay, so
+            placing one here would mean unpacking it and writing its members -- a different
+            operation, and the reason the refusal names ``USB_WEB_API`` as the transport that
+            can.
+        """
+        return frozenset({UNPLACEABLE_MEDIA})
 
     def uploader_for(self, *, honours_parent: bool) -> BoundUploader | None:
         """Return the uploader, or ``None`` when the behaviour asked for is unreachable.
@@ -1115,8 +1282,9 @@ class TestSshUploader(DocumentUploaderContract):
         BoundUploader | None
             The adapter, or ``None``: this adapter writes ``parent`` into the ``.metadata``
             unconditionally, so it *always* honours a destination and cannot be made to
-            refuse one. That branch of the contract is covered by the double, which exists
-            partly for this.
+            refuse one. That branch of the contract is covered by
+            :class:`~rmspec.device.usb.UsbUploader`, whose route has no destination parameter
+            at all, and by the double.
         """
         if not honours_parent:
             return None
@@ -1146,6 +1314,63 @@ class TestSshUploader(DocumentUploaderContract):
         uploader.upload(an_upload())
         commit = ROOT.child(MINTED_UUID).with_suffix(METADATA_SUFFIX).value
         assert shell.log[-2:] == [f"write {commit}", f"run {REFRESH_TEMPLATE}"]
+
+
+class TestSshSearchIndexSource(SearchIndexSourceContract):
+    """The search-index contract over one SFTP read of one file under the xochitl root."""
+
+    @pytest.fixture
+    def source(self) -> SearchIndexSource:
+        """Return a source over a device holding the synthetic index image.
+
+        Returns
+        -------
+        SearchIndexSource
+            The adapter, which ``ty`` checks against the Protocol here. Constructed
+            positionally with no ``root``, so the default is on the path being asserted.
+        """
+        return SshSearchIndexSource(FakeRemoteShell(files={INDEX_PATH.value: SEARCH_INDEX_IMAGE}))
+
+    def absent_source(self) -> SearchIndexSource:
+        """Return a source over a store holding no index file at all.
+
+        Returns
+        -------
+        SearchIndexSource
+            The adapter. The shell reports an absent path as
+            ``PathUnreadableError``, exactly as the real one does for the ``errno`` paramiko
+            attaches to that SFTP status code, so the ``None`` is *converted* here rather
+            than injected.
+        """
+        return SshSearchIndexSource(FakeRemoteShell())
+
+    def failing_source(self, failure: DeviceError) -> SearchIndexSource:
+        """Return a source whose shell fails on every operation.
+
+        Parameters
+        ----------
+        failure
+            The failure the contract seeded, raised verbatim.
+
+        Returns
+        -------
+        SearchIndexSource
+            The adapter.
+        """
+        return SshSearchIndexSource(FakeRemoteShell(fail_with=failure))
+
+    def test_one_read_of_one_path_and_nothing_else(self) -> None:
+        """One read of one path and nothing else."""
+        # No `ls` deciding presence first, unlike every other adapter in this module: absence
+        # *is* an answer this port can give, so a listing would be a round trip that changes
+        # nothing. Asserted on the ordered log, because the image is 503,808 bytes on the
+        # measured device and a second read per page is the cost REQUEST scope exists to
+        # avoid.
+        shell = FakeRemoteShell(files={INDEX_PATH.value: SEARCH_INDEX_IMAGE})
+
+        SshSearchIndexSource(shell).read_index()
+
+        assert shell.log == [f"read {INDEX_PATH.value}"]
 
 
 # ───────────────────────────── the in-memory bindings ─────────────────────────────
@@ -1356,7 +1581,48 @@ class TestInMemoryDocumentUploader(DocumentUploaderContract):
         return BoundUploader(uploader=uploader, placed=lambda: len(uploader.uploaded))
 
 
-# ───────────────────────────── the deliberate absence ─────────────────────────────
+class TestFakeSearchIndexSource(SearchIndexSourceContract):
+    """The search-index contract over one seeded value."""
+
+    @pytest.fixture
+    def source(self) -> SearchIndexSource:
+        """Return the double, holding the synthetic index image.
+
+        Returns
+        -------
+        SearchIndexSource
+            The double, which ``ty`` checks against the Protocol here.
+        """
+        return FakeSearchIndexSource(image=SEARCH_INDEX_IMAGE)
+
+    def absent_source(self) -> SearchIndexSource:
+        """Return the double as a device that has never built an index.
+
+        Returns
+        -------
+        SearchIndexSource
+            The double, seeded with nothing -- which is its default, because that state is a
+            legal device and not an empty one.
+        """
+        return FakeSearchIndexSource()
+
+    def failing_source(self, failure: DeviceError) -> SearchIndexSource:
+        """Return a double whose transport fails.
+
+        Parameters
+        ----------
+        failure
+            The failure the contract seeded, raised verbatim.
+
+        Returns
+        -------
+        SearchIndexSource
+            The double.
+        """
+        return FakeSearchIndexSource(fail_with=failure)
+
+
+# ─────────────────── the write surface, and one deliberate absence ───────────────────
 
 
 def _download_route(doc_uuid: str, /) -> str:
@@ -1394,32 +1660,142 @@ def _looks_like_an_uploader(candidate: object, /) -> bool:
     return callable(getattr(candidate, "upload", None))
 
 
-def test_the_package_binds_exactly_one_document_uploader() -> None:
-    """The package binds exactly one document uploader."""
-    # POST /upload has never been probed in any form: the firmware ignores the HTTP request
-    # method, so a GET to that path could not have been proven non-mutating, and its
-    # multipart field name, accepted content types and response body are all unmeasured.
-    # The absence *is* the design -- ports/device.py expresses capability asymmetry as which
-    # ports exist -- so it is asserted rather than left to a docstring somebody deletes.
+def test_the_package_binds_exactly_two_document_uploaders() -> None:
+    """The package binds exactly two document uploaders."""
+    # This assertion used to read `== ["SshUploader"]`, on the premise that POST /upload had
+    # never been probed in any form and that a guessed multipart body was not a trade this
+    # package would make. Retired by measurement on 2026-08-29: the route was read out of the
+    # tablet's own SPA bundle and probed four ways, and there is nothing left to guess.
+    # `ports/device.py` still expresses capability asymmetry as which bindings exist, so the
+    # replacement pins the pair and the two tests below pin what each of them refuses.
     uploaders = [
         name
         for name in rmspec.device.__all__
         if _looks_like_an_uploader(getattr(rmspec.device, name))
     ]
-    assert uploaders == ["SshUploader"]
+    assert uploaders == ["SshUploader", "UsbUploader"]
 
 
-def test_no_usb_name_can_write_to_the_device() -> None:
-    """No usb name can write to the device."""
-    assert usb.__all__ == ["UsbBundleSource", "UsbCatalog", "UsbFacts", "UsbWebApi"]
+def test_exactly_one_usb_name_can_write_to_the_device() -> None:
+    """Exactly one usb name can write to the device."""
+    # The module used to export nothing that could write, and this asserted that. One name can
+    # now, and it is still exactly one: the transport's `post_file` is not an uploader, so a
+    # reader looking for "what in here creates a document" gets a single answer.
+    assert usb.__all__ == [
+        "UPLOAD_CREATED",
+        "UPLOAD_FIELD",
+        "UPLOAD_MEDIA_TYPES",
+        "UPLOAD_OPERATION",
+        "UPLOAD_ROUTE",
+        "UPLOAD_TIMEOUT_SECONDS",
+        "UsbBundleSource",
+        "UsbCatalog",
+        "UsbFacts",
+        "UsbUploader",
+        "UsbWebApi",
+    ]
+    writers = [name for name in usb.__all__ if _looks_like_an_uploader(getattr(usb, name))]
+    assert writers == ["UsbUploader"]
+
+
+def test_the_two_uploaders_refuse_different_halves_of_the_same_port() -> None:
+    """The two uploaders refuse different halves of the same port."""
+    # The asymmetry is per-request data, so it cannot be expressed by which bindings exist --
+    # only by what each raises. Asserted against both real adapters in one place, because the
+    # pair is the design and a reader who sees only one of them learns the wrong lesson.
+    usb_uploader = UsbUploader(api=web_api(_upload_tablet([])))
+    ssh_uploader = SshUploader(
+        shell=FakeRemoteShell(outputs=UPLOAD_COMMANDS),
+        root=ROOT,
+        now_ms=lambda: NOW_MS,
+        new_uuid=lambda: MINTED_UUID,
+    )
+
+    with pytest.raises(DeviceOperationUnsupported) as refused_destination:
+        usb_uploader.upload(an_upload(parent_uuid=FOLDER_UUID))
+    with pytest.raises(DeviceOperationUnsupported) as refused_archive:
+        ssh_uploader.upload(an_upload(media=UNPLACEABLE_MEDIA))
+
+    assert refused_destination.value.supported_by == (TransportKind.SSH,)
+    assert refused_archive.value.supported_by == (TransportKind.USB_WEB_API,)
+    # And each places what the other refuses, so neither refusal is a general inability.
+    assert ssh_uploader.upload(an_upload(parent_uuid=FOLDER_UUID)).doc_uuid == MINTED_UUID
+    assert usb_uploader.upload(an_upload(media=UNPLACEABLE_MEDIA)).media is UNPLACEABLE_MEDIA
+
+
+def test_the_two_uploaders_report_the_visibility_their_wires_actually_produce() -> None:
+    """The two uploaders report the visibility their wires actually produce."""
+    # Measured, not assumed. USB: GET /documents/ went 10 -> 11 root entries with no restart
+    # and no stop of xochitl, because xochitl performs the import itself. SSH: nothing in the
+    # store is indexed until the tablet UI process is restarted, which this adapter does.
+    usb_uploader = UsbUploader(api=web_api(_upload_tablet([])))
+    ssh_uploader = SshUploader(
+        shell=FakeRemoteShell(outputs=UPLOAD_COMMANDS),
+        root=ROOT,
+        now_ms=lambda: NOW_MS,
+        new_uuid=lambda: MINTED_UUID,
+    )
+
+    assert usb_uploader.upload(an_upload()).library_refresh is LibraryRefresh.ALREADY_VISIBLE
+    assert ssh_uploader.upload(an_upload()).library_refresh is LibraryRefresh.VISIBILITY_FORCED
+
+
+def test_the_refusal_vocabulary_is_one_spelling_across_the_adapters_and_the_doubles() -> None:
+    """The refusal vocabulary is one spelling across the adapters and the doubles."""
+    # `rmspec.device.testing.doubles` cannot import the adapter module -- that would pull httpx
+    # into every fake's import graph -- so the operation name is spelled twice. This is what
+    # keeps the two copies from drifting into a shell that matches on one of them.
+    assert device_doubles.UPLOAD_OPERATION == usb.UPLOAD_OPERATION
+    # And the SSH media refusal is the same word plus what was refused, so a shell reporting
+    # either failure prints one vocabulary rather than two.
+    assert f"{usb.UPLOAD_OPERATION} {UNPLACEABLE_MEDIA.value}" == UNPLACEABLE_OPERATION
+
+
+def _looks_like_a_search_index_source(candidate: object, /) -> bool:
+    """Report whether a name from the package satisfies ``SearchIndexSource`` structurally.
+
+    Parameters
+    ----------
+    candidate
+        A name exported by :mod:`rmspec.device`.
+
+    Returns
+    -------
+    bool
+        ``True`` when it has a callable ``read_index``.
+    """
+    return callable(getattr(candidate, "read_index", None))
+
+
+def test_the_package_binds_exactly_one_search_index_source() -> None:
+    """The package binds exactly one search index source."""
+    # The mirror of the uploader assertion above, and the absence has a stronger cause: not an
+    # unprobed route but *no route*. That firmware's HTTP route table is closed at six families
+    # and none of them serves a file from the xochitl tree, so a USB binding here would be a
+    # method with nothing to call. Asserted rather than left to a docstring, so a later reader
+    # cannot "fix" the omission without failing a test.
+    sources = [
+        name
+        for name in rmspec.device.__all__
+        if _looks_like_a_search_index_source(getattr(rmspec.device, name))
+    ]
+    assert sources == ["SshSearchIndexSource"]
+
+
+def test_no_usb_name_can_serve_the_search_index() -> None:
+    """No usb name can serve the search index."""
     for name in usb.__all__:
-        assert not _looks_like_an_uploader(getattr(usb, name))
+        assert not _looks_like_a_search_index_source(getattr(usb, name))
 
 
-def test_the_usb_transport_has_exactly_two_read_only_verbs() -> None:
-    """The usb transport has exactly two read only verbs."""
+def test_the_usb_transport_has_two_read_verbs_and_exactly_one_write_verb() -> None:
+    """The usb transport has two read verbs and exactly one write verb."""
+    # This asserted `== {"get", "head"}` under the heading "exactly two read-only verbs", whose
+    # premise was that the write route was unprobed. Retired by measurement; the replacement is
+    # stronger, because it pins the *count* of write verbs rather than their absence -- a
+    # second one would still fail here.
     verbs = {name for name in vars(UsbWebApi) if not name.startswith("_")}
-    assert verbs == {"get", "head"}
+    assert verbs == {"get", "head", "post_file"}
 
 
 def test_the_reference_instant_survives_both_wire_spellings() -> None:

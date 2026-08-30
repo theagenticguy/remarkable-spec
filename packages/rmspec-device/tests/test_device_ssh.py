@@ -1,6 +1,6 @@
-"""The four SSH adapters, against a shell that is a dict and never a socket.
+"""The five SSH adapters, against a shell that is a dict and never a socket.
 
-Five properties carry this file.
+Six properties carry this file.
 
 **The commands are BusyBox-safe, and their exact text is pinned.** The device runs BusyBox
 1.36.1 with no ``file``, ``sqlite3`` or ``python3``, and no GNU long options -- ``head -25``
@@ -25,6 +25,13 @@ point is that the diagnosis is decided by what the store held.
 makes an identifier a document, so it is written last; the fake records one ordered log
 across commands, reads, listings and writes, and the upload tests assert that log -- including
 that a failure at step 3 leaves no ``.metadata`` behind.
+
+**An absent search index is data, and a dead session is not.** ``PathUnreadableError`` is the
+seam that keeps those apart, and :class:`~rmspec.device.ssh.SshSearchIndexSource` is the one
+adapter whose per-path answer is a plain ``None`` rather than a ``SkippedEntry`` or a
+``DeviceProtocolError``. The containment section below therefore covers it in the shape its
+port has: it must never raise the package-private error, and it must never answer ``None`` to
+a failure that describes the session.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
+from device_contracts import SEARCH_INDEX_IMAGE
 
 from rmspec.device import ssh as ssh_module
 from rmspec.device._shell import PathUnreadableError
@@ -44,6 +52,7 @@ from rmspec.device.addresses import (
     OS_RELEASE,
     PROC_MEMINFO,
     SCENE_SUFFIX,
+    SEARCH_INDEX_NAME,
     SOC_MACHINE,
     RemoteCommand,
     RemotePath,
@@ -57,15 +66,19 @@ from rmspec.device.ssh import (
     REFRESH_TEMPLATE,
     SERIAL_FIELD,
     STORAGE_TEMPLATE,
+    UNPLACEABLE_MEDIA,
+    UNPLACEABLE_OPERATION,
     SshBundleSource,
     SshCatalog,
     SshFacts,
+    SshSearchIndexSource,
     SshUploader,
 )
 from rmspec.domain.errors import (
     DeviceAuthFailed,
     DeviceDocumentNotFound,
     DeviceError,
+    DeviceOperationUnsupported,
     DeviceProtocolError,
     DeviceTransferInterrupted,
     DeviceUnreachable,
@@ -81,6 +94,7 @@ from rmspec.domain.ports.device import (
     DocumentUploader,
     LibraryRefresh,
     RawBundleSource,
+    SearchIndexSource,
     SkipReason,
     UploadMedia,
     UploadRequest,
@@ -93,6 +107,10 @@ if TYPE_CHECKING:
 
 ROOT = RemotePath.root()
 ENDPOINT = "10.11.99.1:22"
+
+#: Where the search index sits: one child of the xochitl root, composed the way the adapter
+#: composes it so a test cannot pass while agreeing with itself and not with the adapter.
+INDEX_PATH = ROOT.child(SEARCH_INDEX_NAME)
 
 DOC = "b8ff2c3d-0a1e-4f77-9c21-6a0e5d4b7f10"
 PDF_DOC = "7e1c4a90-55b2-4d31-8f6e-0a2b3c4d5e6f"
@@ -650,18 +668,20 @@ def upload_shell(**seams: object) -> FakeShell:
 # ─────────────────────────── the ports are satisfied ───────────────────────────
 
 
-def test_the_four_adapters_satisfy_the_four_device_ports():
+def test_the_five_adapters_satisfy_the_five_device_ports():
     """``ty`` checks these annotations; the assertions keep the bindings from being dead."""
     shell = notebook_store()
     listing: DeviceCatalog = catalog(shell)
     source: RawBundleSource = bundles(shell)
     writer: DocumentUploader = uploader(shell)
     facts: DeviceFactsSource = SshFacts(shell=shell)
+    index: SearchIndexSource = SshSearchIndexSource(shell)
 
     assert callable(listing.list_documents)
     assert callable(source.load_bundle)
     assert callable(writer.upload)
     assert callable(facts.read_facts)
+    assert callable(index.read_index)
 
 
 def test_the_fake_shell_satisfies_the_remote_shell_protocol():
@@ -724,6 +744,17 @@ def test_a_bundle_over_an_entirely_unreadable_store_still_reports_a_domain_error
         bundles(shell).load_bundle(DOC)
 
     assert not isinstance(raised.value, PathUnreadableError)
+
+
+def test_the_index_source_converts_the_package_private_error_into_the_ports_own_absence():
+    """The fifth adapter's conversion site, whose per-path answer is ``None``.
+
+    It cannot join the parametrized set above, because that set asserts a *raise*: this port's
+    return type spells "no such file" as a value, so the containment claim here is that
+    nothing escapes at all -- neither the package-private error nor a domain one -- for a store
+    that holds no index.
+    """
+    assert SshSearchIndexSource(FakeShell()).read_index() is None
 
 
 # ─────────────────────────── the command table ───────────────────────────
@@ -1699,6 +1730,40 @@ def test_an_epub_is_placed_beside_its_sidecars_under_the_bare_type():
     assert json.loads(shell.written(document_paths(ROOT, MINTED).content))["fileType"] == "epub"
 
 
+def test_an_archive_is_refused_before_a_single_path_is_touched():
+    """Placing a ``.rmdoc`` here would be a different operation, not a third ``media`` value.
+
+    The two placeable members are underlays: the payload goes to one path and this adapter
+    composes the ``.content`` and ``.metadata`` that describe it. An archive carries its own
+    copies of both plus one ``.rm`` per page, so placing one means unzipping it, resolving a
+    uuid that already exists in the store, and re-keying pages -- with failure modes this
+    signature promises nothing about. The refusal names the transport that *can* place one,
+    because xochitl's own import route unpacks it.
+    """
+    shell = upload_shell()
+
+    with pytest.raises(DeviceOperationUnsupported) as raised:
+        uploader(shell).upload(request_for(media=UNPLACEABLE_MEDIA))
+
+    assert raised.value.operation == UNPLACEABLE_OPERATION
+    assert raised.value.transport is TransportKind.SSH
+    assert raised.value.supported_by == (TransportKind.USB_WEB_API,)
+    assert "usb_web_api" in str(raised.value.remediation)
+    # Nothing at all happened: no directory, no sidecar, no orphan to go and find.
+    assert shell.log == []
+
+
+@pytest.mark.parametrize("media", [UploadMedia.PDF, UploadMedia.EPUB])
+def test_the_two_underlay_media_are_still_placed(media: UploadMedia):
+    """The narrowing is one member wide, asserted so it cannot quietly become two."""
+    shell = upload_shell()
+
+    receipt = uploader(shell).upload(request_for(media=media, data=b"payload"))
+
+    assert receipt.media is media
+    assert (document_paths(ROOT, MINTED).underlay(media.value).value, b"payload") in shell.writes
+
+
 def test_an_uploaded_document_is_listed_by_the_catalog_that_reads_the_same_store():
     """End to end over one fake store: what was written is what a listing reports."""
     shell = upload_shell()
@@ -1869,3 +1934,147 @@ def test_an_auth_failure_keeps_the_key_source_it_carried():
 
     assert raised.value.key_source == "/home/user/.ssh/id_ed25519_remarkable"
     assert raised.value.user == "root"
+
+
+# ─────────────────────────── the search index ───────────────────────────
+
+
+def index_shell(**seams: object) -> FakeShell:
+    """Build a shell holding the search index directly under the root.
+
+    Parameters
+    ----------
+    **seams
+        Forwarded to :class:`FakeShell` -- ``refuse_reads``, ``fail_with``.
+
+    Returns
+    -------
+    FakeShell
+        The double. The store holds nothing else, because the adapter reads nothing else.
+    """
+    shell = shell_for({SEARCH_INDEX_NAME: SEARCH_INDEX_IMAGE})
+    for name, value in seams.items():
+        setattr(shell, name, frozenset(value) if isinstance(value, tuple) else value)
+    return shell
+
+
+def test_the_index_is_read_once_from_one_path_under_the_root():
+    # No `ls` first, unlike every other adapter here: absence *is* an answer this port can
+    # give, so a listing to decide presence would be a round trip that changes nothing. And
+    # exactly one read, because the image is 503,808 bytes on the measured device -- the port's
+    # REQUEST scope exists so a caller pays that once per command rather than once per page.
+    shell = index_shell()
+
+    image = SshSearchIndexSource(shell).read_index()
+
+    assert image == SEARCH_INDEX_IMAGE
+    assert shell.log == [f"read {INDEX_PATH.value}"]
+    assert shell.listings == []
+
+
+def test_a_device_with_no_index_answers_absence_rather_than_failing():
+    # The index is built by the tablet on its own schedule, so this is an ordinary condition
+    # and not an error. `TestNb` was measured with zero rows in an index built two hours
+    # earlier; a device that has built none at all is the same fact one step further back.
+    assert SshSearchIndexSource(shell_for({})).read_index() is None
+
+
+def test_a_read_the_device_refuses_is_absence_too():
+    # The real shell cannot tell "absent" from "permission denied": paramiko attaches an errno
+    # for both SFTP status codes and PathUnreadableError carries both. So a branch that
+    # answered only for absence would let the package-private error out of a port method on
+    # the other one -- which is exactly what this port's None is here to prevent.
+    shell = index_shell(refuse_reads=frozenset({INDEX_PATH.value}))
+
+    assert SshSearchIndexSource(shell).read_index() is None
+
+
+def test_a_zero_length_index_file_is_empty_bytes_and_not_absence():
+    # The opposite of this module's rule for a scene artifact, deliberately. There, None means
+    # "this page carries no ink" and a zero-byte artifact is how the firmware says it -- 86 of
+    # 194 real ones are exactly that. Here None means "this device has no index", so a
+    # zero-length file is a device that *has* one and whose one is unusable, which the reader
+    # reports as a store failure rather than as a miss that suppresses a paid read forever.
+    shell = shell_for({SEARCH_INDEX_NAME: b""})
+
+    assert SshSearchIndexSource(shell).read_index() == b""
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(
+            DeviceUnreachable(transport=TransportKind.SSH, endpoint=ENDPOINT, detail="no cable"),
+            id="unreachable",
+        ),
+        pytest.param(
+            DeviceAuthFailed(
+                transport=TransportKind.SSH,
+                user="root",
+                detail="refused",
+                key_source=None,
+            ),
+            id="auth",
+        ),
+        pytest.param(
+            DeviceProtocolError(
+                transport=TransportKind.SSH,
+                route=INDEX_PATH.value,
+                expected="a readable channel",
+                got="the channel closed mid-frame",
+            ),
+            id="protocol",
+        ),
+    ],
+)
+def test_a_failure_that_describes_the_session_propagates_rather_than_reading_as_no_index(
+    failure: DeviceError,
+):
+    # The whole point of the PathUnreadableError split. An unplugged tablet reported as "no
+    # index" would suppress the free prior silently and be indistinguishable from a cache miss
+    # on every page, forever -- the same defect class as a mid-walk disconnect returning a
+    # shrunken library with a success exit status.
+    shell = index_shell(fail_with=failure)
+
+    with pytest.raises(type(failure)) as raised:
+        SshSearchIndexSource(shell).read_index()
+
+    assert raised.value is failure
+
+
+def test_the_root_defaults_to_the_xochitl_root_and_is_still_a_parameter():
+    # Defaulted because this adapter is bound alone rather than paired with a catalog that has
+    # to be given the same root; still a parameter, so a synthetic tree is addressable and a
+    # future mirror transport needs no second copy of this read.
+    elsewhere = RemotePath.absolute("/home/root/synthetic-store")
+    shell = FakeShell(
+        files={
+            INDEX_PATH.value: SEARCH_INDEX_IMAGE,
+            elsewhere.child(SEARCH_INDEX_NAME).value: b"another store's index",
+        }
+    )
+
+    assert SshSearchIndexSource(shell).read_index() == SEARCH_INDEX_IMAGE
+    assert SshSearchIndexSource(shell, root=elsewhere).read_index() == b"another store's index"
+
+
+def test_nothing_in_this_module_imports_sqlite3():
+    """The reason this port hands over bytes instead of rows, asserted rather than remembered.
+
+    There is no ``sqlite3`` binary on the device and no BusyBox applet for one, so an
+    on-device query is not an available shape; and ``rmspec-device`` may not import
+    ``sqlite3`` either, which assigns the reading half to ``rmspec-persistence``.
+    ``tests/architecture/test_dependency_direction.py`` enforces the second half across the
+    whole package -- this is the local statement of it, next to the adapter that would be the
+    tempting place to break it.
+    """
+    tree = ast.parse(inspect.getsource(ssh_module))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+
+    assert imported, "found no imports, so this assertion would be vacuous"
+    assert "sqlite3" not in imported

@@ -51,6 +51,8 @@ from paramiko.ssh_exception import (
 from rmspec.device._errors import (
     BODY_EXCERPT_LIMIT,
     DEVICE_ERROR_KEY,
+    NO_FILE_SENT,
+    NO_FILE_SENT_DIAGNOSIS,
     NOT_FOUND_MESSAGES,
     PATH_FAILURES,
     PATH_UNREADABLE_DIAGNOSIS,
@@ -63,6 +65,7 @@ from rmspec.device._errors import (
     translate_http,
     translate_httpx,
     translate_ssh,
+    translate_upload,
 )
 from rmspec.domain.errors import (
     DeviceAuthFailed,
@@ -77,12 +80,16 @@ from rmspec.domain.errors import (
 ENDPOINT = "http://10.11.99.1"
 HOST = "10.11.99.1:22"
 ROUTE = "/download/{id}/rmdoc"
+UPLOAD_ROUTE = "/upload"
 DOC = "b8ff2c3d-0a1e-4f77-9c21-6a0e5d4b7f10"
+NAME = "Design review.pdf"
 USER = "root"
 
-#: The nine error strings measured on firmware 3.27.3.0 -- eight from live probes and
-#: "No file sent" from the firmware's own web bundle -- with the status each was observed
-#: under and the domain class it must produce.
+#: The nine error strings measured on firmware 3.27.3.0, with the status each was observed
+#: under and the domain class :func:`translate_http` must produce for it. "No file sent" was
+#: read out of the firmware's own web bundle first and became a live measurement on 2026-08-29,
+#: when POST /upload was probed; :func:`translate_upload` classifies it differently on the
+#: write route, and the test for that pair says why.
 MEASURED: list[tuple[str, int, type[DeviceError]]] = [
     ("No such entry", 400, DeviceDocumentNotFound),
     ("Can only download documents", 400, DeviceDocumentNotFound),
@@ -265,17 +272,25 @@ def test_an_unrouted_path_is_a_client_bug_not_a_missing_document():
 
 
 def test_the_upload_refusal_carries_the_devices_own_words():
+    """The read seam's mapping for the one string only the write handler produces.
+
+    Kept rather than narrowed when ``translate_upload`` arrived: this function classifies by
+    vocabulary alone and knows nothing about a route's direction, and the string cannot reach
+    it from any route this package reads. ``translate_upload`` explains why the *write* seam
+    answers differently.
+    """
     error = translate_http(
-        route="/upload",
+        route=UPLOAD_ROUTE,
         status=400,
-        body=error_body("No file sent"),
+        body=error_body(NO_FILE_SENT),
         endpoint=ENDPOINT,
         doc_uuid=DOC,
     )
 
     assert type(error) is DeviceUploadRejected
     assert error.name == DOC
-    assert error.device_message == "No file sent"
+    assert error.device_message == NO_FILE_SENT
+    assert NO_FILE_SENT in UPLOAD_REJECTED_MESSAGES
 
 
 def test_the_static_asset_message_is_matched_by_prefix():
@@ -302,6 +317,80 @@ def test_an_unrecognised_message_is_typed_and_carries_the_message_verbatim():
     assert error.expected == UNRECOGNISED_DIAGNOSIS
     assert message in error.got
     assert "418" in error.got
+
+
+# ─────────────────────────── translate_upload ───────────────────────────
+
+
+def test_the_write_seam_reports_no_file_sent_as_our_own_defect():
+    """Measured 2026-08-29: no body, and one part named ``document``, both answer this string.
+
+    By the time the real adapter provokes it the multipart body is one *this package* built, so
+    the fault is in our request and not in the caller's document. Reporting it as
+    ``DeviceUploadRejected`` would send a user to inspect a file that is fine.
+    """
+    error = translate_upload(
+        route=UPLOAD_ROUTE,
+        status=400,
+        body=error_body(NO_FILE_SENT),
+        endpoint=ENDPOINT,
+        name=NAME,
+    )
+
+    assert type(error) is DeviceProtocolError
+    assert error.route == UPLOAD_ROUTE
+    assert error.expected == NO_FILE_SENT_DIAGNOSIS
+    assert NO_FILE_SENT in error.got
+    assert "400" in error.got
+
+
+def test_the_write_seams_default_is_the_opposite_of_the_read_seams():
+    """The whole reason there are two functions rather than one with a flag.
+
+    An unmeasured message on a read route means "we cannot interpret the answer"; on the write
+    route it means "the device received the document and declined it". The vocabulary is a
+    documented lower bound, so the unmeasured case is the common one.
+    """
+    message = "Insufficient Storage"
+    body = error_body(message)
+
+    on_read = translate_http(route=ROUTE, status=507, body=body, endpoint=ENDPOINT, doc_uuid=DOC)
+    on_write = translate_upload(
+        route=UPLOAD_ROUTE, status=507, body=body, endpoint=ENDPOINT, name=NAME
+    )
+
+    assert type(on_read) is DeviceProtocolError
+    assert type(on_write) is DeviceUploadRejected
+    assert on_write.name == NAME
+    assert on_write.device_message == message
+
+
+@pytest.mark.parametrize("body", UNUSABLE_BODIES, ids=lambda raw: repr(raw)[:32])
+def test_a_write_answer_that_is_not_the_error_shape_names_no_refusal(body: bytes):
+    # There is no device message to carry, so there is nothing to report as a refusal: a
+    # captive portal's HTML is a protocol violation, not the tablet declining a document.
+    error = translate_upload(
+        route=UPLOAD_ROUTE, status=302, body=body, endpoint=ENDPOINT, name=NAME
+    )
+
+    assert type(error) is DeviceProtocolError
+    assert DEVICE_ERROR_KEY in error.expected
+
+
+def test_a_write_refusal_names_the_document_because_there_is_no_identifier_yet():
+    # The route creates, so nothing on the device has an id to name until it answers 201 -- and
+    # that body carries none either. The name the caller offered is the only subject available.
+    error = translate_upload(
+        route=UPLOAD_ROUTE,
+        status=500,
+        body=error_body("Unknown file"),
+        endpoint=ENDPOINT,
+        name=NAME,
+    )
+
+    assert type(error) is DeviceUploadRejected
+    assert error.name == NAME
+    assert DOC not in str(error)
 
 
 @pytest.mark.parametrize("body", UNUSABLE_BODIES, ids=lambda raw: repr(raw)[:32])

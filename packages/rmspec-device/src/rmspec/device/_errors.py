@@ -1,7 +1,7 @@
 """The one place a transport failure becomes a domain error.
 
 Every ``httpx``, ``paramiko``, ``socket`` and ``OSError`` failure in this package passes
-through one of the four functions here, and none of them escapes. That is the invariant
+through one of the five functions here, and none of them escapes. That is the invariant
 ``rmspec.domain.errors.DeviceError`` opens by stating, and this module is where it is
 enforced -- not spread across the adapters, because an adapter that translates inline
 grows one ``except`` clause per call site and the clauses drift.
@@ -39,11 +39,19 @@ message and keeps *status* only as evidence inside the error's ``got``.
 
 The vocabulary is a lower bound, not a closed set
 -------------------------------------------------
-Nine messages are measured -- eight from live probes and ``"No file sent"`` from the
-firmware's own web bundle, recorded in ``specs/device/3.27.3.0/http.json`` claim 15. That
-claim's own history is the argument for treating the list as open: a previous pass
+Nine messages are measured, recorded in ``specs/device/3.27.3.0/http.json`` claim 15.
+``"No file sent"`` was the last to become a live measurement rather than a reading of the
+firmware's own web bundle: probing ``POST /upload`` on 2026-08-29 produced it twice, once
+for a request with no body and once for a request whose single part was named ``document``.
+That claim's own history is the argument for treating the list as open: a previous pass
 asserted a closed five-value vocabulary and probing the ``download`` and ``thumbnail``
 argument spaces produced four more strings in one session.
+
+The same message can mean different things on a read route and on a write route, which is
+why there are two response translators rather than one with a flag.
+:func:`translate_http` answers for the routes this package reads and
+:func:`translate_upload` for the one it writes; the difference is their default, and
+:func:`translate_upload` carries the argument.
 
 So an unrecognised message is a first-class outcome, not a lookup miss. It becomes
 :class:`~rmspec.domain.errors.DeviceProtocolError` carrying the message verbatim, which
@@ -130,6 +138,8 @@ __all__ = [
     "BODY_EXCERPT_LIMIT",
     "DEVICE_ERROR_KEY",
     "NOT_FOUND_MESSAGES",
+    "NO_FILE_SENT",
+    "NO_FILE_SENT_DIAGNOSIS",
     "PATH_FAILURES",
     "PATH_UNREADABLE_DIAGNOSIS",
     "PROTOCOL_DIAGNOSES",
@@ -140,6 +150,7 @@ __all__ = [
     "translate_http",
     "translate_httpx",
     "translate_ssh",
+    "translate_upload",
 ]
 
 #: The single key the firmware's error bodies carry. Uniform across all four observed
@@ -156,11 +167,22 @@ NOT_FOUND_MESSAGES: Final = frozenset(
     }
 )
 
-#: The measured messages that mean the device took the connection and refused the payload.
-#: One member, from the ``/upload`` handler in the firmware's own web bundle rather than
-#: from a probe -- that route is never requested by this package, because a ``GET`` to it
-#: could not have been proven non-mutating.
-UPLOAD_REJECTED_MESSAGES: Final = frozenset({"No file sent"})
+#: The one message the ``/upload`` handler produces, spelled once because two functions read
+#: it. Read out of the firmware's own web bundle first, then measured twice on 2026-08-29: a
+#: request with no body at all and a request with one part named ``document`` both answered
+#: ``400 {"error": "No file sent"}``, which is what proves the handler checks the *field
+#: name* and not merely the presence of a body.
+NO_FILE_SENT: Final = "No file sent"
+
+#: What the contract was when the upload handler says it received no file. A statement about
+#: the request this package built, because that is whose defect it is -- see
+#: :func:`translate_upload`.
+NO_FILE_SENT_DIAGNOSIS: Final = "a multipart body carrying exactly one part named 'file'"
+
+#: The measured messages that mean the device took the connection and refused the payload,
+#: as read on a **read** route. :func:`translate_upload` classifies the same string
+#: differently on the write route, and says why.
+UPLOAD_REJECTED_MESSAGES: Final = frozenset({NO_FILE_SENT})
 
 #: Every measured message that means the client addressed the firmware wrongly, mapped to
 #: the contract it broke. The value becomes ``DeviceProtocolError.expected``, so each of
@@ -371,6 +393,81 @@ def translate_http(
         route=route,
         expected=_protocol_diagnosis(message),
         got=f"status {status} from {endpoint} and the message {message!r}",
+    )
+
+
+def translate_upload(
+    *,
+    route: str,
+    status: int,
+    body: bytes,
+    endpoint: str,
+    name: str,
+) -> DeviceError:
+    """Map one failed ``POST /upload`` response to a domain error.
+
+    A second function rather than an argument to :func:`translate_http`, because the two
+    disagree about their **default** and the default is the whole content of the decision. On
+    a read route a message this adapter has never met means "the device answered something we
+    cannot interpret", which is a protocol error. On the write route it means "the device
+    received the document and declined it", which is the one thing a caller who just tried to
+    place a file needs told -- and the firmware's error vocabulary is documented as a lower
+    bound, so the unmeasured case is the common one rather than the exotic one.
+
+    The one message the two functions share is classified differently on purpose.
+    :data:`NO_FILE_SENT` is the ``/upload`` handler's own words for "no part named ``file``
+    arrived", and by the time this adapter is talking to that handler the multipart body is
+    something *this module* built -- so it is a defect here, not a device refusing a document.
+    Reporting it as ``DeviceUploadRejected`` would send a user to look at their PDF for a
+    fault that is in our request. On a read route the same string cannot occur at all, which
+    is why :func:`translate_http` keeps its own mapping for it rather than being narrowed to
+    match this one.
+
+    Parameters
+    ----------
+    route
+        The path that was requested. Becomes ``DeviceProtocolError.route``.
+    status
+        The HTTP status. Never branched on here either -- the caller has already established
+        that it was not the ``201`` this route answers on success -- and carried into the
+        error's ``got`` as evidence.
+    body
+        The raw response body, expected to be ``{"error": "<message>"}`` and handled when it
+        is not.
+    endpoint
+        The origin the response came from, for the diagnosis text.
+    name
+        The document the caller was placing. Becomes ``DeviceUploadRejected.name``, which is
+        what a shell shows: the identifier does not exist yet, so the name is the only
+        subject there is.
+
+    Returns
+    -------
+    DeviceError
+        :class:`~rmspec.domain.errors.DeviceProtocolError` when the body is not the uniform
+        error shape, and when the message is :data:`NO_FILE_SENT`;
+        :class:`~rmspec.domain.errors.DeviceUploadRejected` carrying the device's own words
+        for every other message. Returned, never raised.
+    """
+    message = device_message(body)
+    if message is None:
+        return DeviceProtocolError(
+            transport=TransportKind.USB_WEB_API,
+            route=route,
+            expected=f'an error body shaped {{"{DEVICE_ERROR_KEY}": "<message>"}}',
+            got=f"status {status} from {endpoint} and {_excerpt(body)}",
+        )
+    if message == NO_FILE_SENT:
+        return DeviceProtocolError(
+            transport=TransportKind.USB_WEB_API,
+            route=route,
+            expected=NO_FILE_SENT_DIAGNOSIS,
+            got=f"status {status} from {endpoint} and the message {message!r}",
+        )
+    return DeviceUploadRejected(
+        transport=TransportKind.USB_WEB_API,
+        name=name,
+        device_message=message,
     )
 
 

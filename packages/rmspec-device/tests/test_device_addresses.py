@@ -29,6 +29,7 @@ from rmspec.device.addresses import (
     OS_RELEASE,
     PROC_MEMINFO,
     SCENE_SUFFIX,
+    SEARCH_INDEX_NAME,
     SOC_MACHINE,
     SSH_PORT,
     WEB_API_PORT,
@@ -84,11 +85,24 @@ def test_the_measured_device_constants_are_spelled_exactly_once_and_correctly():
     assert SOC_MACHINE == "/sys/devices/soc0/machine"
     assert PROC_MEMINFO == "/proc/meminfo"
     assert (METADATA_SUFFIX, CONTENT_SUFFIX, SCENE_SUFFIX) == (".metadata", ".content", ".rm")
+    assert SEARCH_INDEX_NAME == "rm-search-index.db"
 
 
 def test_the_firmware_version_source_is_not_the_path_that_does_not_exist():
     """Legacy ``DevicePaths.UPDATE_CONF`` named a file measured absent on 3.27.3.0."""
     assert OS_RELEASE != "/usr/share/remarkable/update.conf"
+
+
+def test_the_search_index_is_addressable_as_one_child_of_the_xochitl_root():
+    """A whole filename, not a suffix: there is one index per device, not one per document.
+
+    Asserted through ``child`` rather than by string concatenation, because ``child`` is what
+    the adapter uses and it refuses a name carrying a separator or a leading ``-``.
+    """
+    index = RemotePath.root().child(SEARCH_INDEX_NAME)
+
+    assert index.value == f"{XOCHITL_ROOT}/rm-search-index.db"
+    assert not SEARCH_INDEX_NAME.startswith(".")
 
 
 # ─────────────────────────── Endpoint ───────────────────────────

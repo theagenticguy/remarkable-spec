@@ -1,39 +1,61 @@
-"""The five measurements this package's design rests on, re-taken against the real tablet.
+"""The six measurements this package's design rests on, re-taken against the real tablet.
 
 Deselected by default. Every mise task passes ``-m 'not hardware'``, so the default suite and
 CI never reach this file; ``mise run test-hardware`` is the only thing that does, and it needs
 the tablet plugged in. The marker is applied at module scope *and* on each test: the module
-marker is what makes a sixth test impossible to add without it, and the per-test decorators are
-what a reader grepping for the marker finds.
+marker is what makes a seventh test impossible to add without it, and the per-test decorators
+are what a reader grepping for the marker finds.
 
 These tests exist because every number in ``DESIGN-step4-device.md`` came from one probe pass
 on 2026-08-29, and a firmware update or a settings change can falsify any of them. When one
 goes red the answer is to re-measure and update the design, not to relax the assertion.
 
-A detached tablet makes all five fail with ``DeviceUnreachable``, whose remediation already
+A detached tablet makes all six fail with ``DeviceUnreachable``, whose remediation already
 reads "check the cable and the host". That is deliberate rather than a rough edge: selecting
 ``-m hardware`` is an assertion that the tablet is plugged in, and a skip would let a run that
 re-measured nothing read as a run that confirmed everything.
+
+Six tests, and one port with none: the uploader
+-----------------------------------------------
+:class:`~rmspec.device.usb.UsbUploader` is the only device port in this package that is *not*
+re-measured here, and the omission is the point rather than an oversight. ``POST /upload``
+**creates** a document, and the firmware's route table is closed at six path families with
+none that deletes -- so there is no way to undo what a test run would do. Deleting the files
+over SSH while xochitl runs leaves phantom library entries, which is worse. An automated test
+of that route would therefore accumulate entries in the author's own library on every run,
+removable only by hand from the tablet UI, and a test whose cost is manual cleanup is a test
+that gets skipped and then deleted.
+
+It is covered by fakes against the recorded measurement instead:
+``specs/device/3.27.3.0/http.json`` claims[14] holds the four probes, and
+``test_device_usb.py`` asserts the multipart shape, the status rule and both refusals against
+``httpx.MockTransport``. When that claim needs re-measuring it is re-measured by hand, once,
+and the claim is updated -- which is the honest trade for an operation with no inverse.
 
 Safety, which is not a matter of care but of construction
 ---------------------------------------------------------
 The tablet holds the user's only copy of their notes, so this file is read-only by mechanism.
 
-**Nothing here can request the unprobed upload route.** ``POST /upload`` has never been probed
-in any form: the firmware ignores the HTTP request method, so even a ``GET`` to that path could
-not have been proven non-mutating. :func:`_only_read_the_listing` is installed as an ``httpx``
-request hook and fails the test for any request that is not a ``GET`` or ``HEAD`` under
-:data:`~rmspec.device._wire.LISTING_ROUTE`. That path is therefore unreachable from this module
-rather than merely unwritten, which is the difference between a rule and a guarantee. The hook
-raises off ``BaseException``, so ``UsbWebApi._answer``'s ``except`` clause cannot swallow it and
-report a device failure instead. It also happens to exclude ``/download``, which is a read
-route and would be safe -- no test here needs one, and blocking it means none can accidentally
-pull megabytes of the user's handwriting into a test process.
+**Nothing here can request the upload route.** :func:`_only_read_the_listing` is installed as
+an ``httpx`` request hook and fails the test for any request that is not a ``GET`` or ``HEAD``
+under :data:`~rmspec.device._wire.LISTING_ROUTE`. That path is therefore unreachable from this
+module rather than merely unwritten, which is the difference between a rule and a guarantee.
+The hook raises off ``BaseException``, so ``UsbWebApi._answer``'s ``except`` clause cannot
+swallow it and report a device failure instead. It also happens to exclude ``/download``, which
+is a read route and would be safe -- no test here needs one, and blocking it means none can
+accidentally pull megabytes of the user's handwriting into a test process.
+
+That hook was written when ``POST /upload`` was unprobed and the firmware's indifference to the
+request method meant even a ``GET`` to it could not be proven non-mutating. It is now
+**load-bearing rather than precautionary**: the route is measured, it works, one adapter in
+this package sends it, and it is exactly the request this module must never make.
 
 **Nothing here writes over SSH.** :class:`~rmspec.device.ssh.SshUploader` is never constructed,
 no ``systemctl`` is run, and no service is restarted. The only commands sent are the four
 :class:`~rmspec.device.ssh.SshFacts` builds, each a ``sed``, a ``cat`` or a ``df`` against a
-path ``addresses.py`` spells.
+path ``addresses.py`` spells, plus one SFTP *read* of
+``<xochitl>/rm-search-index.db`` -- also a path ``addresses.py`` spells, and the only file in
+the store this module opens.
 
 **Nothing here reads the tablet's own configuration file.** It holds a cleartext developer
 password and two bearer tokens, ``tests/architecture/test_secret_containment.py`` fails the
@@ -46,6 +68,16 @@ authentication comes from the user's own key. No password is ever offered --
 set relation or a firmware constant. No document title, no page identifier and no payload is
 compared against a literal or captured into a file, so a green run reveals nothing about the
 library it ran against and nothing from the device is committed.
+
+That rule is strictest for the search index, because unlike everything else this module
+touches, the index *is* the user's handwriting -- 90 of the 92 rows on the measured device
+carry recognised text.
+:func:`test_the_search_index_is_a_whole_sqlite_image_of_a_plausible_size` therefore reads it
+into memory, looks at the first sixteen bytes and the length, and stops. It does not decode the
+database and asserts on no row; this package cannot even import ``sqlite3``, so the reading
+half is unreachable from here by construction rather than by restraint. The bytes are never
+written to local disk, which is the rule that replaced an earlier session's ``scp`` of that
+same file.
 
 Authentication
 --------------
@@ -67,8 +99,16 @@ from urllib.parse import quote
 
 import httpx
 import pytest
+from device_contracts import SQLITE_MAGIC
 
-from rmspec.device import ParamikoShell, SshFacts, UsbCatalog, UsbFacts, UsbWebApi
+from rmspec.device import (
+    ParamikoShell,
+    SshFacts,
+    SshSearchIndexSource,
+    UsbCatalog,
+    UsbFacts,
+    UsbWebApi,
+)
 from rmspec.device._wire import LISTING_ROUTE, decode_entries, entry_parent
 from rmspec.device.addresses import DEFAULT_USB_HOST, SSH_PORT, Endpoint
 from rmspec.device.ssh import SERIAL_FIELD
@@ -116,6 +156,23 @@ FIRMWARE: Final = "3.27.3.0"
 #: ``/sys/devices/soc0/machine``, measured 2026-08-29.
 MODEL: Final = "reMarkable Ferrari"
 
+#: Bytes ``rm-search-index.db`` held on 2026-08-29. Not asserted as an equality: the tablet
+#: rebuilds this file as the user writes, so the measured value is a *scale* and an exact match
+#: would go red for the ordinary reason.
+SEARCH_INDEX_BYTES: Final = 503_808
+
+#: SQLite's page size on that image -- 503,808 is exactly 123 pages of it. A database file is
+#: always a whole number of pages, so the remainder is the one size assertion that stays exact
+#: while the index is rebuilt at a different length, and it is precisely what a torn read of a
+#: file being written breaks.
+SQLITE_PAGE_BYTES: Final = 4096
+
+#: How far from :data:`SEARCH_INDEX_BYTES` the live index may be before this test calls the
+#: reading implausible. A factor rather than a byte tolerance, because the index grows with the
+#: library; an order of magnitude either way still fails on the two shapes that matter, a
+#: badly truncated transfer and the wrong file entirely.
+PLAUSIBLE_FACTOR: Final = 8
+
 
 def _only_read_the_listing(request: httpx.Request) -> None:
     """Fail the test unless this request is a read of the listing route family.
@@ -124,6 +181,10 @@ def _only_read_the_listing(request: httpx.Request) -> None:
     covers every request any adapter in this module makes -- including one a future edit adds
     without thinking about it. ``pytest.fail`` raises off ``BaseException``, so
     ``UsbWebApi._answer``'s ``except`` clause cannot swallow it and report a device failure.
+
+    The request this exists to stop is now one an adapter in this package really sends:
+    :class:`~rmspec.device.usb.UsbUploader` posts to ``/upload``, that route creates a document,
+    and nothing in the route table can delete one. See the module docstring.
 
     Parameters
     ----------
@@ -134,8 +195,9 @@ def _only_read_the_listing(request: httpx.Request) -> None:
     if request.method not in READ_METHODS or not path.startswith(LISTING_ROUTE):
         pytest.fail(
             f"this module tried to send {request.method} {path}. Only "
-            f"{sorted(READ_METHODS)} under {LISTING_ROUTE} are permitted here, because the "
-            f"firmware ignores the request method and the write routes are unprobed."
+            f"{sorted(READ_METHODS)} under {LISTING_ROUTE} are permitted here: the firmware "
+            f"ignores the request method, and POST /upload creates a document that no route "
+            f"in this firmware can delete."
         )
 
 
@@ -310,3 +372,29 @@ def test_the_facts_are_the_ones_this_firmware_reports(shell: ParamikoShell) -> N
     assert facts.model == MODEL
     assert facts.serial is None
     assert facts.unsupported == frozenset({SERIAL_FIELD})
+
+
+@pytest.mark.hardware
+def test_the_search_index_is_a_whole_sqlite_image_of_a_plausible_size(
+    shell: ParamikoShell,
+) -> None:
+    """``rm-search-index.db`` exists, is a SQLite image, and arrives whole.
+
+    Three claims, and no more than three. It is **not** ``None``, which is what the adapter
+    answers for a device that has built no index -- so this is also the measurement that the
+    file is where ``addresses.py`` says. Its first sixteen bytes are the format's magic, which
+    is what makes "we transported a database" a fact rather than an assumption. And its length
+    is a whole number of SQLite pages within an order of magnitude of the measured 503,808,
+    which is the strongest size claim that survives the tablet rebuilding the index: a
+    truncated transfer lands mid-page and fails the remainder.
+
+    The bytes stop here. Nothing decodes them, no row is asserted on, and nothing is written to
+    local disk -- see the module docstring, because this file is the user's handwriting.
+    """
+    image = SshSearchIndexSource(shell).read_index()
+
+    assert image is not None
+    assert image[: len(SQLITE_MAGIC)] == SQLITE_MAGIC
+    assert len(image) % SQLITE_PAGE_BYTES == 0
+    assert len(image) >= SEARCH_INDEX_BYTES // PLAUSIBLE_FACTOR
+    assert len(image) <= SEARCH_INDEX_BYTES * PLAUSIBLE_FACTOR

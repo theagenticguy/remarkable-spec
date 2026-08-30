@@ -82,6 +82,7 @@ __all__ = [
     "PLACEHOLDER",
     "PROC_MEMINFO",
     "SCENE_SUFFIX",
+    "SEARCH_INDEX_NAME",
     "SOC_MACHINE",
     "SSH_PORT",
     "WEB_API_PORT",
@@ -129,6 +130,13 @@ CONTENT_SUFFIX: Final = ".content"
 
 #: Suffix of one page's scene artifact, inside the document's own directory.
 SCENE_SUFFIX: Final = ".rm"
+
+#: Filename of the tablet's own handwriting search index, one component under
+#: :data:`XOCHITL_ROOT`. A whole filename rather than a suffix, because there is exactly one
+#: of these per device instead of one per document. Measured 2026-08-29: 503,808 bytes, with
+#: no ``-wal`` and no ``-shm`` sibling, so the file is a self-contained database image and a
+#: single read of it is a complete one.
+SEARCH_INDEX_NAME: Final = "rm-search-index.db"
 
 #: The substring :meth:`RemoteCommand.of` substitutes an argument for. Two characters, so
 #: it cannot collide with the ``\\(``, ``$4`` and ``NR==2`` that the BusyBox commands in
