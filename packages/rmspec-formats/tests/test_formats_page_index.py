@@ -1,9 +1,11 @@
 """The ``.content`` page walk and the ``.pagedata`` template list.
 
 Table-driven, because this module is a relocation of ``ContentInfo.from_json`` plus the
-loader's template precedence and every row is one decision that was made in 2024 and must
-still hold: both sidecar shapes, no filtering, positional template precedence, and the
-three divergences the domain forced.
+loader's template precedence and every row is one decision that must still hold: both
+sidecar shapes, no filtering, the three divergences the domain forced, and -- unlike the
+rest -- one decision made *against* 2024, the inverted template precedence of divergence
+4, which the 2026-08-29 measurement of the attached tablet forced and which two tests
+below name by document uuid.
 """
 
 from __future__ import annotations
@@ -51,6 +53,20 @@ def test_the_pre_v2_flat_page_list_is_still_read():
 
     assert [entry.page_uuid for entry in decode_page_index(raw)] == ["page-a", "page-b"]
     assert {entry.template_name for entry in decode_page_index(raw)} == {None}
+
+
+def test_the_pre_v2_flat_page_list_still_takes_every_template_from_pagedata():
+    """The flat shape carries no per-entry template, so the fallback is its only source.
+
+    This is the second half of why divergence 4 demotes ``.pagedata`` to a fallback rather
+    than dropping it: a flat entry is a bare uuid string, it can never name a template, so
+    every one of these pages falls through and the ``.pagedata`` list is all they have.
+    """
+    raw = content(formatVersion=1, pages=["page-a", "page-b"])
+
+    entries = decode_page_index(raw, templates=("Lined", "Grid"))
+
+    assert [entry.template_name for entry in entries] == ["Lined", "Grid"]
 
 
 def test_cpages_wins_when_a_sidecar_carries_both_shapes():
@@ -103,18 +119,29 @@ def test_an_entry_the_sidecar_marks_deleted_is_still_claimed():
 @pytest.mark.parametrize(
     ("templates", "own", "expected"),
     [
-        pytest.param(("Lined",), None, "Lined", id="a pagedata line applies"),
-        pytest.param(("Lined",), "Grid", "Lined", id="a pagedata line beats the entry"),
-        pytest.param(("",), "Grid", None, id="an EMPTY pagedata line still beats the entry"),
+        pytest.param(("Lined",), None, "Lined", id="a line applies where the entry names none"),
+        pytest.param(("Lined",), "Grid", "Grid", id="the entry's own template beats a line"),
+        pytest.param(("",), "Grid", "Grid", id="an empty line cannot unset the entry either"),
+        pytest.param(("Lined",), "", "Lined", id="an EMPTY entry template falls through"),
+        pytest.param(("",), "", None, id="empty on both sides is no template"),
+        pytest.param(("",), None, None, id="an empty line names nothing"),
         pytest.param((), "Grid", "Grid", id="no line leaves the entry's own template"),
         pytest.param((), None, None, id="neither means no template"),
         pytest.param((), "", None, id="an empty entry template is no template"),
         pytest.param((), "Blank", "Blank", id="a stored Blank is a real template name"),
+        pytest.param(("Blank",), None, "Blank", id="a Blank line is a real name too"),
     ],
 )
-def test_template_precedence_is_positional_and_legacy_exact(
+def test_the_entrys_own_template_wins_and_a_pagedata_line_is_only_the_fallback(
     templates: tuple[str, ...], own: str | None, expected: str | None
 ):
+    """Divergence 4, exhaustive over both sources being absent, empty, or named.
+
+    "The entry names nothing" is ``None`` *after* divergence 1's normalisation, which is
+    why an entry whose ``template.value`` is the empty string falls through to the line:
+    an empty string is not a claim. An empty *line* is not a claim either, so it can
+    neither name a template nor unset one the entry named.
+    """
     page: dict[str, object] = {"id": "page-a"}
     if own is not None:
         page["template"] = {"value": own}
@@ -133,6 +160,40 @@ def test_the_legacy_blank_default_is_gone():
     assert decode_page_index(cpages({"id": "page-a"}))[0].template_name is None
 
 
+def test_a_real_template_name_survives_a_one_line_pagedata_of_blank():
+    """Document ``2cf3200e-56c8-4968-a380-81756d0a44b2`` "Quick sheets", measured 2026-08-29.
+
+    Firmware 3.27.3.0, tablet attached. The whole device holds exactly two ``.pagedata``
+    files and both are the 6 bytes below. This one belongs to a 1-page document whose
+    ``cPages`` entry names ``P Grid small``, so the old precedence -- a ``.pagedata`` line
+    wins whenever one exists, even when empty -- reported ``Blank`` and renamed a real
+    template to a wrong one. Restoring that precedence means refuting this measurement
+    first: it is not a style preference, it is a counterexample.
+    """
+    raw = cpages({"id": "quick-sheet-page", "template": {"value": "P Grid small"}})
+
+    entries = decode_page_index(raw, templates=decode_pagedata(b"Blank\n"))
+
+    assert [entry.template_name for entry in entries] == ["P Grid small"]
+
+
+def test_a_one_line_pagedata_reaches_page_zero_of_a_432_page_document_and_no_further():
+    """Document ``d3b38661-8f31-4412-a6f7-16343cc5e48c`` "Calendar 2026", measured 2026-08-29.
+
+    432 pages, and ``template.value`` is ``None`` on all 432 ``cPages`` entries, so the
+    single ``.pagedata`` line is the only template claim in existence for page 0 -- which
+    is why the inversion keeps reading ``.pagedata`` rather than dropping it. It reaches
+    page 0 only: one line overwrites one page, not 431.
+    """
+    raw = cpages(*({"id": f"calendar-page-{position}"} for position in range(432)))
+
+    entries = decode_page_index(raw, templates=decode_pagedata(b"Blank\n"))
+
+    assert len(entries) == 432
+    assert entries[0].template_name == "Blank"
+    assert {entry.template_name for entry in entries[1:]} == {None}
+
+
 def test_a_pagedata_shorter_than_the_page_list_leaves_the_rest_alone():
     raw = cpages({"id": "a"}, {"id": "b", "template": {"value": "Grid"}}, {"id": "c"})
 
@@ -142,9 +203,11 @@ def test_a_pagedata_shorter_than_the_page_list_leaves_the_rest_alone():
 
 
 def test_a_pagedata_longer_than_the_page_list_is_harmless():
-    entries = decode_page_index(cpages({"id": "a"}), templates=("Lined", "Grid", "Dots"))
+    raw = cpages({"id": "a"}, {"id": "b", "template": {"value": "Grid"}})
 
-    assert [entry.template_name for entry in entries] == ["Lined"]
+    entries = decode_page_index(raw, templates=("Lined", "Dots", "Sheet", "Isometric"))
+
+    assert [entry.template_name for entry in entries] == ["Lined", "Grid"]
 
 
 # ─────────────────────────── the source-pdf page ───────────────────────────
@@ -265,9 +328,11 @@ def test_a_shape_this_reader_does_not_accept_is_a_type_error(raw: bytes):
     """``template`` stays strict; ``redir`` does not.
 
     The asymmetry is the point. A wrong-typed ``template`` genuinely is a malformed
-    sidecar -- there is no positional fallback for a template name, so nothing downstream
-    can recover from silently dropping it. A wrong-typed ``redir`` has one, so it is a
-    page-local ``None``; see the leniency table above.
+    sidecar -- there is no page-local degradation state for a dropped template name, so
+    nothing downstream can recover from silently losing it, and divergence 4's
+    ``.pagedata`` fallback does not fill the gap: it stands in for a template the entry
+    never named, not for one it named unreadably. A wrong-typed ``redir`` does have a
+    recoverable state, so it is a page-local ``None``; see the leniency table above.
     """
     with pytest.raises(TypeError):
         decode_page_index(raw)

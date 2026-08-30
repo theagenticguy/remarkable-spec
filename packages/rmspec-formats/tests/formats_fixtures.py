@@ -866,13 +866,20 @@ class FakeDocumentRepository:
 
 
 def effective_template(spec: DocumentSpec, position: int, /) -> str | None:
-    """Apply the legacy template precedence to one page of a spec.
+    """Apply the shared template precedence to one page of a spec.
 
-    A ``.pagedata`` line at this position wins whenever one exists, *even when it is
-    empty*; only then does the page's own template apply; and an empty name is ``None``.
+    The page's own template wins whenever it names one; a ``.pagedata`` line at this
+    position is only the fallback, read where the page names nothing. An empty name is
+    ``None`` on either side, so an empty own template falls through to the line and an
+    empty line cannot unset a name the page gave.
+
+    That inverts the legacy rule this helper used to model -- a line won whenever one
+    existed, *even when it was empty* -- because the 2026-08-29 measurement of the
+    attached tablet refuted it: a 1-page document's real ``P Grid small`` came back as
+    ``Blank``. See divergence 4 in ``rmspec.formats.page_index``.
 
     "This position" is a position in the *decoded* sidecar, not in the spec's tuple, and
-    that distinction is the whole of the correction: the lines are run through the same
+    that distinction is a separate correction: the lines are run through the same
     ``decode_pagedata`` the real adapter uses, so the whole-text ``strip()`` that drops a
     leading blank line is modelled once instead of twice. One rule, one place, no drift.
 
@@ -888,7 +895,10 @@ def effective_template(spec: DocumentSpec, position: int, /) -> str | None:
     str | None
         The template name, or ``None`` for no template.
     """
+    own = spec.pages[position].template or None
+    if own is not None:
+        return own
     lines = decode_pagedata(spec.pagedata_bytes)
     if position < len(lines):
         return lines[position] or None
-    return spec.pages[position].template or None
+    return None

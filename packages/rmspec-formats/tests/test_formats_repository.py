@@ -181,12 +181,12 @@ def test_every_page_carries_its_position_template_and_source_pdf_page(tmp_path: 
     pages = repository.load(spec.doc_id).pages
 
     assert [page.index for page in pages] == [0, 1, 2]
-    assert [page.template_name for page in pages] == ["Lined", None, "Blank"], (
-        "a pagedata line wins by position even when empty; a stored Blank is a real name"
+    assert [page.template_name for page in pages] == ["Dots", "Grid", "Blank"], (
+        "the entry's own template wins; a pagedata line only fills a page that names none"
     )
     assert [page.pdf_page_index for page in pages] == [0, 7, None]
     assert pages[2].content is None, "a page with no artifact still carries its sidecar facts"
-    assert pages[2].template_name == "Blank"
+    assert pages[2].template_name == "Blank", "and Blank from .pagedata is a real name"
 
 
 def test_an_unknown_document_is_not_found(tmp_path: Path):

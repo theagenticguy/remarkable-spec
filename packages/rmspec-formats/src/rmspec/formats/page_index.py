@@ -1,4 +1,4 @@
-"""The structural half of the ``.content`` sidecar: which pages, in what order.
+r"""The structural half of the ``.content`` sidecar: which pages, in what order.
 
 ``ports/formats.py`` declines a sidecar codec port because decoding
 ``.metadata`` / ``.content`` is json plus pydantic, and both already live on the
@@ -9,15 +9,16 @@ module is the one piece those two do not own. The domain dropped the legacy
 but the walk that produces those three facts from one sidecar still has to exist
 somewhere, and this is it.
 
-Relocated from ``ContentInfo.from_json`` and ``load_document``, with three changes
-------------------------------------------------------------------------------------
-Everything about the shape is legacy-exact: both sidecar spellings (firmware 3.x
+Relocated from ``ContentInfo.from_json`` and ``load_document``, with four changes
+---------------------------------------------------------------------------------
+Everything about the *shape* is legacy-exact: both sidecar spellings (firmware 3.x
 ``cPages.pages`` and the pre-v2 flat ``pages`` list of bare uuid strings), the file
-order of the entries, no filtering of any kind, and the template precedence -- a
-``.pagedata`` line at position *i* wins whenever one exists, *even when it is
-empty*, and only then does the entry's own ``template.value`` apply.
+order of the entries, and no filtering of any kind. The template *precedence* is the
+one thing that is not legacy-exact, and divergence 4 is why.
 
-The three deliberate divergences, each forced by the domain:
+Three of the four deliberate divergences are forced by the domain. The fourth is
+forced by a measurement, and is the only one of them that fixes a wrong output rather
+than settling a modelling question:
 
 1. **The legacy ``"Blank"`` default is gone.** ``PageRef.template`` defaulted to the
    literal string ``"Blank"`` when the ``cPages`` entry carried no ``template`` key,
@@ -54,6 +55,38 @@ The three deliberate divergences, each forced by the domain:
    an identity read from the device stopped comparing equal to the same identity read
    from a cache row -- so the id is carried verbatim and validated by ``PageId``
    instead. Every id in a real store is already canonical, so no filename changes.
+4. **The entry's own template wins; ``.pagedata`` is a positional fallback.** The old
+   rule -- legacy's, and this module's until now -- was that the ``.pagedata`` line at
+   position *i* wins whenever one exists, *even when it is empty*, and only then does
+   the entry's own ``template.value`` apply. Measured against the attached tablet on
+   2026-08-29, firmware 3.27.3.0, that rule reports a template name that is wrong. The
+   whole device holds exactly **two** ``.pagedata`` files, and both are 6 bytes holding
+   ``Blank\n`` -- one line each:
+
+   - ``2cf3200e-56c8-4968-a380-81756d0a44b2`` "Quick sheets", **1** page, whose
+     ``cPages`` entry names ``P Grid small``. Under the old rule this reader renamed a
+     real template to ``Blank``. That is the counterexample, and it is a wrong output,
+     not a debatable one.
+   - ``d3b38661-8f31-4412-a6f7-16343cc5e48c`` "Calendar 2026", **432** pages, whose 432
+     ``cPages`` entries carry ``template.value`` of ``None`` on every one of them. Its
+     single ``.pagedata`` line is the only template claim in existence for page 0, and
+     it reaches page 0 only -- pages 1..431 are claimed by neither source. (One line
+     overwrites one page, not 431: the sibling reader's docstring overstates that
+     arithmetic while reaching the right conclusion.)
+
+   So the precedence is inverted: ``template.value`` wins, and a ``.pagedata`` line
+   applies only where the entry names nothing. "Names nothing" means ``None`` *after*
+   divergence 1's normalisation, so an entry whose template is the empty string falls
+   through to the line rather than counting as a claim -- an empty string is not a
+   claim. That leaves ``.pagedata`` meaningful exactly where it genuinely is the only
+   source: the Calendar's page 0 above, and the pre-v2 flat ``pages`` list of bare uuid
+   strings, whose entries carry no per-entry template at all and which would otherwise
+   have no template source whatsoever.
+
+   The sibling reader ``rmspec.device._pages.decode_page_order`` reached the opposite
+   conclusion from legacy off the same measurement and declines to read ``.pagedata``
+   at all; with this inversion the two readers agree on every page either can see.
+   Folding them onto one reader remains a step-7 item.
 
 Failure vocabulary
 ------------------
@@ -89,8 +122,8 @@ class PageIndexEntry:
         The page's identifier, verbatim as the sidecar spelled it. Becomes both the
         ``PageId`` and the ``PAGE.rm`` filename, so it is never reformatted.
     template_name
-        The background template, or ``None`` when neither the ``.pagedata`` line nor
-        the entry named one. ``None`` is the only spelling of "no template".
+        The background template, or ``None`` when neither the entry nor the
+        ``.pagedata`` line named one. ``None`` is the only spelling of "no template".
     pdf_page_index
         Zero-based page of the source pdf this page annotates, or ``None`` when the
         redirection map named none.
@@ -119,8 +152,9 @@ def decode_pagedata(raw: bytes, /) -> tuple[str, ...]:
     -------
     tuple[str, ...]
         One name per line, in file order. Empty for a sidecar that holds only
-        whitespace. A name may be the empty string, which the page index reads as
-        "this page has no template" and which still consumes its position.
+        whitespace. A name may be the empty string, which names no template and still
+        consumes its position, so it leaves the page at that position on whatever the
+        ``cPages`` entry itself said.
 
     Raises
     ------
@@ -148,9 +182,12 @@ def decode_page_index(
         folder and a ``.content``-less entry appear in a listing at all -- the legacy
         loader called its content reader unguarded and raised ``FileNotFoundError``.
     templates
-        The ``.pagedata`` lines from :func:`decode_pagedata`, applied to the page list
-        by position. Shorter than the page list is normal and leaves the remaining
-        pages on their own ``template.value``.
+        The ``.pagedata`` lines from :func:`decode_pagedata`, aligned to the page list
+        by position and read only as a *fallback*: the line at position *i* applies only
+        where the entry at position *i* named no template of its own. See divergence 4
+        for the measurement that demoted it to a fallback. Any length is accepted --
+        shorter than the page list is the normal case, and longer is harmless, because
+        the lines never decide which pages exist or what order they come in.
 
     Returns
     -------
@@ -173,9 +210,9 @@ def decode_page_index(
         return ()
     claimed = _claimed_pages(_json_object(raw))
     return tuple(
-        replace(entry, template_name=templates[position] or None)
-        if position < len(templates)
-        else entry
+        entry
+        if entry.template_name is not None or position >= len(templates)
+        else replace(entry, template_name=templates[position] or None)
         for position, entry in enumerate(claimed)
     )
 
@@ -291,8 +328,10 @@ def _entry_from_cpage(page: object, /) -> PageIndexEntry:
         msg = f"expected a json object per page, got {type(page).__name__}"
         raise TypeError(msg)
     # `redir` is read both bare and enveloped, and never refused. `template` keeps the
-    # strict envelope: a wrong type there really is a malformed sidecar, because a
-    # template name has no positional fallback for a consumer to recover through.
+    # strict envelope: a wrong type there really is a malformed sidecar, because there is
+    # no page-local degradation state a consumer could record for a dropped template. The
+    # `.pagedata` fallback of divergence 4 does not change that -- it stands in for a
+    # template the entry never named, not for one the entry named unreadably.
     envelope = _members(members.get("redir"))
     redir = envelope.get("value") if envelope is not None else members.get("redir")
     return PageIndexEntry(

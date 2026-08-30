@@ -56,20 +56,24 @@ FOLDER = ff.DocumentSpec(uuid="folder-1", kind=DocumentKind.COLLECTION, with_con
 TEMPLATED = ff.DocumentSpec(
     uuid="templated-1",
     pages=(
-        ff.PageSpec(uuid="t-first", template="Lined"),
+        ff.PageSpec(uuid="t-first"),
         ff.PageSpec(uuid="t-second", state=ff.PageState.STUB, template="Dots"),
     ),
-    templates=("", "Grid"),
+    templates=("", "Grid", "Sheet"),
 )
-"""A ``.pagedata`` whose first line is blank, and pages that also name their own template.
+"""A ``.pagedata`` whose first line is blank, over one page that names its own template.
 
-The shape no spec in this table used to have, and the one that made the two
-implementations disagree: ``decode_pagedata`` strips the whole text before splitting, so
-a leading blank line is *deleted* and every later line moves up one. The real adapter
-therefore templates page 0 from ``"Grid"`` and page 1 from its own ``"Dots"``, while a
-fake that indexed the spec's tuple positionally said ``None`` then ``"Grid"``. The strip
-is relocated legacy behaviour and load-bearing, so the fix is one shared decoder rather
-than a second model of it -- and this spec is what keeps that honest.
+Two rules at once, and a positional model of either one gets this column wrong.
+``decode_pagedata`` strips the whole text before splitting, so the leading blank line is
+*deleted* and every later line moves up one: the lines the adapter really applies are
+``("Grid", "Sheet")``, which is what made the two implementations disagree when a fake
+indexed the spec's tuple instead. And a line is only a fallback -- divergence 4 -- so page
+0, which names no template of its own, takes ``"Grid"`` from the renumbered list, while
+page 1 keeps its own ``"Dots"`` and never sees the ``"Sheet"`` sitting at its position.
+
+The strip is relocated legacy behaviour and load-bearing, so the fix for the drift it
+caused is one shared decoder rather than a second model of it. The precedence is the
+2026-08-29 measurement's, not legacy's. This spec is what keeps both honest.
 """
 
 STORE = (FOLDER, NOTEBOOK, PDF, TEMPLATED)
@@ -230,7 +234,14 @@ def test_a_contentless_page_still_carries_its_sidecar_facts(repository: Document
 def test_a_leading_blank_pagedata_line_renumbers_the_whole_template_column(
     repository: DocumentRepository,
 ):
-    """The divergence the fake used to have, asserted rather than left to a comment."""
+    """Two rules in one column: the strip's renumbering, and the fallback precedence.
+
+    Page 0 names no template, so it takes a ``.pagedata`` line -- ``"Grid"``, not the blank
+    first line, because the whole-text ``strip()`` deleted that one and moved every later
+    line up. Page 1 names ``"Dots"``, so it keeps it and never sees the ``"Sheet"`` line
+    sitting at its position: the entry wins and the line is only a fallback. Both
+    implementations must say so, which is the divergence the fake used to have.
+    """
     document = repository.load(TEMPLATED.doc_id)
 
     assert [page.template_name for page in document.pages] == ["Grid", "Dots"]
