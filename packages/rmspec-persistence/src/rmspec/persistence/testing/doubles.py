@@ -1,4 +1,4 @@
-"""In-memory doubles for the four persistence ports.
+"""In-memory doubles for the four persistence ports, plus the tier-0 index.
 
 Test doubles, not second product adapters. They ship under ``src/`` rather than
 in a ``tests/`` helper for two reasons: the port docstrings promise these names at
@@ -21,6 +21,10 @@ without which the ports' guarantees are unassertable.
     :class:`~rmspec.domain.models.PageText` failure unreachable without also
     poisoning the :class:`~rmspec.domain.models.SyncedDocument` the same test
     needs to read.
+
+:class:`FakeHandwrittenTextIndex` is named for what it fakes rather than for how it
+stores, because "in memory" would say nothing: the real reader is a database image
+held in memory too. What it stands in for is the *device*, which no test may touch.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from rmspec.domain.models import (
     OcrCacheKey,
     RecordedSyncAuditEntry,
 )
+from rmspec.domain.ports.ocr import IndexedHandwriting
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -48,6 +53,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "IN_MEMORY_STORE",
+    "FakeHandwrittenTextIndex",
     "InMemoryDiagramCache",
     "InMemoryDocumentSyncStore",
     "InMemoryOcrCache",
@@ -576,3 +582,112 @@ class InMemorySyncAuditLog:
             )
         newest_first = sorted(self._entries, key=lambda recorded: recorded.sequence, reverse=True)
         return newest_first[:limit]
+
+
+class FakeHandwrittenTextIndex:
+    """A dict of rows standing in for the tablet's own search index.
+
+    The :class:`~rmspec.domain.ports.ocr.HandwrittenTextIndex` double. It answers the
+    same three states :class:`~rmspec.persistence.search_index.DeviceSearchIndex`
+    answers -- a reading, an indexed page that held nothing, and no row at all -- and
+    is meant to be read side by side with it.
+
+    Both failure seams exist because the reader's dangerous states are unreachable
+    otherwise. ``fail_reads`` is a torn image: the tablet was writing the index while
+    it was copied, so the integrity check refuses it and the caller must fall through
+    to a paid read rather than treat the command as failed. :meth:`seed_duplicated`
+    is one page uuid on two rows, which the reader refuses to arbitrate.
+    """
+
+    def __init__(self, *, revision: str = "1", generation: int = 1) -> None:
+        self.fail_reads = False
+        """When true, :meth:`lookup` raises ``StoreUnavailableError``."""
+
+        self.lookup_calls = 0
+        """How many times :meth:`lookup` was entered, faults included."""
+
+        self._provider_id = f"device-index@{revision}"
+        self._generation = generation
+        self._rows: dict[str, tuple[str, str]] = {}
+        self._duplicated: set[str] = set()
+
+    def seed(self, page_ref: str, /, *, entry_ref: str, text: str) -> None:
+        """Record one indexed page.
+
+        Parameters
+        ----------
+        page_ref
+            The page uuid, as the index's ``pageId``.
+        entry_ref
+            The document uuid the page belongs to.
+        text
+            The device's own reading. ``""`` is a legitimate seeding: it means the
+            device indexed the page and found nothing, which is not the same as
+            leaving the page unseeded.
+        """
+        self._rows[page_ref] = (entry_ref, text)
+
+    def seed_duplicated(self, page_ref: str, /) -> None:
+        """Make one page uuid look like two rows.
+
+        Parameters
+        ----------
+        page_ref
+            The page uuid that stops identifying a single row.
+        """
+        self._duplicated.add(page_ref)
+
+    @property
+    def provider_id(self) -> str:
+        """Return this index's stable identity slug.
+
+        Returns
+        -------
+        str
+            ``"device-index@<revision>"``, in the adapter's own format so a test
+            that folds the slug into a cache key exercises the real shape.
+        """
+        return self._provider_id
+
+    def lookup(self, page_ref: str, /) -> IndexedHandwriting | None:
+        """Return the seeded row for one page, or ``None`` when there is none.
+
+        Parameters
+        ----------
+        page_ref
+            The page uuid to look up.
+
+        Returns
+        -------
+        IndexedHandwriting | None
+            The seeded reading, or ``None`` when the page was never seeded.
+
+        Raises
+        ------
+        StoreUnavailableError
+            ``fail_reads`` is set.
+        StoredRecordUnreadableError
+            The page was passed to :meth:`seed_duplicated`.
+        """
+        self.lookup_calls += 1
+        if self.fail_reads:
+            raise StoreUnavailableError(
+                store=IN_MEMORY_STORE,
+                detail="the image is seeded to fail its integrity check",
+            )
+        if page_ref in self._duplicated:
+            raise StoredRecordUnreadableError(
+                store=IN_MEMORY_STORE,
+                table="search",
+                key=page_ref,
+                detail="2 rows share this pageId, so no row identifies this page",
+            )
+        row = self._rows.get(page_ref)
+        if row is None:
+            return None
+        return IndexedHandwriting(
+            page_ref=page_ref,
+            entry_ref=row[0],
+            text=row[1],
+            generation=self._generation,
+        )

@@ -7,6 +7,13 @@ make ``--no-cache`` a wiring decision instead of an ``if`` inside a use case, pl
 a maintenance class the CLI constructs directly because retention and "why did
 this miss" are not use cases.
 
+Plus one reader that is not a persistence port at all:
+:class:`~rmspec.persistence.search_index.DeviceSearchIndex` binds
+``rmspec.domain.ports.ocr.HandwrittenTextIndex``. It lives here because the
+tablet's own search index is a SQLite image and ``sqlite3`` may be imported
+nowhere else; the transport that fetches those bytes is ``rmspec-device``'s half
+of the same capability, and neither package may hold both.
+
 Nothing here appears in an application-layer signature. The composition root in
 ``rmspec-cli`` is the only other package allowed to name these classes; everything
 above depends on the Protocols in ``rmspec.domain.ports.persistence``.
@@ -56,11 +63,13 @@ from rmspec.persistence.caches import (
 from rmspec.persistence.maintenance import StoreCounts, StoreMaintenance
 from rmspec.persistence.migrations import SCHEMA_VERSION
 from rmspec.persistence.paths import default_database_path
+from rmspec.persistence.search_index import DeviceSearchIndex
 from rmspec.persistence.sync_store import SqliteDocumentSyncStore
 
 __all__ = [
     "MINIMUM_SQLITE_VERSION",
     "SCHEMA_VERSION",
+    "DeviceSearchIndex",
     "NullDiagramCache",
     "NullOcrCache",
     "SqliteDatabase",

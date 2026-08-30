@@ -1,12 +1,20 @@
-"""The four port contracts, written once and run against every implementation.
+"""The port contracts, written once and run against every implementation.
 
 Each class here holds every assertion the port makes, and declares its subject
 through a fixture annotated with the *Protocol* rather than with an adapter. Two
-files bind them -- ``test_persistence_contract_sqlite.py`` and
+files bind the four persistence contracts --
+``test_persistence_contract_sqlite.py`` and
 ``test_persistence_contract_in_memory.py`` -- so one assertion set proves the
 SQLite adapter and the in-memory double satisfy the same contract. That is what
 makes the doubles usable by every later application-layer test: a double that
 drifts from the adapter fails here, not three packages away.
+
+:class:`HandwrittenTextIndexContract` is the fifth, and both its bindings live in
+``test_persistence_search_index.py`` rather than being split across the two files
+above. It is not a persistence port -- it is
+``rmspec.domain.ports.ocr.HandwrittenTextIndex``, bound here because the tablet's
+index is a SQLite image -- and its two implementations need one shared image
+builder, so splitting them would put that builder in a third module for no gain.
 
 The fixture's Protocol annotation is also a static conformance check. No port is
 ``runtime_checkable`` and nothing calls ``isinstance``, so returning a concrete
@@ -25,7 +33,7 @@ the other. Everything else is shared.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 import pytest
 from persistence_builders import (
@@ -56,7 +64,20 @@ from rmspec.persistence.testing import SeededRecordKind
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from rmspec.domain.ports.ocr import HandwrittenTextIndex
     from rmspec.domain.ports.persistence import DocumentSyncStore, SyncAuditLog
+
+#: The corpus every ``HandwrittenTextIndex`` binding presents, as
+#: ``(page_ref, entry_ref, text)``. Shaped after the measured device: two documents,
+#: several pages with a reading, and one page the tablet indexed and found blank.
+#: There is deliberately no row for ``page-unindexed``, which is the state of every
+#: page written since the last index build and the whole reason the lookup can
+#: answer ``None``.
+INDEXED_ROWS: Final = (
+    ("page-ink", "doc-a", "the first page of ink"),
+    ("page-more-ink", "doc-a", "a second page, also inked"),
+    ("page-blank", "doc-b", ""),
+)
 
 
 class ArtifactCache[K, A](Protocol):
@@ -986,3 +1007,116 @@ class SyncAuditLogContract:
         self.make_unreadable(log)
         with pytest.raises(StoredRecordUnreadableError):
             log.recent(limit=10)
+
+
+class HandwrittenTextIndexContract:
+    """Every assertion ``HandwrittenTextIndex`` makes about its implementations.
+
+    The port's whole point is that it has three answers where a ``TextRecognizer``
+    has two, so most of what is below is about keeping ``None`` and ``""`` apart. A
+    binding that collapsed them would pass a suite written per-implementation and
+    fail here.
+    """
+
+    # ── seams a binding must provide ────────────────────────────────────────
+
+    @pytest.fixture
+    def index(self) -> HandwrittenTextIndex:
+        """Return the subject under test, presenting :data:`INDEXED_ROWS`.
+
+        Returns
+        -------
+        HandwrittenTextIndex
+            An index holding exactly those rows and nothing else.
+        """
+        raise NotImplementedError
+
+    def break_index(self, index: HandwrittenTextIndex) -> None:
+        """Make ``index`` unusable, the way a torn copy of a live database is.
+
+        Parameters
+        ----------
+        index
+            The subject, on which no lookup has yet been made.
+        """
+        raise NotImplementedError
+
+    # ── identity ────────────────────────────────────────────────────────────
+
+    def test_the_provider_id_is_a_stable_non_empty_slug(
+        self,
+        index: HandwrittenTextIndex,
+    ) -> None:
+        """The provider id is a stable non empty slug."""
+        # The app folds this into the cache key, so an empty or per-call value would
+        # either poison every row or invalidate every row.
+        assert index.provider_id
+        assert index.provider_id == index.provider_id
+
+    # ── the three answers ───────────────────────────────────────────────────
+
+    def test_an_indexed_page_returns_the_devices_own_reading(
+        self,
+        index: HandwrittenTextIndex,
+    ) -> None:
+        """An indexed page returns the devices own reading."""
+        found = index.lookup("page-ink")
+        assert found is not None
+        assert found.text == "the first page of ink"
+        assert found.entry_ref == "doc-a"
+        # Echoed from the argument, never from the row: a row that named another page
+        # would attribute one page's handwriting to another.
+        assert found.page_ref == "page-ink"
+
+    def test_an_indexed_but_blank_page_is_an_empty_reading_not_a_miss(
+        self,
+        index: HandwrittenTextIndex,
+    ) -> None:
+        """An indexed but blank page is an empty reading not a miss."""
+        found = index.lookup("page-blank")
+        assert found is not None
+        assert found.text == ""
+        assert found.entry_ref == "doc-b"
+
+    def test_an_unindexed_page_is_a_miss_not_a_blank_reading(
+        self,
+        index: HandwrittenTextIndex,
+    ) -> None:
+        """An unindexed page is a miss not a blank reading."""
+        # The measured normal state: the index lags the tablet, so a page written
+        # since the last build has no row. Answering `text=""` here would let a stale
+        # index report a page with ink as blank and suppress the paid read.
+        assert index.lookup("page-unindexed") is None
+
+    def test_every_row_carries_the_indexs_one_generation(
+        self,
+        index: HandwrittenTextIndex,
+    ) -> None:
+        """Every row carries the indexs one generation."""
+        first = index.lookup("page-ink")
+        second = index.lookup("page-more-ink")
+        assert first is not None
+        assert second is not None
+        assert first.generation == second.generation
+
+    def test_repeated_lookups_of_one_page_agree(self, index: HandwrittenTextIndex) -> None:
+        """Repeated lookups of one page agree."""
+        # An index that memoizes its source must answer the second call from the same
+        # snapshot, not from a re-read that may have moved.
+        assert index.lookup("page-ink") == index.lookup("page-ink")
+        assert index.lookup("page-unindexed") == index.lookup("page-unindexed")
+
+    # ── failures ────────────────────────────────────────────────────────────
+
+    def test_an_unusable_index_raises_store_unavailable(
+        self,
+        index: HandwrittenTextIndex,
+    ) -> None:
+        """An unusable index raises store unavailable."""
+        self.break_index(index)
+        with pytest.raises(StoreUnavailableError) as caught:
+            index.lookup("page-ink")
+        # Exactly the base class. StoreSchemaMismatchError is a subclass and means
+        # something a caller acts on differently, so a test that accepted either
+        # would not notice them swapping.
+        assert type(caught.value) is StoreUnavailableError

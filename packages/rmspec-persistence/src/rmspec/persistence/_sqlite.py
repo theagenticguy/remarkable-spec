@@ -1,10 +1,10 @@
 """Connection ownership, transaction control, and error translation.
 
 This is the only module in the workspace that imports ``sqlite3``, and it is the
-only module that names a sqlite3 type. Everything above it -- the four adapters,
-the maintenance class -- speaks :class:`StoreConnection` and never sees a driver
-exception, which is what keeps ``rmspec.domain.errors`` the whole error surface of
-this package.
+only module that names a sqlite3 type. Everything above it -- the port adapters,
+the search-index reader, the maintenance class -- speaks :class:`StoreConnection`
+and never sees a driver exception, which is what keeps ``rmspec.domain.errors`` the
+whole error surface of this package.
 
 Three decisions here are load-bearing, and each replaces a legacy defect.
 
@@ -62,6 +62,7 @@ __all__ = [
     "MINIMUM_SQLITE_VERSION",
     "SqliteDatabase",
     "StoreConnection",
+    "deserialized_image",
     "dumps",
     "loads",
     "open_legacy_readonly",
@@ -87,6 +88,11 @@ _BUSY_TIMEOUT_MS: Final = 5_000
 #: Checked before opening because a file too short for the driver to recognise is
 #: silently overwritten rather than refused.
 _SQLITE_MAGIC: Final = b"SQLite format 3\x00"
+
+#: The single row ``PRAGMA quick_check`` returns for a sound database. Anything else
+#: is a list of complaints, one row each, and every one of them means the image
+#: cannot be trusted to answer a query with its own rows.
+_QUICK_CHECK_OK: Final = ("ok",)
 
 #: Row shape. sqlite3 returns ``Any`` per column; the adapters always select an
 #: explicit column list, so position is fixed and a dropped column fails in the
@@ -684,3 +690,69 @@ def open_legacy_readonly(path: Path, /) -> StoreConnection:
         raw = sqlite3.connect(uri, isolation_level=None, uri=True, check_same_thread=False)
     _LOGGER.debug("opened legacy database %s read-only", path)
     return StoreConnection(raw, store=store)
+
+
+@contextmanager
+def deserialized_image(image: bytes, /, *, store: str) -> Iterator[StoreConnection]:
+    """Open a database that arrived as bytes, integrity-check it, and close it after.
+
+    The second way into :class:`StoreConnection`, for a database with no path: the
+    tablet's own search index is copied off the device whole and read here, because
+    the device has no ``sqlite3`` binary to query it with. The bytes are copied into
+    a private in-memory database, so nothing done through the connection can reach
+    the caller's ``bytes`` object or the device.
+
+    It cannot reuse :func:`_connect`, and not for want of trying: ``PRAGMA
+    journal_mode=WAL`` reports ``memory`` on an in-memory database, so
+    :func:`_configure`'s read-back would reject every image. None of those three
+    pragmas means anything here anyway -- nothing writes, so there is no lock to wait
+    for and no cascade to enforce.
+
+    ``PRAGMA quick_check`` is mandatory rather than defensive, and this is the one
+    place it runs. Measured on CPython 3.13 with SQLite 3.50.4: an image truncated by
+    a single byte deserializes cleanly, answers ``SELECT`` with a row, and fails
+    ``quick_check`` -- so a reader that skips the check answers with rows it cannot
+    vouch for and raises nothing. ``MemoryError`` is caught by name because that, and
+    not ``sqlite3.DatabaseError``, is what an empty image raises.
+
+    Parameters
+    ----------
+    image
+        The whole database image, header included.
+    store
+        Label naming the image, carried into every error raised against it.
+
+    Yields
+    ------
+    StoreConnection
+        A connection over a private copy of ``image``, closed on exit.
+
+    Raises
+    ------
+    StoreUnavailableError
+        The image is empty, is not a database, is truncated, or failed
+        ``PRAGMA quick_check``. Also raised when the driver was built without
+        deserialisation support, which arrives as ``sqlite3.NotSupportedError``.
+    """
+    with translated(store):
+        raw = sqlite3.connect(":memory:", isolation_level=None)
+    conn = StoreConnection(raw, store=store)
+    try:
+        try:
+            with translated(store):
+                raw.deserialize(image)
+        except MemoryError as exc:
+            raise StoreUnavailableError(
+                store=store,
+                detail=f"cannot open a {len(image)}-byte image: {exc!r}",
+            ) from exc
+        verdict = conn.query("PRAGMA quick_check")
+        if verdict != [_QUICK_CHECK_OK]:
+            complaints = "; ".join(str(row[0]) for row in verdict)
+            raise StoreUnavailableError(
+                store=store,
+                detail=f"integrity check reported {complaints}",
+            )
+        yield conn
+    finally:
+        conn.close()

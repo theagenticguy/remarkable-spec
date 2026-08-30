@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from rmspec.persistence.testing.doubles import (
     IN_MEMORY_STORE,
+    FakeHandwrittenTextIndex,
     InMemoryDiagramCache,
     InMemoryDocumentSyncStore,
     InMemoryOcrCache,
@@ -24,6 +25,7 @@ from rmspec.persistence.testing.doubles import (
 
 __all__ = [
     "IN_MEMORY_STORE",
+    "FakeHandwrittenTextIndex",
     "InMemoryDiagramCache",
     "InMemoryDocumentSyncStore",
     "InMemoryOcrCache",
