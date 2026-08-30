@@ -998,7 +998,14 @@ def test_closed_enums_have_no_aliases(enum_cls: type[StrEnum]) -> None:
     assert len({member.value for member in members}) == len(members)
 
 
-def test_the_degradation_vocabulary_is_closed_at_the_reviewed_seven() -> None:
+def test_the_degradation_vocabulary_is_closed_at_the_reviewed_eight() -> None:
+    """The count is in the name so that adding a member cannot be a quiet edit.
+
+    It went from seven to eight on 2026-08-30, and this test failing is what made that a
+    decision rather than a diff: two use cases had independently reached for
+    ``CATALOG_ENTRY_SKIPPED`` for an unavailable device index and each said in prose that it
+    did not fit.
+    """
     assert {kind.value for kind in DegradationKind} == {
         "catalog_entry_skipped",
         "page_not_annotated",
@@ -1007,7 +1014,20 @@ def test_the_degradation_vocabulary_is_closed_at_the_reviewed_seven() -> None:
         "pdf_page_count_estimated",
         "cache_miss_key_changed",
         "audit_not_recorded",
+        "device_index_unavailable",
     }
+
+
+def test_an_unavailable_device_index_is_its_own_kind_and_not_a_skipped_entry() -> None:
+    """The two are about different things and a reader acts on them differently.
+
+    A skipped catalog entry means "look again for that document"; an unavailable index means
+    "nothing is missing from your answer except a cross-check you were not paying for". The
+    assertion is that they are distinct members rather than one stretched over both, which
+    is the state this replaced.
+    """
+    assert DegradationKind.DEVICE_INDEX_UNAVAILABLE is not DegradationKind.CATALOG_ENTRY_SKIPPED
+    assert DegradationKind.DEVICE_INDEX_UNAVAILABLE.value == "device_index_unavailable"
 
 
 def test_the_write_reason_vocabulary_is_closed_at_four() -> None:

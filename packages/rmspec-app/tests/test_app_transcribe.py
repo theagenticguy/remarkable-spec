@@ -461,7 +461,7 @@ def test_a_torn_index_costs_the_prior_and_nothing_else(failure: StoreUnavailable
     result = bench.run()
     assert len(result.degradations) == 1
     degradation = result.degradations[0]
-    assert degradation.kind is DegradationKind.CATALOG_ENTRY_SKIPPED
+    assert degradation.kind is DegradationKind.DEVICE_INDEX_UNAVAILABLE
     assert degradation.subject == PAGE_A
     assert failure.store in degradation.detail
     assert _only(result).page.text == INK

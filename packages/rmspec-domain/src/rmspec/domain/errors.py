@@ -230,6 +230,25 @@ class DegradationKind(StrEnum):
     """The operation succeeded but :class:`AuditWriteFailedError` stopped its history
     entry from landing. The one degradation raised from a failure rather than a guess."""
 
+    DEVICE_INDEX_UNAVAILABLE = "device_index_unavailable"
+    """The tablet's own handwriting index could not be read, so a free prior was lost and
+    the run continued without it.
+
+    Added 2026-08-30 because two use cases independently reached for
+    :attr:`CATALOG_ENTRY_SKIPPED` and each said in prose that it did not fit. It does not:
+    that member is about *an enumeration omitting an entry it could not read*, while this is
+    about a whole source being unavailable, and the difference is what a reader acts on --
+    an omitted entry means "look again for that document", an unavailable index means
+    "nothing is missing from your answer except a cross-check you were not paying for".
+
+    Reached when ``HandwrittenTextIndex.lookup`` raises :class:`StoreUnavailableError` or
+    :class:`StoreSchemaMismatchError`. Both are *expected*, not exotic: the index is
+    xochitl's live database, reMarkable's own documentation says not to read document files
+    while it runs, and a torn read is caught by the reader's mandatory integrity check
+    rather than served as another page's handwriting. Recorded **once per run** rather than
+    once per page -- a torn database faults on every lookup, and four hundred identical
+    degradations bury the ones that matter."""
+
 
 class DocumentCandidate(BaseModel, frozen=True, extra="forbid"):
     """One document a selector matched, in the only detail an ambiguity message needs.

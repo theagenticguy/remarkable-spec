@@ -148,14 +148,15 @@ is a free prior and a torn index should cost the prior and nothing else. The rea
 raises those at all because the index is xochitl's live database and reMarkable's own
 documentation says not to read files while it runs.
 
-:class:`~rmspec.domain.errors.DegradationKind` has no member for it. The closest in
-shape is :attr:`~rmspec.domain.errors.DegradationKind.CATALOG_ENTRY_SKIPPED` -- the one
-member that means "a read failed, what it would have contributed was omitted, and the
-run continued" rather than "a value was guessed" -- and it is used here under protest,
-with the honest member named: ``DEVICE_INDEX_UNAVAILABLE``, "the device's handwriting
-index could not be read, so the free prior was skipped and the page was read from
-pixels alone". Adding it is a reviewed change to the domain and not something this
-module may decide, which is the rule :mod:`rmspec.app.render` states for the same
+It is reported as
+:attr:`~rmspec.domain.errors.DegradationKind.DEVICE_INDEX_UNAVAILABLE`, which exists
+because this module and :mod:`rmspec.app.search` independently reached for
+``CATALOG_ENTRY_SKIPPED`` and each said in prose that it did not fit. It does not: that
+member means an enumeration omitted an entry it could not read, so a reader looks again
+for that document, whereas this means a whole source was unavailable and nothing is
+missing from the answer except a cross-check nobody was paying for. Adding a member is a
+reviewed change to the domain and not something this module may decide, which is the
+rule :mod:`rmspec.app.render` states for the same
 situation.
 
 The pipeline is a collaborator, not a copy
@@ -1311,7 +1312,7 @@ class TranscribePages:
         except StoreUnavailableError as error:
             log.record(
                 Degradation(
-                    kind=DegradationKind.CATALOG_ENTRY_SKIPPED,
+                    kind=DegradationKind.DEVICE_INDEX_UNAVAILABLE,
                     subject=page_ref,
                     detail=f"{_INDEX_SKIPPED} ({error})",
                 )

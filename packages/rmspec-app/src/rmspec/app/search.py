@@ -357,7 +357,7 @@ class SearchTextResult(BaseModel, frozen=True, extra="forbid"):
     degradations: tuple[Degradation, ...]
     """Every substitution this search made instead of failing.
 
-    At most one: ``CATALOG_ENTRY_SKIPPED`` when the device index could not be read, after
+    At most one: ``DEVICE_INDEX_UNAVAILABLE`` when the device index could not be read, after
     which it is not consulted again. The mirror and the audit log do not degrade.
     """
 
@@ -400,7 +400,7 @@ class _DeviceReadings:
             self._available = False
             self._log.record(
                 Degradation(
-                    kind=DegradationKind.CATALOG_ENTRY_SKIPPED,
+                    kind=DegradationKind.DEVICE_INDEX_UNAVAILABLE,
                     subject=self._index.provider_id,
                     detail=(
                         f"the device's handwriting index could not be read, so it was not "

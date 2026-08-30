@@ -490,7 +490,7 @@ def test_an_unreadable_device_index_degrades_rather_than_failing():
     result = _search(store, _InMemoryIndex(failure=failure), query="retention")
     assert [match.source for match in result.matches] == [MatchSource.MIRROR]
     (degradation,) = result.degradations
-    assert degradation.kind is DegradationKind.CATALOG_ENTRY_SKIPPED
+    assert degradation.kind is DegradationKind.DEVICE_INDEX_UNAVAILABLE
     assert degradation.subject == INDEX_ID
     assert "disk image is malformed" in degradation.detail
 
@@ -500,7 +500,7 @@ def test_a_schema_mismatch_degrades_by_the_same_clause():
     failure = StoreSchemaMismatchError(store="xochitl index", found=3, expected=4)
     result = _search(_one_page_store(), _InMemoryIndex(failure=failure), query="retention")
     (degradation,) = result.degradations
-    assert degradation.kind is DegradationKind.CATALOG_ENTRY_SKIPPED
+    assert degradation.kind is DegradationKind.DEVICE_INDEX_UNAVAILABLE
 
 
 def test_a_torn_index_is_consulted_once_and_reported_once():
