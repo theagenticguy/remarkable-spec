@@ -158,7 +158,14 @@ class TransportKind(StrEnum):
     """
 
     USB_WEB_API = "usb_web_api"
-    """The firmware's five-route HTTP API on the USB network interface."""
+    """The firmware's HTTP API on the USB network interface.
+
+    Six route families, established from 59 distinct ``Bad path`` verdicts the server
+    logged rather than from scanning: ``/documents/``, ``/documents/{parentId}``,
+    ``/download/{id}/{format}``, ``/thumbnail/{id}``, ``/log.txt`` and ``/upload``, plus a
+    static file tree. This docstring said "five-route" until 2026-08-30; the count was
+    measured, and so was the correction.
+    """
 
     SSH = "ssh"
     """A shell and file transfer over SSH to the device's BusyBox userland."""
@@ -818,14 +825,30 @@ class DeviceUploadRejected(DeviceError):
 
 
 class DeviceOperationUnsupported(DeviceError):
-    """Raised when the bound transport cannot serve the requested operation at all.
+    r"""Raised when the bound transport cannot serve the requested operation at all.
 
-    The firmware's USB web API is five routes and cannot produce a raw ``.rmdoc`` bundle --
-    ``Accept: application/zip`` is answered with a PDF -- so a use case needing raw
-    annotation bytes has no binding under ``--usb`` and this is raised at composition,
-    naming the transports that can. Raised eagerly so the broken bundle download cannot
-    return silently as a PDF, and so the shell says "retry over SSH" instead of leaking a
+    Raised at composition where a port has no binding on the selected transport, and
+    per-request where a bound adapter cannot honour part of what was asked. It names the
+    transports that can, so the shell says "retry over SSH" instead of leaking a
     dependency-injection resolution failure.
+
+    **The example this docstring used to give was measured false and is replaced rather
+    than repaired.** It claimed the USB web API is five routes and cannot produce a raw
+    ``.rmdoc`` bundle because ``Accept: application/zip`` is answered with a PDF. Both
+    halves are wrong: the route table is six families, and ``GET /download/{id}/rmdoc``
+    returns ``200 application/zip`` starting ``PK\x03\x04``. The header was never the
+    selector -- the third path segment is, and it accepts only the exact lowercase ``pdf``
+    or ``rmdoc`` -- so the legacy client sent a filename there and got ``400 {"error":
+    "Filetype not supported"}`` on both routes. ``ports/device.py`` records the refutation
+    in full.
+
+    Two live examples that are measured, and which this class exists for:
+
+    * ``POST /upload`` has no destination parameter of any kind, so a ``parent_uuid`` a USB
+      uploader is handed cannot be honoured. It raises before writing, and is never
+      replaced by a silent placement at the root.
+    * The route table serves no file from the xochitl tree, so ``SearchIndexSource`` has no
+      USB binding at all and the composition root fails to bind rather than pretending.
     """
 
     def __init__(
