@@ -99,6 +99,7 @@ __all__ = [
     "FEATURE_MODEL_BEDROCK",
     "FEATURE_NAMES",
     "FEATURE_OCR_APPLE_VISION",
+    "FEATURE_OCR_BDA",
     "FEATURE_OCR_TEXTRACT",
     "FEATURE_PDF_READ",
     "FEATURE_RASTER",
@@ -148,6 +149,9 @@ FEATURE_OCR_APPLE_VISION: Final = "ocr-apple-vision"
 FEATURE_OCR_TEXTRACT: Final = "ocr-textract"
 """Handwriting recognition through AWS Textract: ``boto3``."""
 
+FEATURE_OCR_BDA: Final = "ocr-bda"
+"""Handwriting recognition through Bedrock Data Automation's sync read: ``boto3``."""
+
 FEATURE_MODEL_BEDROCK: Final = "model-bedrock"
 """A vision-language model over Bedrock: ``boto3``."""
 
@@ -161,6 +165,7 @@ FEATURE_NAMES: Final = (
     FEATURE_DEVICE_SSH,
     FEATURE_OCR_APPLE_VISION,
     FEATURE_OCR_TEXTRACT,
+    FEATURE_OCR_BDA,
     FEATURE_MODEL_BEDROCK,
     FEATURE_MARKDOWN_PDF,
 )

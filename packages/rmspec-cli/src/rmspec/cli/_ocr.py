@@ -56,6 +56,7 @@ from rmspec.app import RenderPagesRequest, TranscribePages, TranscribePagesReque
 from rmspec.cli._invoke import (
     FEATURE_MODEL_BEDROCK,
     FEATURE_OCR_APPLE_VISION,
+    FEATURE_OCR_BDA,
     FEATURE_OCR_TEXTRACT,
     FEATURE_RASTER,
     FEATURE_SCENE_DECODE,
@@ -98,6 +99,7 @@ _TEMPLATE_ATTRIBUTE: Final = "RasterTemplate"
 """The container value carrying the screen, the palette and the style as one triple."""
 
 _ENGINE_FEATURES: Final = {
+    OcrEngineName.BDA: FEATURE_OCR_BDA,
     OcrEngineName.TEXTRACT: FEATURE_OCR_TEXTRACT,
     OcrEngineName.APPLE_VISION: FEATURE_OCR_APPLE_VISION,
 }

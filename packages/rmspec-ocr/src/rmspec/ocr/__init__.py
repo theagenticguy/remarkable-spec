@@ -1,8 +1,8 @@
-"""OCR adapters: Apple's on-device Vision framework, AWS Textract, and Bedrock.
+"""OCR adapters: Apple's Vision framework, AWS Textract, Bedrock Data Automation, and Bedrock.
 
 This package binds the two Protocols in :mod:`rmspec.domain.ports.ocr` --
 :class:`~rmspec.domain.ports.ocr.VisionLanguageModel` and
-:class:`~rmspec.domain.ports.ocr.TextRecognizer` -- to the three engines this workspace has
+:class:`~rmspec.domain.ports.ocr.TextRecognizer` -- to the four engines this workspace has
 measured, and supplies the composition root's health check for the one engine that is optional.
 It may import ``rmspec.domain`` and nothing else from the workspace.
 
@@ -15,11 +15,12 @@ them means is ``rmspec.app``'s job.
 
 What is exported, and what stays behind an underscore
 ----------------------------------------------------
-Three adapters -- :class:`~rmspec.ocr.vision_model.BedrockOpenAiVisionModel` for the model port,
-:class:`~rmspec.ocr.apple_vision.AppleVisionRecognizer` and
-:class:`~rmspec.ocr.textract.TextractRecognizer` for the recognition port -- plus the two names a
-container needs to *decide* it can build them: :func:`~rmspec.ocr.availability.require_backends`
-and the :class:`~rmspec.ocr.availability.OcrEngine` vocabulary its one argument is written in.
+Four adapters -- :class:`~rmspec.ocr.vision_model.BedrockOpenAiVisionModel` for the model port,
+:class:`~rmspec.ocr.apple_vision.AppleVisionRecognizer`,
+:class:`~rmspec.ocr.textract.TextractRecognizer` and :class:`~rmspec.ocr.bda.BdaRecognizer` for
+the recognition port -- plus the two names a container needs to *decide* it can build them:
+:func:`~rmspec.ocr.availability.require_backends` and the
+:class:`~rmspec.ocr.availability.OcrEngine` vocabulary its one argument is written in.
 Availability is not a port error, so the check is a name here rather than an ``except`` inside an
 adapter; ``OcrEngine`` is exported with it because a function whose argument type is unreachable
 is a function no composition root can call.
@@ -49,7 +50,8 @@ package the workspace's dependency map lets speak either, and both the lint laye
 ``rmspec.cli`` reaches for them. So all three factories are public. Two of them needed no name
 here:
 
-:meth:`~rmspec.ocr.textract.TextractRecognizer.in_region` and
+:meth:`~rmspec.ocr.textract.TextractRecognizer.in_region`,
+:meth:`~rmspec.ocr.bda.BdaRecognizer.for_project` and
 :meth:`~rmspec.ocr.apple_vision.AppleVisionRecognizer.on_this_machine` are classmethods on
 classes this module already exports, so they arrive with their owners and there is no
 module-level name to list. That is not an accident of syntax: an engine whose construction and
@@ -120,11 +122,13 @@ from __future__ import annotations
 from rmspec.ocr._bedrock import build_client
 from rmspec.ocr.apple_vision import AppleVisionRecognizer
 from rmspec.ocr.availability import OcrEngine, require_backends
+from rmspec.ocr.bda import BdaRecognizer
 from rmspec.ocr.textract import TextractRecognizer
 from rmspec.ocr.vision_model import BedrockOpenAiVisionModel
 
 __all__ = [
     "AppleVisionRecognizer",
+    "BdaRecognizer",
     "BedrockOpenAiVisionModel",
     "OcrEngine",
     "TextractRecognizer",

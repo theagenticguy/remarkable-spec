@@ -55,7 +55,9 @@ def test_defaults_are_the_measured_values():
     assert settings.aws_region == "us-west-2"
     assert settings.read_model == "global.openai.gpt-5.6-luna"
     assert settings.merge_model == "global.openai.gpt-5.6-terra"
-    assert settings.ocr_engines == frozenset({OcrEngineName.TEXTRACT})
+    assert settings.ocr_engines == frozenset({OcrEngineName.BDA})
+    assert settings.bda_project_arn is None
+    assert settings.bda_profile == "us.data-automation-v1"
     assert settings.agreement_threshold == 0.90
 
 
@@ -124,6 +126,13 @@ _OVERRIDES: list[tuple[str, str, str, object]] = [
     ("RMSPEC_READ_MODEL", "some.reader", "read_model", "some.reader"),
     ("RMSPEC_MERGE_MODEL", "some.judge", "merge_model", "some.judge"),
     (
+        "RMSPEC_BDA_PROJECT_ARN",
+        "arn:aws:bedrock:eu-west-1:123456789012:data-automation-project/abc",
+        "bda_project_arn",
+        "arn:aws:bedrock:eu-west-1:123456789012:data-automation-project/abc",
+    ),
+    ("RMSPEC_BDA_PROFILE", "eu.data-automation-v1", "bda_profile", "eu.data-automation-v1"),
+    (
         "RMSPEC_OCR_ENGINES",
         "apple_vision",
         "ocr_engines",
@@ -167,12 +176,14 @@ def test_the_new_settings_are_declared_after_device_host():
     order = tuple(CliSettings.model_fields)
 
     assert order.index("device_host") < order.index("max_pages")
-    assert order[-7:] == (
+    assert order[-9:] == (
         "max_pages",
         "transport",
         "aws_region",
         "read_model",
         "merge_model",
+        "bda_project_arn",
+        "bda_profile",
         "ocr_engines",
         "agreement_threshold",
     )
@@ -182,7 +193,7 @@ def test_a_comma_separated_engine_list_is_read_as_a_set(monkeypatch: pytest.Monk
     # pydantic-settings decodes a complex field's environment value as JSON unless NoDecode
     # says otherwise, and a SettingsError is not a ValidationError -- so without that
     # annotation this raises past load_settings' translation entirely.
-    monkeypatch.setenv("RMSPEC_OCR_ENGINES", " textract , apple_vision ,")
+    monkeypatch.setenv("RMSPEC_OCR_ENGINES", " bda , textract , apple_vision ,")
 
     assert load_settings().ocr_engines == frozenset(OcrEngineName)
 

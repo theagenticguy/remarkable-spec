@@ -95,6 +95,14 @@ ignore = [
 # while TID251 fails the build when this one does. Both transports live here, so the
 # exemption is the package, not a file list that would drift as modules are added.
 "packages/rmspec-device/**" = ["TID251"]
+# The `probes/` tree: hand-run measurement scripts that cost money, never imported by anything
+# and never run by a test or by CI. Two exemptions, and each is the ban working rather than
+# failing. INP001 wants an `__init__.py`, but a probe is a script -- making the directory a
+# package would let a test import it, and the whole point is that nothing can. TID251 bans boto3
+# outside rmspec-ocr to keep AWS behind a port in shipped code; a probe's entire job is to call
+# the real service and print what it answered, which is the one thing no port can be asked. The
+# architecture suite agrees by construction: it enumerates `packages/` and this is not under it.
+"probes/**" = ["INP001", "TID251"]
 # The one package allowed to speak boto3 and botocore, for exactly the reason spelled out
 # above for paramiko. `OWNED_THIRD_PARTY` already assigns both to this package -- it fails
 # the build if any *other* package imports them -- while TID251 failed the build when this

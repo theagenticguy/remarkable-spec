@@ -310,6 +310,7 @@ from rmspec.domain.errors import (
     DeviceStateMismatchError,
     DocumentNotFound,
     DocumentStoreUnavailable,
+    InvalidSettingError,
     MalformedDeviceMetadata,
     MalformedDocument,
     MissingDependencyError,
@@ -387,6 +388,7 @@ from rmspec.formats import (
 )
 from rmspec.ocr import (
     AppleVisionRecognizer,
+    BdaRecognizer,
     BedrockOpenAiVisionModel,
     OcrEngine,
     TextractRecognizer,
@@ -665,6 +667,9 @@ class Feature(StrEnum):
     OCR_TEXTRACT = "ocr-textract"
     """Handwriting recognition through AWS Textract. ``boto3``."""
 
+    OCR_BDA = "ocr-bda"
+    """Handwriting recognition through Bedrock Data Automation's sync read. ``boto3``."""
+
     MODEL_BEDROCK = "model-bedrock"
     """A vision-language model over Bedrock. ``boto3``."""
 
@@ -757,6 +762,14 @@ FEATURE_MODULES: dict[Feature, tuple[OptionalModule, ...]] = {
             native=False,
         ),
     ),
+    Feature.OCR_BDA: (
+        OptionalModule(
+            package="boto3",
+            extra="aws",
+            feature="recognising handwriting with Bedrock Data Automation",
+            native=False,
+        ),
+    ),
     Feature.MODEL_BEDROCK: (
         OptionalModule(
             package="boto3", extra="aws", feature="calling a model on Bedrock", native=False
@@ -787,10 +800,12 @@ report it once, which :func:`resolve_dependencies` achieves by keying on the pac
 _FEATURE_ENGINES: dict[Feature, OcrEngine] = {
     Feature.OCR_APPLE_VISION: OcrEngine.APPLE_VISION,
     Feature.OCR_TEXTRACT: OcrEngine.AWS_TEXTRACT,
+    Feature.OCR_BDA: OcrEngine.AWS_BDA,
 }
 """Which recognisers a feature set implies, so ``require_backends`` is told only those."""
 
 _SETTING_ENGINES: Final = {
+    OcrEngineName.BDA: OcrEngine.AWS_BDA,
     OcrEngineName.TEXTRACT: OcrEngine.AWS_TEXTRACT,
     OcrEngineName.APPLE_VISION: OcrEngine.APPLE_VISION,
 }
@@ -801,6 +816,26 @@ A third vocabulary and the last one: ``textract`` is what fits in an environment
 for the other's reader. Two dictionaries reach ``OcrEngine`` -- this one from a setting, and
 :data:`_FEATURE_ENGINES` from the feature a command selected -- because the eager pass and the
 binding are answering different questions.
+"""
+
+_BDA_PROJECT_SETTING: Final = "RMSPEC_BDA_PROJECT_ARN"
+"""The setting an unusable Data Automation project ARN is reported against.
+
+Spelled here rather than imported from ``rmspec.ocr``: an adapter has no business knowing the
+name of the environment variable a particular front end reads, so ``bda.profile_arn_for`` raises
+``ValueError`` and this module -- the composition root, which does know -- names the setting.
+"""
+
+_BDA_PROJECT_REQUIREMENT: Final = (
+    "the ARN of a SYNC-type Bedrock Data Automation project, e.g. "
+    "arn:aws:bedrock:us-west-2:123456789012:data-automation-project/abc123"
+)
+"""What the setting has to be, phrased to finish both halves of ``InvalidSettingError``.
+
+Its message reads "setting X is Y, which is not Z" and its remediation "set X to Z", so this has
+to work as the object of both. It names SYNC because an ``ASYNC`` project -- which is what the
+console creates unless told otherwise -- is refused by the operation with ``Sync API only
+supports SYNC project type``, and that is not checkable without a control-plane call.
 """
 
 
@@ -2334,27 +2369,83 @@ class ExportProvider(Provider):
         return PyMuPdfPageReader(registry=registry)
 
 
-def _recognizer(name: OcrEngineName, /, *, region: str) -> TextRecognizer:
-    """Build the recogniser a user named, in the region they configured.
+def _recognizer(name: OcrEngineName, /, *, settings: CliSettings) -> TextRecognizer:
+    """Build the recogniser a user named, configured as they configured it.
 
     Parameters
     ----------
     name
         The engine as spelled in ``RMSPEC_OCR_ENGINES``.
-    region
-        The AWS region, which only Textract reads.
+    settings
+        Supplies ``aws_region`` for both AWS engines, and the project and profile ``bda`` needs.
+        The whole settings object rather than the two or three fields, because a per-engine
+        argument list would grow with every engine and every engine would take the others'.
 
     Returns
     -------
     TextRecognizer
-        ``TextractRecognizer.in_region`` builds and owns its ``textract`` client, and
-        ``AppleVisionRecognizer.on_this_machine`` loads the Vision bindings by module name from
-        inside itself -- so neither ``boto3`` nor the framework bindings are imported here, and
-        importing this module does not touch either.
+        ``BdaRecognizer.for_project`` and ``TextractRecognizer.in_region`` build and own their
+        boto3 clients, and ``AppleVisionRecognizer.on_this_machine`` loads the Vision bindings by
+        module name from inside itself -- so neither ``boto3`` nor the framework bindings are
+        imported here, and importing this module does not touch either.
+
+    Raises
+    ------
+    InvalidSettingError
+        ``bda`` is selected and ``RMSPEC_BDA_PROJECT_ARN`` is unset or is not a project ARN.
+        Raised while the binding is built, which is before the first page is rendered,
+        rasterised or sent to anything -- not before the document lookup, which a command
+        performs first. Left to the service, the same fault arrives as ``At least one of project
+        or inline blueprints must be provided``: a ``RecognitionFailed`` naming no setting, after
+        a page has already been rendered and rasterised.
     """
+    if name is OcrEngineName.BDA:
+        return _bda_recognizer(settings)
     if name is OcrEngineName.TEXTRACT:
-        return TextractRecognizer.in_region(region)
+        return TextractRecognizer.in_region(settings.aws_region)
     return AppleVisionRecognizer.on_this_machine()
+
+
+def _bda_recognizer(settings: CliSettings, /) -> TextRecognizer:
+    """Build the Data Automation recogniser, refusing an unusable project ARN by name.
+
+    Parameters
+    ----------
+    settings
+        Supplies ``bda_project_arn``, ``bda_profile`` and ``aws_region``.
+
+    Returns
+    -------
+    TextRecognizer
+        A recognizer over a ``bedrock-data-automation-runtime`` client.
+
+    Raises
+    ------
+    InvalidSettingError
+        The project ARN is unset, or is not a ``data-automation-project`` ARN. Two settings
+        could be at fault and only one ever is: ``profile_arn_for`` composes the profile from
+        the project's own partition, region and account, so a malformed profile ARN is not
+        reachable and the error always names the setting the user actually wrote.
+    """
+    project_arn = settings.bda_project_arn
+    if project_arn is None:
+        raise InvalidSettingError(
+            setting=_BDA_PROJECT_SETTING,
+            value="",
+            requirement=_BDA_PROJECT_REQUIREMENT,
+        )
+    try:
+        return BdaRecognizer.for_project(
+            project_arn,
+            region_name=settings.aws_region,
+            profile=settings.bda_profile,
+        )
+    except ValueError as exc:
+        raise InvalidSettingError(
+            setting=_BDA_PROJECT_SETTING,
+            value=project_arn,
+            requirement=_BDA_PROJECT_REQUIREMENT,
+        ) from exc
 
 
 def _bedrock_model(model_id: str, /, *, region: str) -> VisionLanguageModel:
@@ -2413,10 +2504,14 @@ class OcrProvider(Provider):
             here rather than only in the eager pass so that a composition selecting
             ``apple_vision`` on a host without the bindings fails while it is being built,
             naming the extra, instead of part-way through a page.
+        InvalidSettingError
+            ``bda`` is selected without a usable ``RMSPEC_BDA_PROJECT_ARN``. The same argument
+            as above, for the one engine whose obstacle is configuration rather than a package:
+            before any page is rendered, though a command's document lookup runs first.
         """
         selected = tuple(name for name in OcrEngineName if name in settings.ocr_engines)
         require_backends({_SETTING_ENGINES[name] for name in selected})
-        return tuple(_recognizer(name, region=settings.aws_region) for name in selected)
+        return tuple(_recognizer(name, settings=settings) for name in selected)
 
     @provide
     def read_model(self, settings: CliSettings) -> VisionLanguageModel:

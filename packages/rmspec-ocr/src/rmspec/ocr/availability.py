@@ -82,6 +82,7 @@ class OcrEngine(StrEnum):
     """
 
     APPLE_VISION = "apple-vision"
+    AWS_BDA = "aws-bda"
     AWS_TEXTRACT = "aws-textract"
 
 
@@ -98,7 +99,11 @@ def require_backends(
     engines
         The recognizers the container is about to build. Only these are checked: a
         Textract-only composition is not told to install ``pyobjc``, and an empty collection
-        checks nothing.
+        checks nothing. Two of the three members reach no branch below and that is not an
+        oversight -- ``boto3`` is a required dependency of this distribution rather than an
+        extra, so there is no install step to tell a Textract or Data Automation user about.
+        What *can* be missing for those two is configuration, and a setting the composition
+        root owns is not something this function could name.
     load
         How to load the backend module. Injected so both outcomes are exercised on either
         platform, the way :func:`rmspec.export._dyld.fallback_library_path` injects its

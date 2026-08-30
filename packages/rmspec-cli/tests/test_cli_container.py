@@ -104,6 +104,7 @@ from rmspec.domain.errors import (
     DeviceTransferInterrupted,
     DocumentNotFound,
     DocumentStoreUnavailable,
+    InvalidSettingError,
     MalformedDeviceMetadata,
     MalformedDocument,
     MissingDependencyError,
@@ -513,17 +514,41 @@ class _ModelDoubles(Provider):
         return ScriptedVisionLanguageModel(model_id="scripted-judge")
 
 
+_BDA_PROJECT_ARN = "arn:aws:bedrock:us-west-2:123456789012:data-automation-project/abc123"
+"""A syntactically real SYNC-project ARN, for the cases that need the binding to succeed."""
+
+
+class _RefusingBda:
+    """Stands in for the BDA factory when the project ARN cannot be named.
+
+    Raises the ``ValueError`` the real ``profile_arn_for`` raises, rather than being the real
+    one: the assertion under test is the container's translation, and driving it through a
+    double keeps this file from depending on the adapter's parse.
+    """
+
+    def for_project(self, project_arn: str, /, **_kwargs: object) -> TextRecognizer:
+        msg = f"not an ARN: {project_arn!r}"
+        raise ValueError(msg)
+
+
 class _RecordingOcr:
     """Stands in for the three adapter factories and records what they were asked for."""
 
     def __init__(self) -> None:
         self.regions: list[str] = []
+        self.projects: list[tuple[str, str, str]] = []
         self.model_ids: list[str] = []
         self.vision_calls = 0
 
     def in_region(self, region: str, /) -> TextRecognizer:
         self.regions.append(region)
         return ScriptedTextRecognizer(provider="scripted-textract")
+
+    def for_project(
+        self, project_arn: str, /, *, region_name: str, profile: str
+    ) -> TextRecognizer:
+        self.projects.append((project_arn, region_name, profile))
+        return ScriptedTextRecognizer(provider="scripted-bda")
 
     def on_this_machine(self) -> TextRecognizer:
         self.vision_calls += 1
@@ -545,6 +570,7 @@ def recording_ocr(monkeypatch: pytest.MonkeyPatch) -> _RecordingOcr:
     """
     recorder = _RecordingOcr()
     monkeypatch.setattr(_container, "TextractRecognizer", recorder)
+    monkeypatch.setattr(_container, "BdaRecognizer", recorder)
     monkeypatch.setattr(_container, "AppleVisionRecognizer", recorder)
     monkeypatch.setattr(_container, "build_client", lambda *, region: region)
     monkeypatch.setattr(
@@ -1603,6 +1629,7 @@ def test_the_recogniser_order_is_the_enums_not_the_frozensets(
         xochitl=tmp_path,
         sync_db=tmp_path / "s.db",
         ocr_engines=frozenset(OcrEngineName),
+        bda_project_arn=_BDA_PROJECT_ARN,
     )
     container = compose(settings=settings, consoles=_consoles())
     try:
@@ -1610,8 +1637,90 @@ def test_the_recogniser_order_is_the_enums_not_the_frozensets(
     finally:
         container.close()
 
-    assert [r.provider_id for r in recognizers] == ["scripted-textract@1", "scripted-vision@1"]
+    assert [r.provider_id for r in recognizers] == [
+        "scripted-bda@1",
+        "scripted-textract@1",
+        "scripted-vision@1",
+    ]
     assert recording_ocr.vision_calls == 1
+
+
+def test_the_bda_binding_is_told_the_project_the_region_and_the_profile(
+    tmp_path: Path,
+    recording_ocr: _RecordingOcr,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(_container, "require_backends", lambda _engines: None)
+    settings = CliSettings(
+        xochitl=tmp_path,
+        sync_db=tmp_path / "s.db",
+        ocr_engines=frozenset({OcrEngineName.BDA}),
+        bda_project_arn=_BDA_PROJECT_ARN,
+        bda_profile="eu.data-automation-v1",
+        aws_region="eu-west-1",
+    )
+    container = compose(settings=settings, consoles=_consoles())
+    try:
+        container.get(Sequence[TextRecognizer])
+    finally:
+        container.close()
+
+    assert recording_ocr.projects == [(_BDA_PROJECT_ARN, "eu-west-1", "eu.data-automation-v1")]
+    assert recording_ocr.regions == [], "the Textract factory must not be reached"
+
+
+def test_selecting_bda_with_no_project_arn_names_the_setting_rather_than_failing_on_a_page(
+    tmp_path: Path,
+    recording_ocr: _RecordingOcr,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The service refuses an absent project with "At least one of project or inline blueprints
+    # must be provided", which would arrive as a RecognitionFailed naming no setting, after a
+    # page had already been rendered and rasterised. This is the same argument require_backends
+    # makes for a missing package, for the one engine whose obstacle is configuration.
+    monkeypatch.setattr(_container, "require_backends", lambda _engines: None)
+    settings = CliSettings(
+        xochitl=tmp_path,
+        sync_db=tmp_path / "s.db",
+        ocr_engines=frozenset({OcrEngineName.BDA}),
+    )
+    container = compose(settings=settings, consoles=_consoles())
+    try:
+        with pytest.raises(InvalidSettingError) as caught:
+            container.get(Sequence[TextRecognizer])
+    finally:
+        container.close()
+
+    assert caught.value.setting == "RMSPEC_BDA_PROJECT_ARN"
+    assert "SYNC-type" in caught.value.requirement
+    assert exit_code(caught.value) == _EX_CONFIG
+    assert recording_ocr.projects == [], "no client is built for a project that cannot be named"
+
+
+def test_a_bda_project_arn_that_is_not_a_project_arn_is_reported_against_that_setting(
+    tmp_path: Path,
+    recording_ocr: _RecordingOcr,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # `profile_arn_for` raises ValueError because the name of the environment variable is the
+    # composition root's knowledge, not the adapter's. This is where it becomes a named setting.
+    monkeypatch.setattr(_container, "require_backends", lambda _engines: None)
+    monkeypatch.setattr(_container, "BdaRecognizer", _RefusingBda())
+    settings = CliSettings(
+        xochitl=tmp_path,
+        sync_db=tmp_path / "s.db",
+        ocr_engines=frozenset({OcrEngineName.BDA}),
+        bda_project_arn="not-an-arn",
+    )
+    container = compose(settings=settings, consoles=_consoles())
+    try:
+        with pytest.raises(InvalidSettingError) as caught:
+            container.get(Sequence[TextRecognizer])
+    finally:
+        container.close()
+
+    assert (caught.value.setting, caught.value.value) == ("RMSPEC_BDA_PROJECT_ARN", "not-an-arn")
+    assert recording_ocr.projects == [], "the refusing double stood in for the real factory"
 
 
 def test_a_selected_recogniser_with_no_backend_fails_while_the_binding_is_built(

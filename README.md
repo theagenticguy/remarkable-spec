@@ -219,7 +219,7 @@ transport that can.
 | tier | who reads | notes |
 | --- | --- | --- |
 | 0 | the tablet's own handwriting index | needs SSH, even on a `usb` run |
-| 1 | a recogniser — AWS Textract, or Apple Vision on macOS | `RMSPEC_OCR_ENGINES`, default `textract` |
+| 1 | a recogniser — Bedrock Data Automation, AWS Textract, or Apple Vision on macOS | `RMSPEC_OCR_ENGINES`, default `bda` |
 | 2 | `global.openai.gpt-5.6-luna` reads the raster itself | `RMSPEC_READ_MODEL` |
 | 3 | `global.openai.gpt-5.6-terra` adjudicates tiers 0–2 | `RMSPEC_MERGE_MODEL` |
 
@@ -227,6 +227,22 @@ When tier 0 and tier 1 agree at or above `RMSPEC_AGREEMENT_THRESHOLD` (0.90), ti
 skipped and never billed. Both models are called through Bedrock in `RMSPEC_AWS_REGION`. One
 threshold is not right for every hand, which is why it is a setting and why `--threshold`
 overrides it per run.
+
+Tier 1 defaults to **Bedrock Data Automation**, and it is the one engine that needs configuration
+rather than only credentials: `RMSPEC_BDA_PROJECT_ARN` must name a **SYNC-type** project, which is
+an account resource somebody creates and which no API lists. Unset, the run refuses while binding the
+recognisers — naming that setting, and before any page is rendered, rasterised or sent to a
+model. It earns the default on a
+measurement rather than a claim — `probes/bda_sync_document.py` sent one rmspec-rendered page of
+192 ink strokes and got 148 characters back with one error, `Tier 0` read as `Tier O`, whose word
+confidence of 0.869 was the lowest of all 27 words on the page. Textract remains one setting away
+(`RMSPEC_OCR_ENGINES=textract`) and needs no project.
+
+Confidence comes from BDA's **words**, never its lines. Every line of that probe page reported a
+confidence of exactly `0.01` while the words beneath those same lines ran 0.869 to 1.0, so the
+line-level number is a placeholder rather than a measurement; the published response schema omits
+the field entirely. Reading it would report every page at approximately 0.01, which the port reads
+as a garbage transcription.
 
 `rmspec diagram` extracts the Mermaid of a drawn diagram and reports a skip as data, never as an
 error. It does **not** check that the Mermaid parses: that would need a Node toolchain, so
@@ -238,7 +254,7 @@ become 432 model calls.
 
 ## Settings
 
-Fifteen variables, all `RMSPEC_`-prefixed. A typo in one fails the run at startup and names the
+Seventeen variables, all `RMSPEC_`-prefixed. A typo in one fails the run at startup and names the
 closest match. `rmspec env` prints the resolved values as assignments a shell can `eval`:
 
 ```text
@@ -255,12 +271,15 @@ export RMSPEC_TRANSPORT=usb
 export RMSPEC_AWS_REGION=us-west-2
 export RMSPEC_READ_MODEL=global.openai.gpt-5.6-luna
 export RMSPEC_MERGE_MODEL=global.openai.gpt-5.6-terra
-export RMSPEC_OCR_ENGINES=textract
+export RMSPEC_BDA_PROFILE=us.data-automation-v1
+export RMSPEC_OCR_ENGINES=bda
 export RMSPEC_AGREEMENT_THRESHOLD=0.9
 ```
 
 Two of those defaults are absolute paths under the running user's home; they are shown here as
-`~` and the command prints them in full.
+`~` and the command prints them in full. `RMSPEC_BDA_PROJECT_ARN` is absent from that block
+because it has no default and `rmspec env` omits an unset setting — printing
+`RMSPEC_BDA_PROJECT_ARN=''` would claim a project that does not exist.
 
 `RMSPEC_RENDER_DPI` is 229 because that is the Paper Pro panel's own density — 2700 pixels of
 diagonal over 11.8 inches — so a render is 1:1. It read 226 until 2026-08-30, which is the
@@ -289,7 +308,7 @@ domain; the CLI is the one place that composes them, through
 | `rmspec-render` | Ten pen-physics models and SVG generation. No native dependencies. |
 | `rmspec-export` | SVG, PNG and PDF writers, plus PDF page rasterization. |
 | `rmspec-device` | USB web API, SSH, and the read-only spec probe harness. |
-| `rmspec-ocr` | Apple Vision, AWS Textract, Bedrock. |
+| `rmspec-ocr` | Apple Vision, AWS Textract, Bedrock Data Automation, Bedrock. |
 | `rmspec-persistence` | SQLite adapters. The only package permitted to import `sqlite3`. |
 | `rmspec-cli` | The `rmspec` commands and the composition root. |
 

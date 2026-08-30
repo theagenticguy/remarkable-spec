@@ -327,7 +327,7 @@ rather than matching strings. Each item carries
 - `ink_character_substituted`
 - `cache_hit_raster_equivalent`
 
-## Settings (15 variables)
+## Settings (17 variables)
 
 Read from the environment at startup. An unknown `RMSPEC_`-prefixed variable fails the
 run and names the closest match, so a typo cannot silently do nothing. `rmspec env`
@@ -349,5 +349,7 @@ path is resolved against the running user's home.
 | `RMSPEC_AWS_REGION` | `str` | `"us-west-2"` | `RMSPEC_AWS_REGION` -- the region Textract and Bedrock are called in. |
 | `RMSPEC_READ_MODEL` | `str` | `"global.openai.gpt-5.6-luna"` | `RMSPEC_READ_MODEL` -- OCR tier 2, the vision read of the raster itself. |
 | `RMSPEC_MERGE_MODEL` | `str` | `"global.openai.gpt-5.6-terra"` | `RMSPEC_MERGE_MODEL` -- OCR tier 3, which adjudicates tiers 0-2. |
-| `RMSPEC_OCR_ENGINES` | `frozenset[OcrEngineName]` | `["textract"]` | `RMSPEC_OCR_ENGINES` -- comma-separated; `apple_vision` is macOS-only. |
+| `RMSPEC_BDA_PROJECT_ARN` | `str \| None` | `null` | `RMSPEC_BDA_PROJECT_ARN` -- the SYNC-type Data Automation project `bda` invokes. |
+| `RMSPEC_BDA_PROFILE` | `str` | `"us.data-automation-v1"` | `RMSPEC_BDA_PROFILE` -- the data automation profile id, joined onto the project's ARN. |
+| `RMSPEC_OCR_ENGINES` | `frozenset[OcrEngineName]` | `["bda"]` | `RMSPEC_OCR_ENGINES` -- comma-separated; `apple_vision` is macOS-only. |
 | `RMSPEC_AGREEMENT_THRESHOLD` | `float` | `0.9` | `RMSPEC_AGREEMENT_THRESHOLD` -- the tier-0/tier-1 short-circuit. |

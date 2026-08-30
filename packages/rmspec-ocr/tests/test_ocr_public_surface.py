@@ -49,6 +49,7 @@ from rmspec.ocr import _bedrock
 
 EXPECTED = [
     "AppleVisionRecognizer",
+    "BdaRecognizer",
     "BedrockOpenAiVisionModel",
     "OcrEngine",
     "TextractRecognizer",
@@ -70,7 +71,13 @@ EXPECTED_TESTING = [
 #: resolves to a class" is the assertion :mod:`rmspec.device` can make and this package cannot: a
 #: composition root here needs one function to build a client and one to prove it may.
 EXPECTED_CLASSES = frozenset(
-    {"AppleVisionRecognizer", "BedrockOpenAiVisionModel", "OcrEngine", "TextractRecognizer"}
+    {
+        "AppleVisionRecognizer",
+        "BdaRecognizer",
+        "BedrockOpenAiVisionModel",
+        "OcrEngine",
+        "TextractRecognizer",
+    }
 )
 
 #: The exported names that are functions, and the whole judgement call this file pins.
@@ -88,7 +95,14 @@ LANGUAGE_ARTIFACTS = {"annotations"}
 #: public module deliberately kept out of ``__all__``, so every name in ``__all__`` stays something
 #: a container binds or calls. It is a permitted set rather than a required one, because each of
 #: these is bound on the package as a side effect of an import somewhere.
-PUBLIC_MODULES = {"apple_vision", "availability", "testing", "textract", "vision_model"}
+PUBLIC_MODULES = {
+    "apple_vision",
+    "availability",
+    "bda",
+    "testing",
+    "textract",
+    "vision_model",
+}
 
 #: Names the private modules define that must never become part of this surface. Spelled out
 #: rather than read from each module's ``__all__`` for one specific reason: doing that would mean
@@ -137,7 +151,10 @@ CLAIMED_MEMBERS = {
     # Two members and no factory of its own, which is the whole reason `build_client` needs an
     # entry in `__all__`: this binding's client is injected so the suite can drive it with a stub.
     "BedrockOpenAiVisionModel": ("complete", "fingerprint"),
-    "OcrEngine": ("APPLE_VISION", "AWS_TEXTRACT"),
+    # `for_project` rather than `in_region`: this engine needs a project ARN as well as a
+    # region, and the classmethod that takes both is the one a container calls.
+    "BdaRecognizer": ("for_project", "provider_id", "recognize"),
+    "OcrEngine": ("APPLE_VISION", "AWS_BDA", "AWS_TEXTRACT"),
     "TextractRecognizer": ("in_region", "provider_id", "recognize"),
 }
 
@@ -464,6 +481,7 @@ def test_the_composition_check_and_its_vocabulary_are_both_reachable() -> None:
     assert callable(rmspec.ocr.require_backends)
     assert set(rmspec.ocr.OcrEngine) == {
         rmspec.ocr.OcrEngine.APPLE_VISION,
+        rmspec.ocr.OcrEngine.AWS_BDA,
         rmspec.ocr.OcrEngine.AWS_TEXTRACT,
     }
 

@@ -190,8 +190,22 @@ class OcrEngineName(StrEnum):
     tiering decision reproducible between two runs of the same command.
     """
 
+    BDA = "bda"
+    """Bedrock Data Automation's sync document read. The default.
+
+    First in declaration order, so on a run selecting more than one engine this is the tier-1
+    reading the agreement short-circuit is measured against. It earns that on two counts
+    measured against a real rmspec render: it reads the ink (148 characters, one error, and its
+    own lowest word confidence marked exactly that error), and it reports a per-word confidence
+    where Textract reports one per line.
+
+    It is the one engine that needs configuration rather than only credentials --
+    ``RMSPEC_BDA_PROJECT_ARN`` must name a SYNC-type project -- which is why ``rmspec doctor``
+    reports it as restricted rather than letting a run discover that mid-page.
+    """
+
     TEXTRACT = "textract"
-    """AWS Textract. The default, because it needs no macOS and no native bindings."""
+    """AWS Textract. Needs no macOS, no native bindings and no project to be created first."""
 
     APPLE_VISION = "apple_vision"
     """The Vision framework's on-device handwriting recogniser. macOS only."""
@@ -400,9 +414,34 @@ class CliSettings(BaseSettings):
     binding one model twice would make "the reader and the judge disagreed" unobservable.
     """
 
-    ocr_engines: Annotated[frozenset[OcrEngineName], NoDecode] = frozenset(
-        {OcrEngineName.TEXTRACT}
-    )
+    bda_project_arn: str | None = None
+    """``RMSPEC_BDA_PROJECT_ARN`` -- the SYNC-type Data Automation project ``bda`` invokes.
+
+    ``None`` rather than a default, because there is nothing to default to: a project is an
+    account-scoped resource somebody has to create, and no API lists one to discover. Three
+    things about it are not in the AWS user guide and were found by calling the operation: a
+    project is mandatory despite the API member being optional, it must have
+    ``projectType: SYNC`` rather than the ``ASYNC`` a console-created project defaults to, and
+    such a project accepts exactly one document text format.
+
+    Unset while ``bda`` is selected is refused while the recognisers are bound -- before any page
+    is rendered, rasterised or sent to a model -- and the error names this variable. It is not
+    refused before the document lookup, which a command performs first, and it is not yet a row in
+    ``rmspec doctor``: that report is shaped around what a *transport* can do, and a missing
+    setting is not that.
+    """
+
+    bda_profile: str = "us.data-automation-v1"
+    """``RMSPEC_BDA_PROFILE`` -- the data automation profile id, joined onto the project's ARN.
+
+    The operation requires a profile ARN whose partition, region and account must match the
+    project's; those three are facts the project ARN already carries, so only this id is a
+    choice. Measured working in ``us-west-2``. The ``us.`` prefix is a region family rather than
+    a constant, and no ``ListDataAutomationProfiles`` operation exists, so a project outside the
+    US regions needs this set by hand.
+    """
+
+    ocr_engines: Annotated[frozenset[OcrEngineName], NoDecode] = frozenset({OcrEngineName.BDA})
     """``RMSPEC_OCR_ENGINES`` -- comma-separated; ``apple_vision`` is macOS-only.
 
     ``NoDecode`` is load-bearing. pydantic-settings decodes a complex field's environment value

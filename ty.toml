@@ -15,7 +15,7 @@ python-version = "3.13"
 
 [src]
 respect-ignore-files = true
-include = ["packages", "tests"]
+include = ["packages", "tests", "probes"]
 exclude = [
     "**/.venv",
     "**/dist",

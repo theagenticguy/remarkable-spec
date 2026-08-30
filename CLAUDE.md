@@ -48,6 +48,11 @@ packages/
 └── rmspec-cli/          cyclopts commands + the dishka composition root
 ```
 
+`probes/` sits beside `packages/`: hand-run scripts that call a real paid service and print what
+it answered. Outside `packages/`, and so outside the coverage floor, the architecture invariants
+and the no-billable-calls rule — all three of which exist to keep the suite runnable offline, and
+none of which a measurement of the real thing can honour.
+
 Direction is machine-checked by `tests/architecture/test_dependency_direction.py`, which also
 holds `OWNED_THIRD_PARTY`: each third-party module has exactly one package allowed to import it
 (`rmscene`→formats, `sqlite3`→persistence, `boto3`/`Vision`→ocr, `httpx`/`paramiko`→device,
@@ -91,10 +96,20 @@ including under `if TYPE_CHECKING`.
   `PageDefectCode.BLOCK_BYTES_UNREAD`; bytes we *do* decode are not, because calling them unread
   would be false.
 - **OCR is tiered and all-OpenAI.** Tier 0 is the tablet's own handwriting index (free), tier 1
-  Textract and optionally Apple Vision, tier 2 `global.openai.gpt-5.6-luna` reading the raster,
-  tier 3 `global.openai.gpt-5.6-terra` adjudicating. Tier 0 and tier 1 agreeing above
-  `RMSPEC_AGREEMENT_THRESHOLD` short-circuits tiers 2 and 3, and tier 0's text wins because it
-  read the strokes rather than pixels.
+  Bedrock Data Automation by default (then Textract, then optionally Apple Vision), tier 2
+  `global.openai.gpt-5.6-luna` reading the raster, tier 3 `global.openai.gpt-5.6-terra`
+  adjudicating. Tier 0 and tier 1 agreeing above `RMSPEC_AGREEMENT_THRESHOLD` short-circuits
+  tiers 2 and 3, and tier 0's text wins because it read the strokes rather than pixels.
+- **BDA is the default tier-1 engine, and it needs configuration rather than only credentials.**
+  Sync `InvokeDataAutomation`: bytes in, inline output, no S3 and no polling. Three things the AWS
+  user guide does not say, all found by calling it — `dataAutomationConfiguration` is optional in
+  the API model and mandatory in fact, the project must be `projectType: SYNC` (the console makes
+  `ASYNC`), and a SYNC project accepts exactly one document text format. `RMSPEC_BDA_PROJECT_ARN`
+  unset is refused at composition naming that setting, never on the first page.
+  **Read `text_words`, never `text_lines`**: the line-level confidence came back as a constant
+  `0.01` on every line of a measured page while its words ran 0.869 to 1.0, and the lowest word
+  was exactly the one token the service misread. `probes/bda_sync_document.py` is where that was
+  measured and the only place a billable call lives.
 - **Cache key**: SHA-256 of the `.rm` bytes, plus render and raster digests, recognizers, model
   fingerprint and request digest. `OcrCache.equivalent_raster` exists because xochitl rewrites a
   page's bytes without changing the ink.
@@ -119,8 +134,12 @@ including under `if TYPE_CHECKING`.
 - `ty check --error-on-warning`: every diagnostic is an error.
 - pytest runs with `filterwarnings = ["error"]`, `-n auto` and `pytest-randomly`.
 - `mise run test-hardware` needs the tablet attached and never runs in CI.
-- **No billable calls in tests.** Nothing may construct a `bedrock-runtime` or `textract`
-  client, and **nothing may issue `POST /upload`** — it creates a document no route can delete.
+- **No billable calls in tests.** Nothing may construct a `bedrock-runtime`, `textract` or
+  `bedrock-data-automation-runtime` client, and **nothing may issue `POST /upload`** — it creates
+  a document no route can delete. Every adapter takes its client factory as an injected argument
+  precisely so a double reaches every branch. A measurement that genuinely needs the real service
+  goes in `probes/`, which is outside `packages/` and therefore outside the coverage floor, the
+  architecture invariants and this rule; it is run by hand and never by CI.
 - **Never open the device config file.** `tests/architecture/test_secret_containment.py` fails
   the build if any file under `packages/` so much as names it or its credential keys, and it does
   not skip comments or docstrings.

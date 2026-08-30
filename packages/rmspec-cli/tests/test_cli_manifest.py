@@ -411,7 +411,7 @@ def test_a_default_factory_is_resolved_rather_than_serialised_as_a_function():
     described = {entry["name"]: entry for entry in build_manifest(root_app)["settings"]}
     assert described["RMSPEC_SSH_KEY"]["default"].endswith("id_ed25519_remarkable")
     assert described["RMSPEC_MAX_PAGES"]["default"] == 64
-    assert described["RMSPEC_OCR_ENGINES"]["default"] == ["textract"]
+    assert described["RMSPEC_OCR_ENGINES"]["default"] == ["bda"]
 
 
 def test_a_setting_default_is_read_from_the_declaration_and_not_the_environment(

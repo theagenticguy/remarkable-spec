@@ -71,6 +71,7 @@ from rmspec.domain.ports.ocr import StopReason
 from rmspec.ocr import _openai_wire
 from rmspec.ocr._confidence import RecognizedLine
 from rmspec.ocr.apple_vision import AppleVisionRecognizer
+from rmspec.ocr.bda import BdaRecognizer
 from rmspec.ocr.testing import (
     DEFAULT_ENGINE_REVISION,
     DEFAULT_PROVIDER,
@@ -125,6 +126,12 @@ BEDROCK_ENDPOINT: Final = "https://bedrock-runtime.us-east-1.amazonaws.com"
 
 CONFIDENCE_SCALE: Final = 100.0
 """Textract reports confidence on a 0 -- 100 scale; the port's field is 0.0 -- 1.0."""
+
+BDA_PROJECT_ARN: Final = "arn:aws:bedrock:us-west-2:123456789012:data-automation-project/abc123"
+"""A syntactically real SYNC-project ARN. Not identity-bearing, so no variant is built from it."""
+
+BDA_PROFILE_ARN: Final = "arn:aws:bedrock:us-west-2:123456789012:data-automation-profile/us.v1"
+"""The profile ARN the adapter would compose from the project's own. Passed in directly here."""
 
 REFUSED_IMAGE: Final = "vision.framework: could not read 8 bytes as an image"
 """What the shipped Vision reader's error says. Raised here as the ``RuntimeError`` base class the
@@ -329,6 +336,75 @@ class StubReader:
         if self.error is not None:
             raise self.error
         return self.lines
+
+
+class StubDataAutomation:
+    """The one Data Automation runtime method the recognizer calls, answering from a script."""
+
+    def __init__(
+        self,
+        response: Mapping[str, Any] | None = None,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        self.response: Mapping[str, Any] = {"outputSegments": []} if response is None else response
+        self.error = error
+        self.calls: list[Mapping[str, object]] = []
+
+    def invoke_data_automation(self, **kwargs: object) -> Mapping[str, Any]:
+        """Record the request and answer with the scripted response, or raise.
+
+        Parameters
+        ----------
+        **kwargs
+            The wire request: ``inputConfiguration``, ``dataAutomationProfileArn`` and
+            ``dataAutomationConfiguration``.
+
+        Returns
+        -------
+        Mapping[str, Any]
+            The scripted ``InvokeDataAutomation`` response.
+        """
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+def bda_output(text: str, confidence: float) -> Mapping[str, Any]:
+    """Build an ``InvokeDataAutomation`` response holding one scored word per word of ``text``.
+
+    Parameters
+    ----------
+    text
+        The reading, newline-separated. ``""`` becomes no words at all, which is how a blank page
+        arrives, so a blank reading's emptiness comes from the adapter's fold rather than a script.
+    confidence
+        The confidence every word carries. Uniform across words on purpose: the adapter's fold is
+        character-weighted, so a uniform input makes the expected mean exactly this number and any
+        weighting bug visible rather than absorbed.
+
+    Returns
+    -------
+    Mapping[str, Any]
+        The response, with ``standardOutput`` as the JSON *string* the service really sends.
+    """
+    words = [
+        {
+            "id": f"w-{index}-{position}",
+            "text": word,
+            "confidence": confidence,
+            "line_id": f"l-{index}",
+            "reading_order": position,
+            "page_index": 0,
+        }
+        for index, line in enumerate(_split(text))
+        for position, word in enumerate(line.split(" "))
+    ]
+    return {
+        "semanticModality": "DOCUMENT",
+        "outputSegments": [{"standardOutput": json.dumps({"text_words": words})}],
+    }
 
 
 def textract_blocks(text: str, confidence: float) -> Mapping[str, Any]:
@@ -712,6 +788,86 @@ class TestTextractRecognizer(TextRecognizerContract):
         return {"revision": TextractRecognizer(stub, revision=OTHER_ENGINE_REVISION)}
 
 
+class TestBdaRecognizer(TextRecognizerContract):
+    """The recognition contract over Bedrock Data Automation's sync ``InvokeDataAutomation``."""
+
+    @pytest.fixture
+    def recognizer(self) -> TextRecognizer:
+        """Return a recognizer whose stub reads the reference text off any page.
+
+        Returns
+        -------
+        TextRecognizer
+            The adapter, which ``ty`` checks against the Protocol here.
+        """
+        return self._over(StubDataAutomation(bda_output(INKED_TEXT, MEAN_CONFIDENCE)))
+
+    def blank_recognizer(self) -> TextRecognizer:
+        """Return a recognizer whose stub answers with no scored words.
+
+        Returns
+        -------
+        TextRecognizer
+            The adapter. No words at all, so the reading's emptiness is produced by the fold.
+        """
+        return self._over(StubDataAutomation(bda_output("", MEAN_CONFIDENCE)))
+
+    def failing_recognizer(self, *, retryable: bool) -> TextRecognizer:
+        """Return a recognizer whose stub raises a service error of that retryability.
+
+        Parameters
+        ----------
+        retryable
+            Whether the failure must say retrying could help.
+
+        Returns
+        -------
+        TextRecognizer
+            The adapter. Both codes are real members of this operation's own five error shapes,
+            and the retryability is *derived* by the adapter rather than injected: a throttle is
+            worth another attempt, a request the service would not validate is not.
+        """
+        code = "ThrottlingException" if retryable else "ValidationException"
+        return self._over(StubDataAutomation(error=service_error(code, 400)))
+
+    def revision_variants(self) -> Mapping[str, TextRecognizer]:
+        """Return one recognizer per identity-bearing constructor argument.
+
+        Returns
+        -------
+        Mapping[str, TextRecognizer]
+            One: the reading-behaviour revision. The project ARN is deliberately absent, and that
+            is the same judgement its docstring records -- two projects configured alike read a
+            page alike, so folding an account id into the cache key would throw away every cached
+            page whenever a project is recreated with identical settings.
+        """
+        stub = StubDataAutomation(bda_output(INKED_TEXT, MEAN_CONFIDENCE))
+        return {"revision": self._over(stub, revision=OTHER_ENGINE_REVISION)}
+
+    @staticmethod
+    def _over(client: StubDataAutomation, /, **kwargs: int) -> TextRecognizer:
+        """Build the adapter over one stub, with the ARNs every case shares.
+
+        Parameters
+        ----------
+        client
+            The scripted client.
+        **kwargs
+            Passed through, which in practice is only ``revision``.
+
+        Returns
+        -------
+        TextRecognizer
+            The adapter.
+        """
+        return BdaRecognizer(
+            client,
+            project_arn=BDA_PROJECT_ARN,
+            profile_arn=BDA_PROFILE_ARN,
+            **kwargs,
+        )
+
+
 class TestAppleVisionRecognizer(TextRecognizerContract):
     """The recognition contract over Apple's on-device Vision framework."""
 
@@ -852,7 +1008,12 @@ class TestScriptedTextRecognizer(TextRecognizerContract):
 
 # ─────────────────── the shape of the surface, and one absence ───────────────────
 
-COVERED_ADAPTERS: Final = (AppleVisionRecognizer, BedrockOpenAiVisionModel, TextractRecognizer)
+COVERED_ADAPTERS: Final = (
+    AppleVisionRecognizer,
+    BdaRecognizer,
+    BedrockOpenAiVisionModel,
+    TextractRecognizer,
+)
 """Every adapter bound to a contract above, compared against the exported surface below so a new
 adapter cannot ship without a conformance binding."""
 
@@ -918,8 +1079,8 @@ def _bindings_in(module: object, names: Sequence[str], /) -> set[str]:
     }
 
 
-def test_the_package_binds_one_model_and_two_recognizers_and_no_ensemble() -> None:
-    """The package binds one model and two recognizers and no ensemble."""
+def test_the_package_binds_one_model_and_three_recognizers_and_no_ensemble() -> None:
+    """The package binds one model and three recognizers and no ensemble."""
     # The count *is* the ensemble's absence: a `RecognizerEnsemble` would be a third name
     # satisfying `TextRecognizer`, and it is not built because fan-out width, ordering and
     # partial-failure tolerance are use-case policy -- the app takes `list[TextRecognizer]` and
@@ -933,7 +1094,7 @@ def test_the_package_binds_one_model_and_two_recognizers_and_no_ensemble() -> No
         name for name in surface if _looks_like_a_text_recognizer(getattr(rmspec.ocr, name))
     )
     assert models == ["BedrockOpenAiVisionModel"]
-    assert recognizers == ["AppleVisionRecognizer", "TextractRecognizer"]
+    assert recognizers == ["AppleVisionRecognizer", "BdaRecognizer", "TextractRecognizer"]
 
 
 def test_every_port_binding_the_package_exports_is_held_to_the_contract() -> None:
