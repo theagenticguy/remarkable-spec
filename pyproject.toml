@@ -94,6 +94,14 @@ ignore = [
 # while TID251 fails the build when this one does. Both transports live here, so the
 # exemption is the package, not a file list that would drift as modules are added.
 "packages/rmspec-device/**" = ["TID251"]
+# The one package allowed to speak boto3 and botocore, for exactly the reason spelled out
+# above for paramiko. `OWNED_THIRD_PARTY` already assigns both to this package -- it fails
+# the build if any *other* package imports them -- while TID251 failed the build when this
+# one did, so the two layers contradicted each other and rmspec-ocr could not be built at
+# all. This is the third instance of that pattern, after sqlite3 and paramiko; the rule is
+# that a `banned-api` entry naming an owner needs a matching per-package exemption, or the
+# ban is not a boundary but a wall.
+"packages/rmspec-ocr/**" = ["TID251"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

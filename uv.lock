@@ -1439,6 +1439,8 @@ version = "0.2.0"
 source = { editable = "packages/rmspec-ocr" }
 dependencies = [
     { name = "boto3" },
+    { name = "botocore" },
+    { name = "pydantic" },
     { name = "rmspec-domain" },
 ]
 
@@ -1451,6 +1453,8 @@ vision = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.42.59" },
+    { name = "botocore", specifier = ">=1.42.59" },
+    { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin' and extra == 'vision'", specifier = ">=12.1" },
     { name = "pyobjc-framework-vision", marker = "sys_platform == 'darwin' and extra == 'vision'", specifier = ">=12.1" },
     { name = "rmspec-domain", editable = "packages/rmspec-domain" },
