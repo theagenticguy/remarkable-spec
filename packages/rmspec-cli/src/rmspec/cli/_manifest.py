@@ -70,6 +70,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Union, get_args, get_orig
 from rmspec.cli._invoke import DenseFlag, JsonFlag, render
 from rmspec.cli._output import CliOutput, OutputMode
 from rmspec.cli._settings import CliSettings
+from rmspec.cli._skill import SKILL_FLAGS, describe_skill
 from rmspec.domain import errors
 
 if TYPE_CHECKING:
@@ -414,8 +415,11 @@ def _registrations(parent: App, /) -> tuple[tuple[str, tuple[str, ...], App], ..
     -------
     tuple[tuple[str, tuple[str, ...], App], ...]
         One entry per distinct child: its canonical CLI name, its other names, and the child.
-        ``--help``, ``-h`` and ``--version`` are dropped, since they are pseudo-commands
-        cyclopts registers into the same mapping.
+        ``--help``, ``-h``, ``--version`` and ``--skill`` are dropped, since they are
+        pseudo-commands registered into the same mapping. The first three are cyclopts';
+        ``--skill`` is this CLI's, registered the same way and dropped for the same reason --
+        this list means "operations a caller can perform", and printing a document is not one.
+        :func:`rmspec.cli._skill.describe` is how the manifest publishes it instead.
 
     Notes
     -----
@@ -428,7 +432,7 @@ def _registrations(parent: App, /) -> tuple[tuple[str, tuple[str, ...], App], ..
     every name it was given, so two keys pointing at one object are one command with two
     spellings and not two commands.
     """
-    reserved = set(parent.help_flags) | set(parent.version_flags)
+    reserved = set(parent.help_flags) | set(parent.version_flags) | set(SKILL_FLAGS)
     canonical: dict[int, str] = {}
     order: list[str] = []
     children: dict[str, App] = {}
@@ -675,8 +679,8 @@ def build_manifest(root: App, /) -> dict[str, Any]:
     Returns
     -------
     dict[str, Any]
-        The ``data`` payload of the ``manifest`` document: ``name``, ``version``, and the four
-        sections ``commands``, ``errors``, ``degradation_kinds`` and ``settings``.
+        The ``data`` payload of the ``manifest`` document: ``name``, ``version``, ``skill``, and
+        the four sections ``commands``, ``errors``, ``degradation_kinds`` and ``settings``.
 
     Notes
     -----
@@ -688,6 +692,10 @@ def build_manifest(root: App, /) -> dict[str, Any]:
     return {
         "name": root.name[0],
         "version": _jsonable(_version(root)),
+        # Second, and before the four sections, because it is what a first-contact reader should
+        # act on: the pointer to the one document that says which of the commands below change
+        # what a person sees. A pointer rather than the prose -- see `_skill.describe_skill`.
+        "skill": describe_skill(),
         "commands": _describe_commands(root, ()),
         "errors": _describe_errors(),
         "degradation_kinds": [kind.value for kind in errors.DegradationKind],

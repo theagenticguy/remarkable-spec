@@ -18,6 +18,7 @@ three from drifting.
 
 ```bash
 mise run install        # uv sync --all-packages --all-extras
+uv run rmspec --skill   # start here: who does what, and what not to learn
 uv run rmspec --help    # 14 invocations
 uv run rmspec manifest --json   # the authoritative surface, machine-readable
 mise run build          # the one wheel a user installs, out of all nine packages
@@ -125,6 +126,13 @@ including under `if TYPE_CHECKING`.
 - **Never restart xochitl casually.** Four starts per ten minutes routes to `emergency.target`,
   whose handler reboots the tablet. The one restart path checks `is-active`, arms a boot-id
   fence, runs `reset-failed` immediately before `restart`, and never retries.
+- **Three documents, and only one is hand-written.** `rmspec manifest` is the surface
+  (introspected), `AGENTS.md` is that manifest as prose (generated), and `rmspec --skill` prints
+  `SKILL.md` — who does what on the tablet, which two commands are irreversible, and what a
+  reader should deliberately not learn. None of that is introspectable, so it is prose;
+  `test_cli_skill.py` gates every command and flag it names against the manifest. `--skill` is
+  registered as a `--`-named command and reserved out of the manifest's `commands` list beside
+  `--help` and `--version`, because that list means operations and printing a document is not one.
 - **stdout is the machine's, stderr is the human's.** `--json` emits
   `{api_version, type, data, degradations, next}`; `--dense` emits TSV; the default renders to
   stderr. `--pages` is **0-based**, matching `page_index` in every payload.

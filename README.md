@@ -379,6 +379,14 @@ every statement in every package covered, with a single partially-taken branch i
 fails on any difference, so a command that ships without regenerating breaks the build instead of
 misleading a caller.
 
+`rmspec --skill` prints the third document, and it is the one written by hand. It says who does
+what — which operations a person performs with a stylus, which a caller performs from the host,
+and which two are irreversible — and none of that is introspectable. So the prose is prose, and
+`test_cli_skill.py` gates the half that can be checked: every command and every flag the document
+names must exist in the manifest. That caught `render --fmt` in its own first draft; the flag is
+`--format`. `rmspec manifest --json` carries a pointer to it with a digest, so an agent that
+cached the document knows when it changed.
+
 ## Tested on
 
 - **macOS Tahoe** on Apple Silicon, Python 3.13.

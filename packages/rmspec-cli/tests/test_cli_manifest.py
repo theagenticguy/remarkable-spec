@@ -31,6 +31,7 @@ from rmspec.cli._manifest import (
     response_types,
 )
 from rmspec.cli._settings import CliSettings
+from rmspec.cli._skill import SKILL_FLAGS
 from rmspec.domain.errors import DegradationKind, RmspecError, UsageError, exit_code
 
 if TYPE_CHECKING:
@@ -154,10 +155,15 @@ def test_the_one_private_cyclopts_attribute_still_exists_and_is_an_ordered_mappi
 
 
 def test_the_private_route_and_the_public_one_agree_on_the_command_set():
+    # The reserved set is the same union `_registrations` uses, and it has three sources rather
+    # than two: `--skill` is this CLI's own pseudo-command, registered the way cyclopts registers
+    # `--help` and `--version` and dropped from the manifest's command list for the same reason.
     private = {key for key, _aliases, _child in _registrations(root_app)}
-    reserved = set(root_app.help_flags) | set(root_app.version_flags)
+    reserved = set(root_app.help_flags) | set(root_app.version_flags) | set(SKILL_FLAGS)
     public = set(root_app.resolved_commands()) - reserved
+
     assert private == public
+    assert "--skill" not in private, "printing a document is not an operation"
 
 
 def test_only_one_function_in_the_package_reads_the_private_attribute():

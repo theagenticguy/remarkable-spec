@@ -107,6 +107,7 @@ from rmspec.cli._render import render
 from rmspec.cli._reply import reply
 from rmspec.cli._search import search
 from rmspec.cli._settings import CliSettings, apply_native_library_path, load_settings
+from rmspec.cli._skill import SKILL_FLAGS, skill
 from rmspec.cli._sync import sync
 from rmspec.domain.errors import RmspecError, exit_code
 
@@ -137,6 +138,7 @@ __all__ = [
     "reply",
     "resolved_version",
     "search",
+    "skill",
     "sync",
 ]
 
@@ -632,3 +634,12 @@ app.command(sync)
 app.command(push)
 app.command(reply)
 app.command(manifest)
+
+app.command(skill, name=SKILL_FLAGS[0])
+"""Registered under its flag spelling, which is how cyclopts models ``--help`` and ``--version``.
+
+So ``rmspec --skill`` works, it appears in ``--help``'s command panel beside those two, and
+:func:`rmspec.cli._manifest._registrations` drops it from the manifest's ``commands`` list for the
+same reason it drops them: that list means "operations a caller can perform", and printing a
+document is not one. The manifest carries the pointer as a field of its own instead.
+"""
