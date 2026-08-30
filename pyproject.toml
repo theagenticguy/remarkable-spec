@@ -134,12 +134,22 @@ known-first-party = ["rmspec"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "packages"]
-addopts = "--strict-markers --strict-config -ra"
+# `-m "not hardware"` belongs HERE and not only in the mise tasks. The comment below used
+# to claim hardware tests never run unless explicitly selected, while `addopts` carried no
+# marker filter at all -- so a bare `uv run pytest` collected all six of them and they
+# failed against a detached tablet. Only `mise run check` passed the filter, so the
+# guarantee held exactly where someone had already remembered it and nowhere else, which is
+# the same shape as the `--cov` hole in tests/architecture/test_coverage_config.py: a rule
+# documented in prose and enforced in one place.
+#
+# pytest's `-m` is single-valued and `addopts` is prepended, so a command-line `-m hardware`
+# comes later and wins outright -- `mise run test-hardware` still selects exactly the six.
+# Verified both directions rather than assumed.
+addopts = "--strict-markers --strict-config -ra -m 'not hardware'"
 markers = [
     "hardware: requires an attached reMarkable tablet; deselected by default",
     "slow: excluded from the pre-commit fast lane",
 ]
-# Hardware tests never run unless explicitly selected -- they need the tablet.
 # Nothing in the default run may touch the network, AWS, or the device.
 filterwarnings = ["error"]
 
