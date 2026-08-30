@@ -21,6 +21,7 @@ dependencies = [
     "dishka>=1.10.1",
     "pydantic-settings>=2.13.1",
     "rich>=14.3.3",
+    "pydantic>=2.12.5",
 ]
 
 [project.optional-dependencies]
