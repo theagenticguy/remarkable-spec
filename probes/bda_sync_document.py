@@ -12,7 +12,8 @@ adapter's seams are injected and its contract runs against doubles. That discipl
 the suite runnable offline on any machine -- and it also means the suite can never answer a
 question about what the *real* service does. This does, for about one cent, and it is kept out of
 ``packages/`` so it enters neither the coverage floor, the architecture invariants, nor the
-no-billable-calls rule that would have to grow an exception for it.
+no-billable-calls rule that would have to grow an exception for it. ``bda_project.py`` beside it
+creates the project this needs, from the same constant the adapter reads against.
 
 What it settled, on 2026-08-30
 -----------------------------

@@ -38,8 +38,10 @@ from rmspec.ocr.bda import (
     DEFAULT_READ_TIMEOUT,
     DEFAULT_REVISION,
     PROJECT_RESOURCE,
+    PROJECT_TYPE,
     PROVIDER,
     STAGE,
+    SYNC_PROJECT_CONFIG,
     BdaRecognizer,
     DataAutomationInvoker,
     profile_arn_for,
@@ -199,6 +201,40 @@ def test_an_arn_for_something_other_than_a_project_is_refused(wrong: str) -> Non
     # does not exist, and the failure would arrive from the service rather than from the setting.
     with pytest.raises(ValueError, match=f"not a {PROJECT_RESOURCE} ARN"):
         profile_arn_for(wrong)
+
+
+# ── the project configuration this adapter's reading depends on ─────────────────────────
+
+
+def test_the_project_config_asks_for_word_granularity_because_nothing_else_is_scored() -> None:
+    # Without WORD, the response carries only lines, whose confidence is the 0.01 placeholder --
+    # so a project made without it yields a usable transcription and no confidence at all.
+    granularity = SYNC_PROJECT_CONFIG["document"]["extraction"]["granularity"]["types"]
+
+    assert "WORD" in granularity
+
+
+def test_the_project_config_names_exactly_one_text_format_because_two_is_refused() -> None:
+    # Not a preference. `CreateDataAutomationProject` refuses a SYNC project with two:
+    # "Sync project standard output configuration cannot have more than 1 document text
+    # format types". Measured, and the reason a helper creates the project rather than a human.
+    formats = SYNC_PROJECT_CONFIG["document"]["outputFormat"]["textFormat"]["types"]
+
+    assert formats == ["PLAIN_TEXT"], "one format, and text rather than markdown's # and |"
+
+
+def test_the_project_config_turns_generative_fields_off() -> None:
+    # A 250-word summary of a handwritten page is latency the recognizer pays for and the port
+    # has nowhere to put; the service's own advice for speeding this operation up is to skip it.
+    document = SYNC_PROJECT_CONFIG["document"]
+
+    assert document["generativeField"] == {"state": "DISABLED"}
+
+
+def test_the_project_type_is_the_one_the_sync_operation_accepts() -> None:
+    # The console creates ASYNC, and this operation refuses it with "Sync API only supports SYNC
+    # project type" -- a constraint that appears in no AWS document.
+    assert PROJECT_TYPE == "SYNC"
 
 
 # ── identity ────────────────────────────────────────────────────────────────────────────

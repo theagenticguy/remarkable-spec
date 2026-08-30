@@ -117,6 +117,24 @@ description = "Build the one wheel plus sdist that carry the whole CLI"
 depends = ["bundle"]
 run = "uv build build/bundle --out-dir dist"
 
+# `RMSPEC_OCR_ENGINES` defaults to `bda`, the one engine whose obstacle is configuration rather
+# than a package: it needs a Data Automation project whose type is SYNC, whose standard output
+# enables WORD granularity, and which names exactly one document text format. None of the three is
+# discoverable and none is in the AWS user guide, so assembling one by hand means getting one
+# wrong and hearing about it from the service. These two tasks are the whole configuration step.
+#
+# The script passes `rmspec.ocr.bda.SYNC_PROJECT_CONFIG` through rather than restating it, so the
+# project a user creates and the response the adapter reads cannot drift. It touches AWS, so it
+# lives in `probes/` beside the measurement that settled how to call it -- outside `packages/`,
+# and outside every gate that keeps the suite runnable offline.
+[tasks.bda-project]
+description = "Create (or report) the SYNC Data Automation project `rmspec ocr` needs"
+run = "uv run python probes/bda_project.py"
+
+[tasks.bda-project-delete]
+description = "Delete the Data Automation project `bda-project` created"
+run = "uv run python probes/bda_project.py --delete"
+
 [tasks.check]
 description = "Everything that must pass before a push"
 depends = ["lint-check", "format-check", "typecheck", "arch", "agents-md-check", "test-cov"]

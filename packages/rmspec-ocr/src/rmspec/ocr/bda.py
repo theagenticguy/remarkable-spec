@@ -55,7 +55,7 @@ is the arithmetic, and that already lives in one module.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, Self
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, Protocol, Self
 
 import boto3
 from botocore.config import Config
@@ -78,8 +78,10 @@ __all__ = [
     "DEFAULT_READ_TIMEOUT",
     "DEFAULT_REVISION",
     "PROJECT_RESOURCE",
+    "PROJECT_TYPE",
     "PROVIDER",
     "STAGE",
+    "SYNC_PROJECT_CONFIG",
     "BdaRecognizer",
     "DataAutomationInvoker",
     "profile_arn_for",
@@ -128,8 +130,61 @@ production traffic. A project published only to ``DEVELOPMENT`` is a configurati
 see in the ARN they set, and pointing at it fails loudly at the first call.
 """
 
+PROJECT_TYPE = "SYNC"
+"""The project type this operation accepts, and the one the console does not create.
+
+``CreateDataAutomationProject`` defaults to ``ASYNC``, and the sync operation refuses one with
+``Sync API only supports SYNC project type``. Neither the field nor the constraint appears in the
+user guide's API page; both were found by being refused.
+"""
+
 PROJECT_RESOURCE = "data-automation-project"
 """The ARN resource type a project ARN carries, and the one :func:`profile_arn_for` requires."""
+
+SYNC_PROJECT_CONFIG: Final[Mapping[str, Any]] = {
+    "document": {
+        "extraction": {
+            "granularity": {"types": ["PAGE", "ELEMENT", "WORD", "LINE"]},
+            "boundingBox": {"state": "ENABLED"},
+        },
+        "generativeField": {"state": "DISABLED"},
+        "outputFormat": {
+            "textFormat": {"types": ["PLAIN_TEXT"]},
+            "additionalFileFormat": {"state": "DISABLED"},
+        },
+    },
+}
+"""The standard-output configuration a project must have for this adapter to read it properly.
+
+Data rather than a call: nothing in this package creates a project, because provisioning an
+account resource is not something a recognizer does. It lives here anyway, beside the adapter
+whose reading it decides, so the two cannot drift -- ``probes/bda_project.py`` creates a project
+*from this constant*, and a project made any other way is one this adapter may read worse.
+
+Every entry is load-bearing:
+
+``WORD`` granularity
+    The only reason a reading has a confidence at all. Without it the response carries lines
+    whose confidence is the constant ``0.01`` placeholder, and :func:`_reading_from` correctly
+    reports ``None`` rather than trusting it -- a usable transcription with no confidence signal.
+one text format
+    Not a preference. A ``SYNC`` project is refused outright with ``Sync project standard output
+    configuration cannot have more than 1 document text format types``.
+``PLAIN_TEXT`` rather than ``MARKDOWN``
+    The port carries text, and markdown's ``#`` and ``|`` would be characters no pen wrote.
+``generativeField`` disabled
+    A 250-word summary of a handwritten page is latency the recognizer pays for and the port has
+    nowhere to put. The service's own guidance for speeding this operation up is to turn it off.
+``LINE`` granularity and bounding boxes
+    Not read today. Kept because they cost nothing measurable and because a project is a resource
+    a user creates once: a later revision of this adapter that wanted line geometry would
+    otherwise need every existing project recreated.
+
+Typed ``Mapping[str, Any]`` rather than left to inference, for the same reason
+:meth:`DataAutomationInvoker.invoke_data_automation` takes ``**kwargs: object``: the shape belongs
+to the service's API model, and a structural type inferred from this literal makes reading
+``["document"]["extraction"]["granularity"]`` a type error while the service accepts it happily.
+"""
 
 _PROFILE_RESOURCE = "data-automation-profile"
 """The ARN resource type a profile ARN carries."""

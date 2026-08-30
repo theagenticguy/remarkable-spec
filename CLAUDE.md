@@ -24,7 +24,8 @@ mise run build          # the one wheel a user installs, out of all nine package
 ```
 
 Tasks: `install lint lint-check format format-check typecheck arch test-fast test test-cov
-test-hardware agents-md agents-md-check bundle build check versions`.
+test-hardware agents-md agents-md-check bundle build bda-project bda-project-delete check
+versions`.
 
 `mise run check` is the definition of done: `lint-check`, `format-check`, `typecheck`, `arch`,
 `agents-md-check`, `test-cov`.
@@ -104,12 +105,16 @@ including under `if TYPE_CHECKING`.
   Sync `InvokeDataAutomation`: bytes in, inline output, no S3 and no polling. Three things the AWS
   user guide does not say, all found by calling it — `dataAutomationConfiguration` is optional in
   the API model and mandatory in fact, the project must be `projectType: SYNC` (the console makes
-  `ASYNC`), and a SYNC project accepts exactly one document text format. `RMSPEC_BDA_PROJECT_ARN`
-  unset is refused at composition naming that setting, never on the first page.
+  `ASYNC`), and a SYNC project accepts exactly one document text format.
+  `mise run bda-project` creates that project from `bda.SYNC_PROJECT_CONFIG` — the constant lives
+  beside the adapter whose reading depends on it, so the project and the response cannot drift —
+  and is idempotent. `RMSPEC_BDA_PROJECT_ARN` unset is refused while the recognisers bind, naming
+  that setting: before any page is rendered, though after the document lookup a command does
+  first.
   **Read `text_words`, never `text_lines`**: the line-level confidence came back as a constant
   `0.01` on every line of a measured page while its words ran 0.869 to 1.0, and the lowest word
   was exactly the one token the service misread. `probes/bda_sync_document.py` is where that was
-  measured and the only place a billable call lives.
+  measured, and `probes/` is the only tree a real AWS call may live in.
 - **Cache key**: SHA-256 of the `.rm` bytes, plus render and raster digests, recognizers, model
   fingerprint and request digest. `OcrCache.equivalent_raster` exists because xochitl rewrites a
   page's bytes without changing the ink.

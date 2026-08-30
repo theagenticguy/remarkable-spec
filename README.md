@@ -230,7 +230,18 @@ overrides it per run.
 
 Tier 1 defaults to **Bedrock Data Automation**, and it is the one engine that needs configuration
 rather than only credentials: `RMSPEC_BDA_PROJECT_ARN` must name a **SYNC-type** project, which is
-an account resource somebody creates and which no API lists. Unset, the run refuses while binding the
+an account resource somebody creates and which no API lists. One task creates it:
+
+```bash
+eval "$(mise run bda-project 2>/dev/null)"   # creates it, or reuses the one already there
+mise run bda-project-delete                  # and removes it again
+```
+
+Three things about that project are undiscoverable and none of them is in the AWS user guide — the
+type must be `SYNC` (the console makes `ASYNC`), `WORD` granularity is what makes a confidence
+exist at all, and exactly one document text format is allowed. So the task passes
+`rmspec.ocr.bda.SYNC_PROJECT_CONFIG` through rather than restating it: the project a user creates
+and the response the adapter reads cannot drift. Unset, the run refuses while binding the
 recognisers — naming that setting, and before any page is rendered, rasterised or sent to a
 model. It earns the default on a
 measurement rather than a claim — `probes/bda_sync_document.py` sent one rmspec-rendered page of
@@ -353,6 +364,7 @@ mise run check     # everything that must pass before a push
 | `test` / `test-cov` | the full suite, parallel; `test-cov` adds the coverage gate |
 | `test-hardware` | the tests that need the tablet attached. Never runs in CI. |
 | `bundle` / `build` | stage the single-distribution tree, then build the one wheel and sdist |
+| `bda-project` / `bda-project-delete` | create or remove the SYNC Data Automation project `rmspec ocr` needs |
 | `check` | `lint-check`, `format-check`, `typecheck`, `arch`, `agents-md-check`, `test-cov` |
 | `versions` | the resolved tool versions, to prove local and CI agree |
 
