@@ -22,9 +22,12 @@ is not an available shape.
 
 ``PRAGMA quick_check`` is not paranoia
 -------------------------------------
-reMarkable's own documentation says *"Xochitl must not run when manually accessing
-document files"*, and this database is xochitl's live index, read off disk while
-xochitl may be part-way through writing it. A torn read is therefore the expected
+reMarkable's own documentation says *"It is possible to copy this directory, but note
+that Xochitl should not be running when accessing and/or changing the stored
+documents"* -- verbatim, because an earlier version of this paragraph tightened it to
+"must not run" and then quoted the tightening. Read off disk while xochitl may be
+part-way through writing it, this database is exactly the case that sentence warns
+about, and it is xochitl's live index. A torn read is therefore the expected
 hazard here rather than an exotic one, and it is the worst-behaved one measured: an
 image truncated by a single byte deserializes cleanly, answers
 ``SELECT ... WHERE pageId = ?`` with a row, and reports nothing wrong. Without the

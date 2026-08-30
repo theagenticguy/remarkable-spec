@@ -40,14 +40,17 @@ from rmscene.scene_stream import (
     AuthorIdsBlock,
     MigrationInfoBlock,
     PageInfoBlock,
+    RootTextBlock,
     SceneGlyphItemBlock,
     SceneGroupItemBlock,
     SceneLineItemBlock,
     SceneTreeBlock,
     TreeNodeBlock,
+    UnreadableBlock,
     write_blocks,
 )
 from rmscene.tagged_block_common import CrdtId, LwwValue
+from rmscene.tagged_block_reader import MainBlockInfo
 
 from rmspec.domain.errors import (
     CorruptPageData,
@@ -131,6 +134,7 @@ def layer_blocks(
     visible: bool = True,
     items: tuple[object, ...] = (),
     parent: CrdtId = ROOT_ID,
+    author: int = 0,
 ) -> tuple[Block, ...]:
     """Build the blocks that declare one layer and attach its items.
 
@@ -148,6 +152,11 @@ def layer_blocks(
         highlight round-trip through the writer instead of being asserted by hand.
     parent
         Node the layer hangs off. The root, unless a nested group is being built.
+    author
+        First component of the layer's ``CrdtId``, which is the id of the author that
+        created the node. Zero unless a test is reproducing a renumbering: the tablet's own
+        re-save moved a measured page's layer from ``CrdtId(0, 11)`` to ``CrdtId(1, 334)``,
+        so both components move and nothing may key on either across a round trip.
 
     Returns
     -------
@@ -155,7 +164,7 @@ def layer_blocks(
         The tree block registering the node, the node block naming it, the group item
         block attaching it to its parent, and one item block per item.
     """
-    layer = CrdtId(0, node)
+    layer = CrdtId(author, node)
     blocks: list[Block] = [
         SceneTreeBlock(tree_id=layer, node_id=CrdtId(0, 0), is_update=True, parent_id=parent),
         TreeNodeBlock(
@@ -171,6 +180,101 @@ def layer_blocks(
         _item_block(layer, node * 100 + offset + 1, item) for offset, item in enumerate(items)
     )
     return tuple(blocks)
+
+
+def tombstone_block(*, node: int, index: int, deleted_length: int = 3, author: int = 0) -> Block:
+    """Build the item block a CRDT tombstone is: an erased stroke, carrying no value.
+
+    Normal, expected content rather than damage. An item block with no value subblock records
+    that its member was *deleted*: the parser reads the ``deleted_length`` and yields ``None``
+    where a line would be. Six of the live page's 61 item blocks are these, and 1237 of them
+    span 24 of the reference corpus's 30 renderable pages -- so anything that samples "an
+    existing stroke" has to filter them, and anything that counts dropped items must not.
+
+    Parameters
+    ----------
+    node
+        Second component of the owning layer's ``CrdtId``, so the tombstone lands in it.
+    index
+        Second component of the tombstone's own ``CrdtId``.
+    deleted_length
+        How many members the deletion covered. Any positive number; the value is opaque here.
+    author
+        First component of the owning layer's ``CrdtId``. Must match its layer.
+
+    Returns
+    -------
+    Block
+        A line item block whose value is absent, ready to append to a scene.
+    """
+    return SceneLineItemBlock(
+        CrdtId(author, node),
+        CrdtSequenceItem(CrdtId(0, index), CrdtId(0, 0), CrdtId(0, 0), deleted_length, None),
+    )
+
+
+UNKNOWN_BLOCK_TYPE: Final = 0x7E
+"""A block type ``rmscene`` 0.7.0's registry does not claim, so reading one yields a failure."""
+
+
+def unreadable_block(*, payload: bytes = b"\x01\x02") -> Block:
+    """Build a block the parser cannot read *and* the writer reproduces byte for byte.
+
+    Both halves matter, and only this construction has them. The obvious way to make an
+    unreadable block -- a stroke whose wire tool id ``rmscene``'s ``Pen`` enum rejects, which
+    :mod:`test_formats_scene_codec` uses -- is written as a line block with header versions
+    ``(2, 2)`` and read back as an ``UnreadableBlock``, whose ``version_info`` is the base
+    ``(1, 1)``. The re-encode therefore differs and ``check_rewritable`` refuses the page for
+    a byte mismatch before anything else looks at it. Declaring the block with ``(1, 1)`` in
+    the first place makes the round trip exact, which is what lets a test reach the writer's
+    own refusal: an unreadable block's ids are opaque, so no fresh author id can be shown to
+    be free.
+
+    Parameters
+    ----------
+    payload
+        The block's body. Any bytes; nothing reads them.
+
+    Returns
+    -------
+    Block
+        The block, ready to append to a scene.
+    """
+    info = MainBlockInfo(
+        offset=0,
+        size=len(payload),
+        extra_data=b"",
+        block_type=UNKNOWN_BLOCK_TYPE,
+        min_version=1,
+        current_version=1,
+    )
+    return UnreadableBlock("synthetic", payload, info)
+
+
+def cyclic_sequence_blocks(*, node: int) -> tuple[Block, ...]:
+    """Build two item blocks in one layer whose left ids point at each other.
+
+    The one state that reads and re-encodes cleanly and yet has no member order at all:
+    ``rmscene`` topologically sorts a layer's children only when they are iterated, so the
+    blocks parse, the round trip is exact, and the failure surfaces the moment anything asks
+    what order the strokes draw in.
+
+    Parameters
+    ----------
+    node
+        Second component of the owning layer's ``CrdtId``.
+
+    Returns
+    -------
+    tuple[Block, ...]
+        Two line item blocks, each declaring the other as its left neighbour.
+    """
+    layer = CrdtId(0, node)
+    first, second = CrdtId(0, 901), CrdtId(0, 902)
+    return (
+        SceneLineItemBlock(layer, CrdtSequenceItem(first, second, CrdtId(0, 0), 0, stroke_item())),
+        SceneLineItemBlock(layer, CrdtSequenceItem(second, first, CrdtId(0, 0), 0, stroke_item())),
+    )
 
 
 def rootless_scene(*items: object) -> bytes:
@@ -313,6 +417,104 @@ def inked_scene() -> bytes:
         A complete v6 scene file whose single visible layer holds one stroke.
     """
     return scene_bytes(*layer_blocks(node=11, items=(stroke_item(),)))
+
+
+def root_text_block(*, width: float = 400.0) -> Block:
+    """Build the page-scoped block a tablet writes typed text into.
+
+    The block ``SceneCodec`` silently dropped for the whole of this project's history: it is
+    page-scoped, names no layer, and ``rmscene`` adds it to no group -- so the scene-tree walk
+    never reaches it and it arrives only as ``SceneTree.root_text``.
+
+    ``block_id`` is ``CrdtId(0, 0)`` because ``rmscene``'s reader asserts exactly that, so a
+    fixture written with anything else would not read back.
+
+    Parameters
+    ----------
+    width
+        Width of the text box in screen units. Zero exercises the codec's obligation to drop
+        an item the domain refuses rather than let a ``ValidationError`` escape.
+
+    Returns
+    -------
+    Block
+        The block, ready to append to a scene.
+    """
+    return RootTextBlock(block_id=CrdtId(0, 0), value=text_item(width=width))
+
+
+def texted_scene(*, width: float = 400.0) -> bytes:
+    """Build a page shaped like a real typed one: one inked layer plus the page's own text.
+
+    Parameters
+    ----------
+    width
+        Width of the text box in screen units.
+
+    Returns
+    -------
+    bytes
+        A complete v6 scene file with one visible layer holding one stroke, and typed text
+        owned by the page rather than by that layer.
+    """
+    return scene_bytes(
+        *layer_blocks(node=11, items=(stroke_item(),)), root_text_block(width=width)
+    )
+
+
+MEASURED_YELLOW_TAIL: Final = bytes.fromhex("840175edffff")
+"""The six bytes ``rmscene`` left unread on the first measured highlighter stroke.
+
+Firmware 3.27.3.0, page ``2302bcd7`` of ``Test/TestNb``. ``84 01`` is a two-byte varuint worth
+132, so index ``132 >> 4 == 8`` and tag ``132 & 0xF == 0x4`` (``Byte4``); ``75 ed ff ff`` read
+as a little-endian ``uint32`` is ``0xFFFFED75``, i.e. ARGB ``a=255`` and ``#ffed75``.
+"""
+
+MEASURED_BLUE_TAIL: Final = bytes.fromhex("8401feeabeff")
+"""The same field on the second measured stroke: ``0xFFBEEAFE``, i.e. ``a=255`` and ``#beeafe``.
+
+Both strokes reported ``PenColor`` id 9. Two of these in one page is the whole defect in one
+fixture: identical colour index, visibly different ink.
+"""
+
+NO_TAIL: Final = b""
+"""What every pen stroke leaves behind, and what 162 of the measured page's 164 lines left."""
+
+
+def tailed_scene(
+    *tails: bytes,
+    tool: int = int(si.Pen.HIGHLIGHTER_2),
+    color: int = int(si.PenColor.HIGHLIGHT),
+) -> bytes:
+    """Build a one-layer page with one line per supplied unparsed tail.
+
+    ``rmscene``'s writer emits ``SceneItemBlock.extra_value_data`` verbatim at the end of the
+    value subblock, which is the same position its reader recovers it from, so a tail set here
+    round-trips through real bytes. That is what makes the measured six bytes usable as a
+    fixture without committing a binary file or touching a device.
+
+    Parameters
+    ----------
+    *tails
+        One tail per line, in draw order. :data:`NO_TAIL` for a line the parser reads whole.
+    tool
+        Wire tool id every line carries. The highlighter, since it is the tool that writes
+        this field.
+    color
+        Wire colour index every line carries. Id 9, since that is what the firmware writes
+        for every highlight whatever colour it was drawn in.
+
+    Returns
+    -------
+    bytes
+        A complete v6 scene file whose single visible layer holds one line per tail.
+    """
+    items = tuple(stroke_item(tool=tool, color=color) for _ in tails)
+    blocks = list(layer_blocks(node=11, items=items))
+    lines = [block for block in blocks if isinstance(block, SceneLineItemBlock)]
+    for block, tail in zip(lines, tails, strict=True):
+        block.extra_value_data = tail
+    return scene_bytes(*blocks)
 
 
 # ─────────────────────────── store spec ───────────────────────────

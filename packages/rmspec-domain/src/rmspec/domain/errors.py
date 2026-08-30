@@ -87,7 +87,10 @@ if TYPE_CHECKING:
 # Every name below that lacks an ``Error`` suffix is quoted from a ``Raises`` section of a
 # port module in :mod:`rmspec.domain.ports`, which was authored first and is the contract
 # adapters implement. Renaming them here to satisfy N818 would make seven port modules
-# document errors that do not exist, so the rule is disabled for this file only.
+# document errors that do not exist, so the rule is disabled for this file only. One name is
+# quoted from an adapter instead -- ``SceneRewriteUnsafe``, whose ``Raises`` section is on
+# ``SceneCodec.check_rewritable``, because the scene *write* path has no port yet and giving
+# the name a different spelling here than the seam that raises it would start the same drift.
 # ruff: noqa: N818
 
 __all__ = [
@@ -106,6 +109,7 @@ __all__ = [
     "DeviceError",
     "DeviceOperationUnsupported",
     "DeviceProtocolError",
+    "DeviceStateMismatchError",
     "DeviceTransferInterrupted",
     "DeviceUnreachable",
     "DeviceUploadRejected",
@@ -136,6 +140,7 @@ __all__ = [
     "RecognitionFailed",
     "RenderError",
     "RmspecError",
+    "SceneRewriteUnsafe",
     "StoreSchemaMismatchError",
     "StoreUnavailableError",
     "StoredRecordUnreadableError",
@@ -248,6 +253,51 @@ class DegradationKind(StrEnum):
     rather than served as another page's handwriting. Recorded **once per run** rather than
     once per page -- a torn database faults on every lookup, and four hundred identical
     degradations bury the ones that matter."""
+
+    INK_CHARACTER_SUBSTITUTED = "ink_character_substituted"
+    """A character could not be drawn as ink, so a struck box stands in for it on the page.
+
+    Added 2026-08-30 for the one write path whose *output* is a substitution rather than a
+    skipped input. Every other member here reports something a run did not do; this one
+    reports that what landed on a page a human is holding is not the text the caller supplied.
+
+    Reached when :attr:`~rmspec.domain.ports.render.InkText.substituted` is non-empty and the
+    caller has opted in to writing anyway. It is recorded even though the caller opted in,
+    which is the whole reason it exists: the opt-in authorises the *write*, not the silence,
+    and an agent that set the flag once for one reply would otherwise draw boxes on every
+    later page with nothing to notice. ``--strict`` at the shell boundary is what makes that a
+    non-zero exit instead of a footnote.
+
+    Not the same shape as ``CreateDocument``'s opted-in duplicate name, which records nothing:
+    that reports a fact about the *library* while the bytes uploaded are exactly the caller's.
+    Here the artifact itself differs from what was asked for, and
+    :attr:`Degradation.substituted` -- "the value used instead" -- is the field the domain
+    already has for saying so.
+
+    Recorded **once per distinct character**, not once per occurrence: a reader fixes a
+    character, and one degradation per em dash in a paragraph would bury the others the way
+    four hundred index failures would."""
+
+    CACHE_HIT_RASTER_EQUIVALENT = "cache_hit_raster_equivalent"
+    """A page's stored bytes were rewritten and its pixels were not, so a cached reading
+    keyed on the older bytes was reused instead of being recomputed.
+
+    Added 2026-08-29 against a measurement rather than a hunch: the tablet rewrote one page
+    from 18,813 to 24,534 bytes with the ink unchanged, which moves
+    :attr:`~rmspec.domain.models.OcrCacheKey.page_hash` while
+    :attr:`~rmspec.domain.models.OcrCacheKey.raster_digest` stays equal, so a no-op edit
+    billed a full re-transcription of a page nobody had touched.
+
+    Not :attr:`CACHE_MISS_KEY_CHANGED`, and close to its opposite. That member reports a row
+    this run *declined* to serve because an input above the page changed; this one reports a
+    row this run *did* serve although the page's own bytes changed. A reader acts on them
+    differently -- a changed key means "you paid again", an equivalent raster means "you did
+    not, and the row you got is not the row your key names".
+
+    Reached when :meth:`~rmspec.domain.ports.persistence.OcrCache.equivalent_raster`
+    answers. Recorded **per page**, unlike :attr:`DEVICE_INDEX_UNAVAILABLE`: a rewrite is a
+    fact about one page rather than about a whole source, and which pages were rewritten is
+    the thing a reader wants."""
 
 
 class DocumentCandidate(BaseModel, frozen=True, extra="forbid"):
@@ -545,6 +595,40 @@ class UnsupportedPageFormat(FormatError):
         self.supported_versions = supported_versions
 
 
+class SceneRewriteUnsafe(FormatError):
+    """Raised when page bytes decode but this build will not write them back.
+
+    Not :class:`CorruptPageData`, and the difference is the whole point of the class: those
+    bytes parsed fine, and it is the *writer* that cannot be trusted with them. Telling a
+    caller their page is undecodable when it decodes perfectly sends them looking for a
+    damaged file instead of at the reader that cannot reproduce it.
+
+    Three refusals share this class, because all three are "the file is fine and this build
+    declines to write it": a round trip that would not reproduce the input; a zero-byte
+    artifact, which is a scene to *create* rather than one to amend; and a scene that offers
+    the writer nothing to attach to -- no layer, or no author id left to mint under. Every
+    one of them is settled before any bytes are returned.
+
+    Measured, and the reason this is checked rather than assumed: ``rmscene`` 0.7.0
+    re-encodes a real page byte for byte even though it reports that it did not read all of
+    it, because each block keeps the bytes the parser could not model. So a rewrite is
+    lossless *today*, on one firmware, with one parser version. A firmware or parser change
+    can break that silently, and what would be lost is a page of handwriting that exists
+    nowhere else -- so the round trip is re-verified on every call and this is raised instead
+    of returning bytes that quietly dropped someone's ink.
+
+    It owns a row in the exit-code table rather than inheriting :class:`FormatError`'s
+    ``EX_DATAERR``. 65 says the input is not what it claims to be, which is false here; the
+    input was valid and this program could not do its own job on it, which is ``EX_SOFTWARE``.
+    """
+
+    def __init__(self, *, page_uuid: str, detail: str) -> None:
+        msg = f"page {page_uuid} cannot be rewritten safely by this build: {detail}"
+        super().__init__(msg)
+        self.page_uuid = page_uuid
+        self.detail = detail
+
+
 class RenderError(RmspecError):
     """Base for every failure while turning a page into markup.
 
@@ -755,6 +839,10 @@ class DeviceProtocolError(DeviceError):
     that does not start with ``%PDF-``, an error status whose body is not the uniform
     ``{"error": ...}`` shape, or a ``Content-Type`` the bytes contradict -- the thumbnail
     route advertises ``image/jpeg`` and returns PNG. Replaces every ``raise_for_status()``.
+
+    Not the class for a device whose *state* moved. A stale write precondition or a service
+    that is legitimately stopped is :class:`DeviceStateMismatchError`: the firmware kept its
+    contract in both cases, and this class accepts no ``remediation`` to say what to do next.
     """
 
     def __init__(self, *, transport: TransportKind, route: str, expected: str, got: str) -> None:
@@ -825,6 +913,64 @@ class DeviceTransferInterrupted(DeviceError):
         self.subject = subject
         self.bytes_transferred = bytes_transferred
         self.bytes_expected = bytes_expected
+
+
+class DeviceStateMismatchError(DeviceError):
+    """Raised when the device's state is not the state an operation required.
+
+    The sibling :class:`DeviceProtocolError` was standing in for, and the reason it was the
+    wrong stand-in: that class means *the device answered but broke its own contract*, and
+    nothing here breaks a contract of the firmware's. A human picking up a stylus between a
+    read and a write breaks the **caller's** precondition. A tablet whose UI process is
+    legitimately stopped, or a firmware enforcing its own documented restart limit, is
+    behaving exactly as measured. Both were being reported as firmware misbehaviour, and the
+    one instruction that matters -- re-read, then decide whether to repeat -- had nowhere to
+    live, because :class:`DeviceProtocolError` accepts no ``remediation`` and the advice was
+    being smuggled into its ``got``.
+
+    ``retryable`` is the field that made a separate class worth having. It is not a hint: at
+    the two adopting sites it is a measured property of *where the failure happened*. A
+    refusal before the hazardous command is sent leaves nothing changed and may simply be
+    repeated; a refusal at or after it must not be replayed, because a replayed restart is
+    how one reboot becomes a loop. That distinction was previously carried only in the prose
+    of five different message strings, where nothing could read it.
+
+    No row of its own in :func:`exit_code`, and deliberately so. It inherits
+    :class:`DeviceError`'s ``EX_UNAVAILABLE``, which is what
+    :class:`DeviceProtocolError` already returns -- so adopting this class at a call site
+    corrects the vocabulary without moving any shell's exit status. ``EX_TEMPFAIL`` would be
+    the tempting row and it would be a lie half the time: the table is keyed by class, so one
+    status cannot say "retrying works" for a stale digest and "do not repeat this" for a
+    restart that may already have landed. Retryability is a field, where a caller can branch
+    on it, not a status, where it would have to be true of every instance.
+    """
+
+    def __init__(
+        self,
+        *,
+        transport: TransportKind,
+        subject: str,
+        expected: str,
+        observed: str,
+        retryable: bool,
+    ) -> None:
+        msg = f"{subject} is {observed}, and the operation needed {expected}"
+        advice = (
+            f"re-read {subject} and repeat the operation"
+            if retryable
+            else f"re-read {subject}; repeating the operation may repeat its effect"
+        )
+        super().__init__(msg, transport=transport, remediation=advice)
+        self.subject = subject
+        """What was checked -- a page's path, a service name, a boot identifier. An opaque
+        display string, never parsed or matched."""
+        self.expected = expected
+        """The identity or state the operation required, as the caller captured it."""
+        self.observed = observed
+        """The identity or state found instead."""
+        self.retryable = retryable
+        """Whether repeating the operation is safe: ``True`` when the failure provably
+        changed nothing, ``False`` when the hazardous step may already have taken effect."""
 
 
 class DeviceUploadRejected(DeviceError):
@@ -1062,9 +1208,9 @@ class StoreUnavailableError(PersistenceError):
     command starts work it cannot record.
     """
 
-    def __init__(self, *, store: str, detail: str) -> None:
+    def __init__(self, *, store: str, detail: str, remediation: str | None = None) -> None:
         msg = f"store {store} is unavailable: {detail}"
-        super().__init__(msg)
+        super().__init__(msg, remediation=remediation)
         self.store = store
         self.detail = detail
 
@@ -1078,11 +1224,39 @@ class StoreSchemaMismatchError(StoreUnavailableError):
     agree: instead of running today's statements against yesterday's tables, or letting
     ``CREATE TABLE IF NOT EXISTS`` leave an old shape in place, the mismatch is loud at
     first use and carries both versions.
+
+    Why ``remediation`` is authored at the raise site
+    ------------------------------------------------
+    Because two sites raise this and only one of them has a user who can act. Refusing a
+    pre-rewrite ``sync.db`` is the failure **every** user of the legacy CLI meets on their
+    first run of this build, and it exits ``EX_CONFIG``, which in this tree means the
+    environment is wrong rather than the request -- so there is always something to do and
+    the error has to say what. The other site reads a copy of the tablet's own handwriting
+    index, which no setting points at and whose caller degrades to the paid tiers rather
+    than reporting; a "move it aside" sentence there would be advice about a file the user
+    does not have. One string assembled in this constructor could not be true of both, so
+    the constructor assembles none and the site that knows supplies it.
+
+    Why it cannot name the path the user set
+    ---------------------------------------
+    ``store`` is deliberately the file's *name*, derived once from ``Path.name`` where the
+    database is opened so that four adapters cannot produce four labels for one broken
+    database -- and the handwriting-index site labels an in-memory image that has no path
+    at all. The full path is therefore not a fact this error holds. Naming the environment
+    variable instead is what keeps the advice actionable, which is the same move
+    :class:`XochitlDirNotConfigured` makes with ``RMSPEC_XOCHITL``.
     """
 
-    def __init__(self, *, store: str, found: int, expected: int) -> None:
+    def __init__(
+        self,
+        *,
+        store: str,
+        found: int,
+        expected: int,
+        remediation: str | None = None,
+    ) -> None:
         detail = f"schema version {found} on disk, {expected} expected"
-        super().__init__(store=store, detail=detail)
+        super().__init__(store=store, detail=detail, remediation=remediation)
         self.found = found
         self.expected = expected
 
@@ -1162,6 +1336,7 @@ _EXIT_CODES: Final[Mapping[type[RmspecError], int]] = {
     DocumentStoreUnavailable: _EXIT_UNAVAILABLE,
     AmbiguousDocument: _EXIT_USAGE,
     FormatError: _EXIT_DATA_ERROR,
+    SceneRewriteUnsafe: _EXIT_INTERNAL,
     RenderError: _EXIT_INTERNAL,
     ExportError: _EXIT_CANT_CREATE,
     PdfSourceUnreadable: _EXIT_DATA_ERROR,

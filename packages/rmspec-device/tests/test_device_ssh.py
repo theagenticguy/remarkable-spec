@@ -47,6 +47,7 @@ from device_contracts import SEARCH_INDEX_IMAGE
 from rmspec.device import ssh as ssh_module
 from rmspec.device._shell import PathUnreadableError
 from rmspec.device.addresses import (
+    BOOT_ID,
     CONTENT_SUFFIX,
     METADATA_SUFFIX,
     OS_RELEASE,
@@ -59,13 +60,22 @@ from rmspec.device.addresses import (
     document_paths,
 )
 from rmspec.device.ssh import (
+    ACTIVE_STATE,
+    BOOT_ID_TEMPLATE,
+    FENCE_WANTED,
     FIRMWARE_TEMPLATE,
     MAKE_DIR_TEMPLATE,
     MEMINFO_TEMPLATE,
     MODEL_TEMPLATE,
-    REFRESH_TEMPLATE,
+    NO_SERIAL_SOURCE,
+    RESET_FAILED_TEMPLATE,
+    RESTART_TEMPLATE,
     SERIAL_FIELD,
+    SERVICE_STATE_TEMPLATE,
+    START_LIMIT_MARKERS,
     STORAGE_TEMPLATE,
+    UI_SERVICE,
+    UNKNOWN_STATE,
     UNPLACEABLE_MEDIA,
     UNPLACEABLE_OPERATION,
     SshBundleSource,
@@ -153,6 +163,43 @@ HEALTHY_FACTS = {
     STORAGE_COMMAND: DF_PK_OUTPUT,
 }
 
+# ─────────────────────── the guarded restart, as commands and answers ───────────────────────
+
+STATE_COMMAND = RemoteCommand.of(SERVICE_STATE_TEMPLATE, UI_SERVICE).text
+RESET_COMMAND = RemoteCommand.of(RESET_FAILED_TEMPLATE, UI_SERVICE).text
+RESTART_COMMAND = RemoteCommand.of(RESTART_TEMPLATE, UI_SERVICE).text
+FENCE_COMMAND = RemoteCommand.of(BOOT_ID_TEMPLATE, RemotePath.absolute(BOOT_ID)).text
+
+#: A boot identifier, in the shape the kernel writes: a lowercase uuid and a trailing newline.
+#: Synthetic, because a real one identifies nothing but is still device data.
+BOOT_ID_VALUE = "2f7c1e04-9a3b-4d58-8e21-6b5c0d4a7f93"
+
+#: What the same read answers after the tablet has rebooted underneath the caller.
+OTHER_BOOT_ID = "8b4a2d16-5c7e-4f39-9a02-1d6e3b8c5a47"
+
+#: The five answers a healthy tablet gives the guarded restart: running, a stable fence either
+#: side of the pair, and silence from both ``systemctl`` verbs that act.
+HEALTHY_REFRESH = {
+    STATE_COMMAND: f"{ACTIVE_STATE}\n",
+    FENCE_COMMAND: f"{BOOT_ID_VALUE}\n",
+    RESET_COMMAND: "",
+    RESTART_COMMAND: "",
+}
+
+#: The whole of what systemd says when it refuses a start because the unit has been started too
+#: often. Reproduced as a stderr first line, which is the only place this signal ever appears.
+START_LIMIT_STDERR = (
+    "exit status 1 from 10.11.99.1:22: Failed to restart xochitl.service: Unit "
+    "xochitl.service has a start request repeated too quickly."
+)
+
+#: A restart that failed for an ordinary reason, so the escalation is not triggered by any
+#: failure at all.
+ORDINARY_RESTART_STDERR = (
+    "exit status 1 from 10.11.99.1:22: Job for xochitl.service failed because the control "
+    "process exited with error code."
+)
+
 
 # ─────────────────────────── the fake shell ───────────────────────────
 
@@ -179,6 +226,13 @@ class FakeShell:
     ``refuse_commands``
         One command that exits non-zero, which is how the upload's step 1 and step 5 are
         failed independently of its writes.
+    ``command_stderr``
+        What a refused command wrote to stderr, keyed by command text. Only one guarantee needs
+        it and it needs it badly: ``systemctl`` exits 1 for a start-limit refusal exactly as it
+        does for a unit that failed to start once, so the *sentence* is the only thing that
+        tells the condition that reboots the tablet from the one that merely did not work.
+        Without this seam the escalation could only be tested against a message this suite made
+        up, which is the shape of test that passes while the adapter matches nothing real.
     ``fail_with`` / ``fail_after_reads``
         A whole-*transport* failure, optionally delayed until N reads have already
         succeeded. The delay is what makes the regression this fake exists for testable at
@@ -199,6 +253,7 @@ class FakeShell:
         refuse_reads: Sequence[str] = (),
         short_writes: Sequence[str] = (),
         refuse_commands: Sequence[str] = (),
+        command_stderr: Mapping[str, str] | None = None,
         fail_with: DeviceError | None = None,
         fail_after_reads: int = 0,
     ) -> None:
@@ -208,6 +263,7 @@ class FakeShell:
         self.refuse_reads = frozenset(refuse_reads)
         self.short_writes = frozenset(short_writes)
         self.refuse_commands = frozenset(refuse_commands)
+        self.command_stderr = {} if command_stderr is None else dict(command_stderr)
         self.fail_with = fail_with
         self.fail_after_reads = fail_after_reads
         self.log: list[str] = []
@@ -238,7 +294,13 @@ class FakeShell:
         self.log.append(f"run {command.text}")
         self.commands.append(command.text)
         if command.text in self.refuse_commands:
-            raise self._refused(command.text, "the command was scripted to exit non-zero")
+            raise self._refused(
+                command.text,
+                self.command_stderr.get(
+                    command.text,
+                    "the command was scripted to exit non-zero",
+                ),
+            )
         if command.text not in self.outputs:
             raise self._refused(command.text, "no output was scripted for this command")
         return self.outputs[command.text]
@@ -643,14 +705,96 @@ def uploader(shell: FakeShell) -> SshUploader:
     return SshUploader(shell=shell, root=ROOT, now_ms=lambda: NOW_MS, new_uuid=lambda: MINTED)
 
 
+class FenceMovesShell(FakeShell):
+    """A :class:`FakeShell` that answers the reboot fence differently the second time.
+
+    The fence is two reads of one path with a restart in between, so both hazards it exists to
+    catch -- the tablet rebooted, and the fence stopped answering -- are properties of the
+    *second* read alone. A fixed answer map cannot express either, and no test can intervene
+    between two reads the adapter makes inside one method, so the double has to do it.
+
+    Everything else is inherited: this changes one answer at one moment and emulates nothing.
+    """
+
+    #: What the fence answers from the second read onwards. ``""`` makes it unreadable.
+    second_boot_id: str = ""
+
+    def run(self, command: RemoteCommand, /) -> str:
+        """Answer one command, then move the fence if that is what was just read.
+
+        Parameters
+        ----------
+        command
+            The command, already quoted.
+
+        Returns
+        -------
+        str
+            What the base double answers -- the *first* fence value on the first read.
+
+        Raises
+        ------
+        DeviceError
+            Whatever the base double raises.
+        """
+        answer = super().run(command)
+        if command.text == FENCE_COMMAND:
+            self.outputs[FENCE_COMMAND] = self.second_boot_id
+        return answer
+
+
+class DyingShell(FakeShell):
+    """A :class:`FakeShell` whose session dies when one named command is sent.
+
+    Distinct from ``refuse_commands``, which is a command that *ran* and exited non-zero. This
+    is the command that went out and whose answer never came back -- the one case where nothing
+    on either side can say whether the remote command started, which is precisely the failure
+    that must never be replayed. The command is recorded before the failure, because it really
+    was sent.
+    """
+
+    #: The command text the session dies on.
+    dies_at: str = ""
+
+    def run(self, command: RemoteCommand, /) -> str:
+        """Answer one command, or die on it.
+
+        Parameters
+        ----------
+        command
+            The command, already quoted.
+
+        Returns
+        -------
+        str
+            What the base double answers, for any command that is not :attr:`dies_at`.
+
+        Raises
+        ------
+        DeviceUnreachable
+            *command* is :attr:`dies_at`.
+        DeviceError
+            Whatever the base double raises.
+        """
+        if command.text == self.dies_at:
+            self.log.append(f"run {command.text}")
+            self.commands.append(command.text)
+            raise DeviceUnreachable(
+                transport=TransportKind.SSH,
+                endpoint=ENDPOINT,
+                detail="the session dropped and no answer arrived",
+            )
+        return super().run(command)
+
+
 def upload_shell(**seams: object) -> FakeShell:
-    """Build a shell that can accept an upload: an empty root and the two commands.
+    """Build a shell that can accept an upload: an empty root and every command it sends.
 
     Parameters
     ----------
     **seams
         Forwarded to :class:`FakeShell` -- ``short_writes``, ``refuse_commands``,
-        ``fail_with``.
+        ``command_stderr``, ``fail_with``.
 
     Returns
     -------
@@ -658,10 +802,32 @@ def upload_shell(**seams: object) -> FakeShell:
         The double.
     """
     mkdir = RemoteCommand.of(MAKE_DIR_TEMPLATE, ROOT.child(MINTED)).text
-    refresh = RemoteCommand.of(REFRESH_TEMPLATE).text
-    shell = shell_for({}, outputs={mkdir: "", refresh: ""})
+    shell = shell_for({}, outputs={mkdir: "", **HEALTHY_REFRESH})
     for name, value in seams.items():
         setattr(shell, name, frozenset(value) if isinstance(value, tuple) else value)
+    return shell
+
+
+def fencing_shell(*, second_boot_id: str) -> FenceMovesShell:
+    """Build an upload-ready shell whose fence changes under the restart.
+
+    Parameters
+    ----------
+    second_boot_id
+        What the fence answers from its second read on. ``""`` for a fence that stops
+        answering; another identifier for a tablet that rebooted.
+
+    Returns
+    -------
+    FenceMovesShell
+        The double.
+    """
+    mkdir = RemoteCommand.of(MAKE_DIR_TEMPLATE, ROOT.child(MINTED)).text
+    shell = FenceMovesShell(
+        outputs={mkdir: "", **HEALTHY_REFRESH},
+        dirs={ROOT.value: ()},
+    )
+    shell.second_boot_id = second_boot_id
     return shell
 
 
@@ -766,10 +932,35 @@ def test_every_command_is_busybox_safe_and_spelled_as_the_design_requires():
     assert STORAGE_COMMAND == "df -Pk /home/root/.local/share/remarkable/xochitl"
     assert FIRMWARE_COMMAND == "sed -n 's/^IMG_VERSION=\"\\(.*\\)\"$/\\1/p' /etc/os-release"
     assert MODEL_COMMAND == "cat /sys/devices/soc0/machine"
-    assert RemoteCommand.of(REFRESH_TEMPLATE).text == "systemctl restart xochitl"
+    assert RESTART_COMMAND == "systemctl restart xochitl"
     assert RemoteCommand.of(MAKE_DIR_TEMPLATE, ROOT).text == (
         "mkdir -p /home/root/.local/share/remarkable/xochitl"
     )
+
+
+def test_the_four_guarded_restart_commands_are_spelled_the_way_the_device_needs():
+    """The restart's neighbours, pinned as text. Each one is a hazard control, not a nicety."""
+    assert STATE_COMMAND == "systemctl is-active xochitl || true"
+    assert RESET_COMMAND == "systemctl reset-failed xochitl"
+    assert FENCE_COMMAND == "cat /proc/sys/kernel/random/boot_id"
+    # `|| true` and nothing more: the state must arrive as stdout rather than as an exit status,
+    # and every way the probe can fail must read as "not active", which is the refusing answer.
+    assert STATE_COMMAND.endswith("|| true")
+    assert "2>" not in STATE_COMMAND, "stderr is not redirected: a real error must stay visible"
+
+
+def test_every_systemctl_command_names_the_same_one_unit():
+    """One unit constant, interpolated three times, so a guard cannot guard another service.
+
+    The state that is read, the counter that is cleared and the process that is restarted have
+    to be the same unit or the guards guard nothing. Spelling the name once is the mechanism;
+    this is the assertion that the mechanism is still in place.
+    """
+    for command in (STATE_COMMAND, RESET_COMMAND, RESTART_COMMAND):
+        words = command.split()
+        assert words[0] == "systemctl"
+        assert UI_SERVICE in words
+    assert UI_SERVICE == "xochitl"
 
 
 def test_the_storage_command_is_the_posix_form_not_the_wrapping_one():
@@ -802,8 +993,23 @@ def test_the_serial_is_named_unsupported_rather_than_answered_with_the_soc_id():
     facts = SshFacts(shell=shell).read_facts()
 
     assert facts.serial is None
-    assert facts.unsupported == frozenset({SERIAL_FIELD})
+    assert facts.unsupported == frozenset({NO_SERIAL_SOURCE})
     assert not any("serial" in command for command in shell.commands)
+
+
+def test_the_serial_is_answerable_by_no_transport_rather_than_by_the_other_one():
+    """The empty ``supported_by`` is a claim, and it is the one this field needs.
+
+    ``USB_WEB_API`` would be the wrong annotation and a bare name would be too weak: the value
+    lives only in the tablet's own credential-bearing config file, which no source here may
+    name, and in journal lines the log route redacts. Neither transport reads either, so the
+    report has nothing to advise and says so.
+    """
+    facts = SshFacts(shell=FakeShell(outputs=HEALTHY_FACTS)).read_facts()
+
+    assert facts.alternatives == (NO_SERIAL_SOURCE,)
+    assert facts.alternatives[0].name == SERIAL_FIELD
+    assert facts.alternatives[0].supported_by == ()
 
 
 def test_an_unmatched_firmware_line_is_an_unnamed_none_not_an_unsupported_field():
@@ -811,7 +1017,7 @@ def test_an_unmatched_firmware_line_is_an_unnamed_none_not_an_unsupported_field(
     facts = SshFacts(shell=FakeShell(outputs={**HEALTHY_FACTS, FIRMWARE_COMMAND: ""})).read_facts()
 
     assert facts.firmware is None
-    assert "firmware" not in facts.unsupported
+    assert "firmware" not in facts.unsupported_names
 
 
 def test_a_model_command_that_answers_with_blank_lines_is_an_unnamed_none():
@@ -820,14 +1026,14 @@ def test_a_model_command_that_answers_with_blank_lines_is_an_unnamed_none():
     facts = SshFacts(shell=FakeShell(outputs=outputs)).read_facts()
 
     assert facts.model is None
-    assert "model" not in facts.unsupported
+    assert "model" not in facts.unsupported_names
 
 
 def test_the_two_encodings_of_none_are_distinguishable_on_one_reading():
     facts = SshFacts(shell=FakeShell(outputs={**HEALTHY_FACTS, FIRMWARE_COMMAND: ""})).read_facts()
 
     assert (facts.firmware, facts.serial) == (None, None)
-    assert facts.unsupported == frozenset({SERIAL_FIELD})
+    assert facts.unsupported == frozenset({NO_SERIAL_SOURCE})
 
 
 def test_the_memory_gauges_are_read_from_meminfo_in_kibibytes():
@@ -1592,7 +1798,7 @@ def test_an_upload_reports_what_the_transport_observed():
     assert receipt.library_refresh is LibraryRefresh.VISIBILITY_FORCED
 
 
-def test_the_metadata_sidecar_is_written_last_and_the_refresh_after_it():
+def test_the_metadata_sidecar_is_written_last_and_the_guarded_refresh_after_it():
     shell = upload_shell()
     paths = document_paths(ROOT, MINTED)
 
@@ -1603,8 +1809,48 @@ def test_the_metadata_sidecar_is_written_last_and_the_refresh_after_it():
         f"write {paths.underlay('pdf').value}",
         f"write {paths.content.value}",
         f"write {paths.metadata.value}",
-        "run systemctl restart xochitl",
+        f"run {STATE_COMMAND}",
+        f"run {FENCE_COMMAND}",
+        f"run {RESET_COMMAND}",
+        f"run {RESTART_COMMAND}",
+        f"run {FENCE_COMMAND}",
     ]
+
+
+def test_the_reset_failed_and_the_restart_are_immediate_neighbours():
+    """Adjacency, not mere presence. A command inserted between them re-opens the hole.
+
+    ``reset-failed`` clears the unit's start-rate counter and the restart spends one of the four
+    starts the firmware allows per ten minutes. What makes the pair safe is that nothing can
+    happen in between -- a read that stalls, a probe somebody adds later, anything that takes
+    time or can fail -- because the counter this clears is only known to be clear at the instant
+    after it runs. So this asserts the *index*, which is the only form of the claim that a later
+    edit cannot quietly satisfy.
+    """
+    shell = upload_shell()
+
+    uploader(shell).upload(request_for())
+
+    reset_index = shell.commands.index(RESET_COMMAND)
+    assert shell.commands[reset_index + 1] == RESTART_COMMAND
+    assert shell.commands.count(RESET_COMMAND) == 1
+    assert shell.commands.count(RESTART_COMMAND) == 1
+
+
+def test_the_service_state_is_read_before_the_restart_and_the_fence_before_that():
+    """The two questions asked before a start is spent, in the order that makes them useful.
+
+    The state read has to be the *last* thing before the pair that acts, because it is a
+    precondition with a window: the wider the gap, the more likely the UI stopped inside it. The
+    fence read has to be before the restart to be a fence at all.
+    """
+    shell = upload_shell()
+
+    uploader(shell).upload(request_for())
+
+    assert shell.commands.index(STATE_COMMAND) < shell.commands.index(RESET_COMMAND)
+    assert shell.commands.index(FENCE_COMMAND) < shell.commands.index(RESTART_COMMAND)
+    assert shell.commands.count(FENCE_COMMAND) == 2, "armed before, verified after"
 
 
 def test_no_zero_byte_scene_stubs_and_no_local_sidecar_are_written():
@@ -1847,7 +2093,7 @@ def test_nothing_is_cleaned_up_after_a_failed_upload():
 
 
 def test_a_failure_forcing_visibility_says_the_document_is_already_written():
-    shell = upload_shell(refuse_commands=(RemoteCommand.of(REFRESH_TEMPLATE).text,))
+    shell = upload_shell(refuse_commands=(RESTART_COMMAND,))
     paths = document_paths(ROOT, MINTED)
 
     with pytest.raises(DeviceProtocolError) as raised:
@@ -1855,6 +2101,228 @@ def test_a_failure_forcing_visibility_says_the_document_is_already_written():
 
     assert paths.metadata.value in shell.files
     assert "completely written" in raised.value.got
+
+
+# ─────────────────── the guarded restart: five refusals, no retries ───────────────────
+#
+#  Every test below drives the real adapter against the command log. None of them restarts
+#  anything: the tablet this suite runs next to is the author's, and `upload_shell` is a dict.
+
+
+@pytest.mark.parametrize("state", ["inactive", "failed", "activating", "deactivating"])
+def test_a_ui_process_that_is_not_active_is_never_restarted(state: str):
+    """The most important refusal, and the least intuitive one.
+
+    A stopped or crash-looping UI is the state where a restart looks most useful and is most
+    dangerous: it is the state that has already been spending starts. So the probe is read and
+    the pair that acts is never sent.
+    """
+    shell = upload_shell()
+    shell.outputs[STATE_COMMAND] = f"{state}\n"
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader(shell).upload(request_for())
+
+    assert RESET_COMMAND not in shell.commands
+    assert RESTART_COMMAND not in shell.commands
+    assert raised.value.route == STATE_COMMAND
+    assert raised.value.expected == ACTIVE_STATE
+    assert raised.value.got.startswith(state)
+    assert "no start was spent" in raised.value.got
+    assert "completely written" in raised.value.got
+
+
+def test_a_state_probe_that_answers_nothing_refuses_rather_than_assuming_active():
+    """The fail-safe direction, asserted. ``|| true`` turns every probe failure into silence."""
+    shell = upload_shell()
+    shell.outputs[STATE_COMMAND] = ""
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader(shell).upload(request_for())
+
+    assert RESTART_COMMAND not in shell.commands
+    assert raised.value.got.startswith(UNKNOWN_STATE)
+
+
+def test_a_fence_that_cannot_be_armed_stops_the_restart_before_it_is_sent():
+    # No fence, no restart: a start spent on a restart nobody can afterwards distinguish from a
+    # reboot is exactly the one this guard exists to refuse.
+    shell = upload_shell()
+    shell.outputs[FENCE_COMMAND] = "\n"
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader(shell).upload(request_for())
+
+    assert RESET_COMMAND not in shell.commands
+    assert RESTART_COMMAND not in shell.commands
+    assert raised.value.route == FENCE_COMMAND
+    assert raised.value.expected == FENCE_WANTED
+    assert "no start was spent" in raised.value.got
+
+
+def test_a_start_limit_refusal_says_the_firmware_may_reboot_and_forbids_a_repeat():
+    """The escalation, driven by the sentence systemd really writes.
+
+    ``systemctl`` exits 1 both for this and for a unit that failed to start once, so the words
+    are the whole signal. The message a caller gets has to say two things: that the next step is
+    a reboot, and that repeating the write is the wrong move.
+    """
+    shell = upload_shell(
+        refuse_commands=(RESTART_COMMAND,),
+        command_stderr={RESTART_COMMAND: START_LIMIT_STDERR},
+    )
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader(shell).upload(request_for())
+
+    assert "reboot" in raised.value.got
+    assert "DO NOT repeat this upload" in raised.value.got
+    assert "start request repeated" in raised.value.got, "the device's own words survive"
+    # Sent once and never replayed, which is the whole of requirement 5.
+    assert shell.commands.count(RESTART_COMMAND) == 1
+    # And the second fence read never happens, so a refused start is not reported as a reboot.
+    assert shell.commands.count(FENCE_COMMAND) == 1
+
+
+def test_an_ordinary_restart_failure_is_not_escalated_into_a_reboot_warning():
+    # The escalation must be the start-limit condition and not every failure, or the loudest
+    # message in this module becomes the one a reader learns to skip.
+    shell = upload_shell(
+        refuse_commands=(RESTART_COMMAND,),
+        command_stderr={RESTART_COMMAND: ORDINARY_RESTART_STDERR},
+    )
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader(shell).upload(request_for())
+
+    assert "DO NOT" not in raised.value.got
+    assert "control process exited" in raised.value.got
+    assert "completely written" in raised.value.got
+
+
+@pytest.mark.parametrize(
+    ("marker", "sentence"),
+    [
+        ("start-limit-hit", "Result=start-limit-hit"),
+        ("start request repeated", "has a start request repeated too quickly"),
+        ("attempted too often", "start of the service was attempted too often"),
+    ],
+)
+def test_each_start_limit_spelling_is_matched_case_insensitively(marker: str, sentence: str):
+    """Three wordings, because systemd's has changed and this package is measured against one.
+
+    Each is asserted through the adapter rather than against the constant, so a change to how
+    the match is performed -- case, substring, split words -- fails here.
+    """
+    assert marker in START_LIMIT_MARKERS
+    shell = upload_shell(
+        refuse_commands=(RESTART_COMMAND,),
+        command_stderr={RESTART_COMMAND: f"exit status 1: {sentence.upper()}"},
+    )
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader(shell).upload(request_for())
+
+    assert "DO NOT repeat this upload" in raised.value.got
+
+
+def test_a_boot_id_that_changed_under_the_restart_raises_and_names_both_identifiers():
+    """The fence catching what it is for: the tablet went down and came back up.
+
+    Never a retry. A reboot that a retry answers with another restart is how one reboot becomes
+    a loop, so the error says what the human has to do instead -- wake it, unlock it, look.
+    """
+    shell = fencing_shell(second_boot_id=f"{OTHER_BOOT_ID}\n")
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader(shell).upload(request_for())
+
+    assert raised.value.route == FENCE_COMMAND
+    assert raised.value.expected == BOOT_ID_VALUE
+    assert raised.value.got.startswith(OTHER_BOOT_ID)
+    assert "rebooted" in raised.value.got
+    assert "DO NOT retry" in raised.value.got
+    assert "unlocking" in raised.value.got
+    assert shell.commands.count(RESTART_COMMAND) == 1, "a reboot is never answered with another"
+
+
+def test_a_fence_that_stops_answering_after_the_restart_is_reported_as_unprovable():
+    # Weaker than a changed identifier -- the absence of evidence rather than evidence -- and it
+    # carries the same instruction, because an unverifiable restart must not be replayed.
+    shell = fencing_shell(second_boot_id="")
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader(shell).upload(request_for())
+
+    assert raised.value.expected == BOOT_ID_VALUE
+    assert raised.value.got.startswith(UNKNOWN_STATE)
+    assert "DO NOT repeat the restart" in raised.value.got
+    assert shell.commands.count(FENCE_COMMAND) == 2
+
+
+def test_visibility_is_forced_once_per_upload_and_there_is_no_deferred_mode():
+    """The cost the guards contain, stated as a test rather than left in a docstring.
+
+    Two uploads are two restarts, so five inside ten minutes is one more than the firmware
+    allows. Amortising them is not available here and the reason is in the port, not in this
+    adapter: ``LibraryRefresh`` has two members, "I acted" and "nothing was needed", and a
+    deferred refresh is neither. A ``defer_restart`` flag would have to return one of the two on
+    an upload that did the other, which is the confusion ``UploadReceipt`` exists to prevent.
+    This asserts the shape that makes the argument true, so an amortisation added without the
+    domain change it needs fails here.
+    """
+    assert sorted(LibraryRefresh) == [
+        LibraryRefresh.ALREADY_VISIBLE,
+        LibraryRefresh.VISIBILITY_FORCED,
+    ]
+    shell = upload_shell()
+    first = SshUploader(shell=shell, root=ROOT, now_ms=lambda: NOW_MS, new_uuid=lambda: MINTED)
+    second = SshUploader(shell=shell, root=ROOT, now_ms=lambda: NOW_MS, new_uuid=lambda: MINTED)
+
+    receipts = (first.upload(request_for()), second.upload(request_for()))
+
+    assert [receipt.library_refresh for receipt in receipts] == [
+        LibraryRefresh.VISIBILITY_FORCED,
+        LibraryRefresh.VISIBILITY_FORCED,
+    ]
+    assert shell.commands.count(RESTART_COMMAND) == 2, "N uploads are N restarts, by design"
+    # And the guard runs in full every time: the state and the fence are not remembered between
+    # uploads, because a memo of "it was active a moment ago" is exactly the stale fact that
+    # would let the second restart go out into a state the first one created.
+    assert shell.commands.count(STATE_COMMAND) == 2
+    assert shell.commands.count(FENCE_COMMAND) == 4
+
+
+def test_a_failed_reset_failed_stops_before_the_restart():
+    # If the counter was not provably cleared, the restart is the hazardous one again. Nothing
+    # here degrades to "restart anyway".
+    shell = upload_shell(refuse_commands=(RESET_COMMAND,))
+
+    with pytest.raises(DeviceProtocolError) as raised:
+        uploader(shell).upload(request_for())
+
+    assert RESTART_COMMAND not in shell.commands
+    assert raised.value.route == RESET_COMMAND
+    assert "completely written" in raised.value.got
+
+
+def test_a_session_that_dies_at_the_restart_is_not_retried_and_says_what_is_on_the_device():
+    """The ambiguous case: the restart may have been sent and the tablet may have gone down.
+
+    Nothing distinguishes those from here, so nothing here tries to. The document is complete,
+    the error says so, and the retry decision belongs to a human who can look at the tablet.
+    """
+    mkdir = RemoteCommand.of(MAKE_DIR_TEMPLATE, ROOT.child(MINTED)).text
+    shell = DyingShell(outputs={mkdir: "", **HEALTHY_REFRESH}, dirs={ROOT.value: ()})
+    shell.dies_at = RESTART_COMMAND
+
+    with pytest.raises(DeviceUnreachable) as raised:
+        uploader(shell).upload(request_for())
+
+    assert shell.commands.count(RESTART_COMMAND) == 1
+    assert "completely written" in raised.value.detail
+    assert shell.commands.count(FENCE_COMMAND) == 1, "nothing ran after the session died"
+    assert document_paths(ROOT, MINTED).metadata.value in shell.files
 
 
 def test_a_short_write_is_never_a_receipt_reporting_fewer_bytes():

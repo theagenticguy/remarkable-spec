@@ -1,10 +1,11 @@
-"""Conformance tests for the formats ports: the repository contract and the page codec.
+"""Conformance tests for the formats ports: the repository, the page codec, the appender.
 
-The module under test is Protocols plus one sentinel, so the behaviour under test is the
-*contract*: what a conforming implementation must return, what it must raise, and what it
-must never let escape. Two fakes stand in for adapters -- one holding prebuilt aggregates,
-one composing :class:`PageCodec` the way a real repository adapter does -- and the tests are
-written against the Protocol, so binding a different adapter later re-uses them unchanged.
+The module under test is Protocols plus one value object and one sentinel, so the behaviour
+under test is the *contract*: what a conforming implementation must return, what it must
+raise, and what it must never let escape. Fakes stand in for adapters -- one holding prebuilt
+aggregates, one composing :class:`PageCodec` the way a real repository adapter does, one
+appending a marker where an adapter would encode blocks -- and the tests are written against
+the Protocol, so binding a different adapter later re-uses them unchanged.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from pydantic import ValidationError
 
 from rmspec.domain.errors import (
     CorruptPageData,
@@ -25,7 +27,9 @@ from rmspec.domain.errors import (
     MalformedDocument,
     PageNotFound,
     RmspecError,
+    SceneRewriteUnsafe,
     UnsupportedPageFormat,
+    UsageError,
 )
 from rmspec.domain.models import (
     Document,
@@ -49,6 +53,8 @@ from rmspec.domain.ports.formats import (
     ABSENT_ARTIFACT_FINGERPRINT,
     DocumentRepository,
     PageCodec,
+    SceneAppender,
+    SceneEdit,
 )
 
 if TYPE_CHECKING:
@@ -281,6 +287,46 @@ class _FakePageCodec:
         return _content(stroke_count=len(raw), defects=defects)
 
 
+class _FakeSceneAppender:
+    """A ``SceneAppender`` that concatenates a marker rather than encoding anything.
+
+    Enough to exercise the contract without a parser: it holds the port's three refusals
+    behind explicit switches, and its bytes make the input a strict prefix of the result, so
+    the clause an implementation is judged on is observable in a fake as well as in an
+    adapter.
+    """
+
+    def __init__(
+        self,
+        *,
+        fails_with: Literal["corrupt", "unsafe"] | None = None,
+        author_id: int = 2,
+        layer_index: int = 0,
+    ) -> None:
+        """Choose which documented failure, if any, this appender raises."""
+        self._fails_with = fails_with
+        self._author_id = author_id
+        self._layer_index = layer_index
+        self.appended_refs: list[str] = []
+
+    def append_strokes(
+        self, raw: bytes, page_ref: str, /, *, strokes: tuple[Stroke, ...]
+    ) -> SceneEdit:
+        """Append a marker per stroke, or raise the configured domain error."""
+        self.appended_refs.append(page_ref)
+        if not strokes:
+            raise UsageError(subject=f"no strokes for {page_ref}", requirement="at least one")
+        if self._fails_with == "corrupt":
+            raise CorruptPageData(page_uuid=page_ref, detail="truncated", offset=len(raw))
+        if self._fails_with == "unsafe":
+            raise SceneRewriteUnsafe(page_uuid=page_ref, detail="this build cannot write it")
+        return SceneEdit(
+            scene=raw + b"|" * len(strokes),
+            author_id=self._author_id,
+            layer_index=self._layer_index,
+        )
+
+
 class _CodecBackedRepository:
     """A ``DocumentRepository`` that decodes stored bytes through a :class:`PageCodec`.
 
@@ -376,6 +422,21 @@ def _as_codec(candidate: PageCodec, /) -> PageCodec:
     return candidate
 
 
+def _as_appender(candidate: SceneAppender, /) -> SceneAppender:
+    """Accept anything structurally satisfying :class:`SceneAppender`."""
+    return candidate
+
+
+def _stroke() -> Stroke:
+    """Return one stroke, the unit of ink the appender takes."""
+    return Stroke(
+        pen=PenType.FINELINER_1,
+        color=PenColor.BLACK,
+        thickness_scale=2.0,
+        points=(Point(x=-10.0, y=20.0), Point(x=10.0, y=20.0)),
+    )
+
+
 def _repository(
     *,
     fingerprints: Mapping[PageId, str] | None = None,
@@ -419,11 +480,13 @@ def test_no_content_digest_can_collide_with_the_absent_sentinel(raw: bytes):
     assert hashlib.sha256(raw).hexdigest() != ABSENT_ARTIFACT_FINGERPRINT
 
 
-def test_module_publishes_exactly_the_two_ports_and_the_sentinel():
+def test_module_publishes_exactly_the_three_ports_the_receipt_and_the_sentinel():
     assert formats_module.__all__ == [
         "ABSENT_ARTIFACT_FINGERPRINT",
         "DocumentRepository",
         "PageCodec",
+        "SceneAppender",
+        "SceneEdit",
     ]
     assert sorted(formats_module.__all__) == list(formats_module.__all__)
     for name in formats_module.__all__:
@@ -435,7 +498,7 @@ def test_module_publishes_exactly_the_two_ports_and_the_sentinel():
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("port", [DocumentRepository, PageCodec])
+@pytest.mark.parametrize("port", [DocumentRepository, PageCodec, SceneAppender])
 def test_ports_are_structural_contracts_not_runtime_checkable_classes(port: type):
     # A caller must not gate on nominal typing: these are static contracts, so isinstance
     # and issubclass are refused rather than silently answering "no" for a conforming fake.
@@ -470,11 +533,26 @@ def test_every_port_argument_is_positional_only_and_has_no_default(
         assert parameter.default is inspect.Parameter.empty
 
 
+def test_the_appender_takes_its_bytes_positionally_and_its_ink_by_keyword():
+    # `raw` and `page_ref` mirror `PageCodec.decode_page`, so the two halves of the same seam
+    # are called the same way; `strokes` is keyword-only because at a call site three bare
+    # positionals would not say which is the label and which is the ink. Nothing has a
+    # default: an implementation must not be able to invent either the label or the ink.
+    parameters = inspect.signature(SceneAppender.append_strokes).parameters
+    assert list(parameters) == ["self", "raw", "page_ref", "strokes"]
+    for name in ("raw", "page_ref"):
+        assert parameters[name].kind is inspect.Parameter.POSITIONAL_ONLY
+    assert parameters["strokes"].kind is inspect.Parameter.KEYWORD_ONLY
+    for name in ("raw", "page_ref", "strokes"):
+        assert parameters[name].default is inspect.Parameter.empty
+
+
 def test_protocol_bodies_are_placeholders_and_never_usable_defaults():
     # Called through the Protocol, every method returns None rather than a plausible value:
     # an incomplete implementation is a composition-time defect, not a runtime null object.
     repo = _FakeDocumentRepository()
     codec = _FakePageCodec()
+    appender = _FakeSceneAppender()
     stubs = (
         DocumentRepository.list_documents(repo),
         DocumentRepository.summary(repo, _DOC),
@@ -483,9 +561,11 @@ def test_protocol_bodies_are_placeholders_and_never_usable_defaults():
         DocumentRepository.page_fingerprint(repo, _DOC, _INK),
         DocumentRepository.page_fingerprints(repo, _DOC),
         PageCodec.decode_page(codec, b"", "ref"),
+        SceneAppender.append_strokes(appender, b"", "ref", strokes=(_stroke(),)),
     )
-    assert [_received(stub) for stub in stubs] == [None] * 7
+    assert [_received(stub) for stub in stubs] == [None] * 8
     assert codec.decoded_refs == []
+    assert appender.appended_refs == []
 
 
 # --------------------------------------------------------------------------------------
@@ -801,3 +881,97 @@ def test_a_codec_backed_repository_fingerprints_bytes_before_decoding_them():
         repository.page_fingerprint(_DOC, _UNCLAIMED)
     with pytest.raises(DocumentNotFound):
         repository.page_fingerprint(_UNKNOWN_DOC, _INK)
+
+
+# --------------------------------------------------------------------------------------
+# the appender: ink onto a page that already exists
+# --------------------------------------------------------------------------------------
+
+
+def test_an_append_returns_the_whole_page_and_not_a_patch():
+    appender = _as_appender(_FakeSceneAppender())
+
+    edit = appender.append_strokes(b"scene", "ref", strokes=(_stroke(), _stroke()))
+
+    assert edit.scene.startswith(b"scene"), "an appending implementation may make this true"
+    assert len(edit.scene) > len(b"scene"), "and something must actually have been added"
+
+
+def test_the_receipt_reports_the_two_decisions_the_caller_did_not_make():
+    appender = _as_appender(_FakeSceneAppender(author_id=4, layer_index=2))
+
+    edit = appender.append_strokes(b"scene", "ref", strokes=(_stroke(),))
+
+    assert (edit.author_id, edit.layer_index) == (4, 2)
+
+
+def test_the_page_ref_is_a_label_and_never_changes_what_is_written():
+    appender = _FakeSceneAppender()
+
+    first = _as_appender(appender).append_strokes(b"scene", "by-uuid", strokes=(_stroke(),))
+    second = _as_appender(appender).append_strokes(b"scene", "/a/path.rm", strokes=(_stroke(),))
+
+    assert first.scene == second.scene
+    assert appender.appended_refs == ["by-uuid", "/a/path.rm"]
+
+
+def test_appending_nothing_is_the_callers_mistake_and_not_a_format_failure():
+    with pytest.raises(UsageError) as caught:
+        _as_appender(_FakeSceneAppender()).append_strokes(b"scene", "ref", strokes=())
+
+    assert not isinstance(caught.value, FormatError)
+
+
+@pytest.mark.parametrize(
+    ("switch", "expected"),
+    [
+        pytest.param("corrupt", CorruptPageData, id="bytes that do not decode"),
+        pytest.param("unsafe", SceneRewriteUnsafe, id="bytes this build will not write"),
+    ],
+)
+def test_appender_failures_are_domain_errors_reported_against_the_supplied_ref(
+    switch: Literal["corrupt", "unsafe"], expected: type[CorruptPageData | SceneRewriteUnsafe]
+):
+    with pytest.raises(expected) as caught:
+        _as_appender(_FakeSceneAppender(fails_with=switch)).append_strokes(
+            b"scene", "ref", strokes=(_stroke(),)
+        )
+
+    assert caught.value.page_uuid == "ref"
+    assert isinstance(caught.value, FormatError)
+
+
+def test_the_two_write_refusals_are_distinguishable_from_each_other():
+    # "your file is damaged" and "this build will not write your undamaged file" send a
+    # caller to two different places, so neither may be a subclass of the other.
+    assert not issubclass(SceneRewriteUnsafe, CorruptPageData)
+    assert not issubclass(CorruptPageData, SceneRewriteUnsafe)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        pytest.param({"scene": b"", "author_id": 1, "layer_index": 0}, id="empty bytes"),
+        pytest.param({"scene": b"x", "author_id": 0, "layer_index": 0}, id="author id zero"),
+        pytest.param({"scene": b"x", "author_id": -1, "layer_index": 0}, id="negative author"),
+        pytest.param({"scene": b"x", "author_id": 1, "layer_index": -1}, id="negative layer"),
+        pytest.param(
+            {"scene": b"x", "author_id": 1, "layer_index": 0, "author_uuid": "extra"},
+            id="a field the receipt does not declare",
+        ),
+    ],
+)
+def test_a_receipt_refuses_a_state_a_caller_would_have_to_check_for(invalid: Mapping[str, object]):
+    # Constrained rather than merely annotated, so nothing has to validate a receipt before
+    # writing it: empty bytes would truncate a page, and author id 0 is the component every
+    # artifact measured already uses.
+    with pytest.raises(ValidationError):
+        SceneEdit.model_validate(invalid)
+
+
+def test_a_receipt_is_frozen_so_the_bytes_cannot_be_edited_after_they_are_reported():
+    # Asserted through the model's own configuration rather than by assigning to a field: the
+    # assignment is a static error as well as a runtime one, and only the runtime half is the
+    # point here.
+    assert SceneEdit.model_config.get("frozen") is True
+    assert SceneEdit.model_config.get("extra") == "forbid"

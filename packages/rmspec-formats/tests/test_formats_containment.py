@@ -165,14 +165,20 @@ def test_every_exported_name_exists_and_is_documented(name: str):
 
 
 def test_the_package_surface_is_exactly_the_composition_surface():
-    """Three names: two adapters and one compatibility function.
+    """Four names: three adapters and one compatibility function.
 
     The legacy package re-exported nine free functions, six of which the domain now owns
     as ``decode`` classmethods. A use case reaches this package through a port, never by
     importing a function from it, so anything added here is a new dependency for a
     caller that had none.
+
+    ``AppendOnlySceneWriter`` is the third adapter and the newest: it binds
+    ``SceneAppender``, the write direction of the same parser seam. It earns a place here for
+    the same reason the other two do -- a composition root has to name it -- and for no other,
+    which is why nothing else about the encoder is exported.
     """
     assert sorted(formats.__all__) == [
+        "AppendOnlySceneWriter",
         "SceneCodec",
         "XochitlDocumentRepository",
         "fingerprint_bytes",

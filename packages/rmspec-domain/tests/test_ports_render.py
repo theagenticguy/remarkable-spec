@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import inspect
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_protocol_members
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
+from rmspec.domain.errors import UsageError
 from rmspec.domain.models import (
     PAPER_PRO_SCREEN,
     RM2_SCREEN,
@@ -26,8 +27,11 @@ from rmspec.domain.models import (
     PageId,
     Palette,
     PenColor,
+    PenType,
+    Point,
     Rgb,
     ScreenSpec,
+    Stroke,
     TextBlock,
 )
 from rmspec.domain.ports import render as render_port
@@ -36,6 +40,8 @@ from rmspec.domain.ports.render import (
     _PNG_HEADER_LENGTH,
     _PNG_SIGNATURE,
     ImageMedia,
+    InkText,
+    InkTextStyle,
     PageBackground,
     PageRenderer,
     PageUnderlay,
@@ -44,6 +50,7 @@ from rmspec.domain.ports.render import (
     RenderNotice,
     RenderNoticeCode,
     RenderStyle,
+    TextEngraver,
     TextStyle,
     _canonical_json,
     _check_image_signature,
@@ -978,3 +985,331 @@ def test_a_double_that_renders_nothing_reports_no_notice():
     assert result.notices == ()
     assert renderer.identity is not None
     assert len(renderer.identity) == 64
+
+
+# ───────────────────────────── engraving text as ink ─────────────────────────────
+#
+#  The other direction of this slice: a string in, strokes out, because a typed-text block
+#  written into a real page by a foreign author was preserved by the firmware and never drawn.
+#  Everything asserted here is a property a caller has to be able to check *before* the strokes
+#  are written onto a page somebody is holding.
+
+ASCII_ONLY = "".join(chr(code) for code in range(0x20, 0x7F))
+"""The 95 printable ASCII characters, the coverage a single-stroke engraving face has."""
+
+BEYOND_ASCII = ("\u2014", "\u201c", "\u201d", "\u2026", "\u2019")
+"""Em dash, both curly quotes, ellipsis, typographic apostrophe: what model prose is full of."""
+
+
+def make_ink_style(
+    em_mm: float = 4.0,
+    line_height: float = 1.3,
+    color: PenColor = PenColor.BLUE,
+    thickness_scale: float = 1.5,
+) -> InkTextStyle:
+    return InkTextStyle(
+        em_mm=em_mm,
+        line_height=line_height,
+        color=color,
+        thickness_scale=thickness_scale,
+    )
+
+
+def make_stroke(x: float = 0.0, y: float = 0.0) -> Stroke:
+    return Stroke(
+        pen=PenType.FINELINER_2,
+        color=PenColor.BLUE,
+        thickness_scale=1.5,
+        points=(Point(x=x, y=y), Point(x=x + 4.0, y=y + 6.0)),
+    )
+
+
+def make_ink(
+    *,
+    lines: tuple[str, ...] = ("hello",),
+    substituted: tuple[str, ...] = (),
+    extent_mm: PhysicalSize | None = None,
+) -> InkText:
+    return InkText(
+        strokes=tuple(make_stroke(float(index)) for index, _ in enumerate(lines)),
+        lines=lines,
+        substituted=substituted,
+        extent_mm=extent_mm if extent_mm is not None else make_size(40.0, 6.0),
+    )
+
+
+class _AsciiEngraver:
+    """A :class:`TextEngraver` that draws printable ASCII and boxes everything else.
+
+    Enough of a face to exercise the contract and nothing more: one stroke per drawn character,
+    a struck box for anything outside :data:`ASCII_ONLY`, greedy wrapping on spaces, and an
+    extent derived from the wrap. It never raises over an undrawable character, which is the
+    contract's central claim.
+    """
+
+    def __init__(self, *, characters: str = ASCII_ONLY) -> None:
+        self._characters = frozenset(characters)
+
+    def engrave(
+        self,
+        text: str,
+        /,
+        *,
+        screen: ScreenSpec,
+        style: InkTextStyle,
+        left_mm: float,
+        top_mm: float,
+        width_mm: float,
+    ) -> InkText:
+        """Lay ``text`` out inside the box, boxing what the face cannot draw."""
+        if not text.strip():
+            raise UsageError(subject="a blank message", requirement="something to draw")
+        per_character_mm = style.em_mm * 0.6
+        columns = int(width_mm // per_character_mm)
+        if columns < 1:
+            raise UsageError(
+                subject=f"a {width_mm}mm box at {style.em_mm}mm per em",
+                requirement="a box at least one character wide",
+            )
+        lines = _wrapped(text, columns)
+        substituted = tuple(
+            dict.fromkeys(character for character in text if character not in self._characters)
+        )
+        drawn = sum(len(line.replace(" ", "")) for line in lines)
+        strokes = tuple(
+            make_stroke(left_mm + screen.x_shift + index, top_mm + index)
+            for index in range(max(drawn, 1))
+        )
+        return InkText(
+            strokes=strokes,
+            lines=lines,
+            substituted=substituted,
+            extent_mm=PhysicalSize(
+                width_mm=max(len(line) for line in lines) * per_character_mm,
+                height_mm=len(lines) * style.em_mm * style.line_height,
+            ),
+        )
+
+
+def _wrapped(text: str, columns: int) -> tuple[str, ...]:
+    """Greedily wrap ``text`` at ``columns`` characters, never splitting a short word."""
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = word if not current else f"{current} {word}"
+        if len(candidate) <= columns:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    lines.append(current)
+    return tuple(lines)
+
+
+def test_an_ink_style_measures_in_millimetres_because_the_placement_does():
+    # `TextStyle.size_px` is screen units because `TextBlock` positions are. Ink is placed in
+    # millimetres from the page corner, and the extent has to be comparable with a page size.
+    assert set(InkTextStyle.model_fields) == {"em_mm", "line_height", "color", "thickness_scale"}
+    assert "size_px" not in InkTextStyle.model_fields
+    assert InkTextStyle.model_fields["color"].annotation is PenColor
+
+
+def test_an_ink_style_offers_no_pen_so_a_reply_cannot_be_drawn_with_an_eraser():
+    # Which tool an engraved glyph uses is a property of the technique, not of the message.
+    assert "pen" not in InkTextStyle.model_fields
+
+
+@given(value=non_positive)
+def test_an_ink_style_refuses_a_non_positive_em(value: float):
+    with pytest.raises(ValidationError):
+        make_ink_style(em_mm=value)
+
+
+@given(value=non_positive)
+def test_an_ink_style_refuses_a_non_positive_line_height(value: float):
+    with pytest.raises(ValidationError):
+        make_ink_style(line_height=value)
+
+
+@given(value=non_positive)
+def test_an_ink_style_refuses_a_non_positive_thickness(value: float):
+    with pytest.raises(ValidationError):
+        make_ink_style(thickness_scale=value)
+
+
+def test_ink_reports_the_characters_it_could_not_draw_rather_than_raising():
+    engraver: TextEngraver = _AsciiEngraver()
+
+    ink = engraver.engrave(
+        "it is fine — mostly — and “quoted”",
+        screen=PAPER_PRO_SCREEN,
+        style=make_ink_style(),
+        left_mm=20.0,
+        top_mm=40.0,
+        width_mm=120.0,
+    )
+
+    assert ink.substituted == ("—", "“", "”")
+    assert ink.strokes
+
+
+def test_a_substitution_report_is_distinct_characters_in_first_appearance_order():
+    engraver: TextEngraver = _AsciiEngraver()
+
+    ink = engraver.engrave(
+        "… then — then … again",
+        screen=PAPER_PRO_SCREEN,
+        style=make_ink_style(),
+        left_mm=0.0,
+        top_mm=0.0,
+        width_mm=200.0,
+    )
+
+    assert ink.substituted == ("…", "—")
+
+
+@pytest.mark.parametrize("character", BEYOND_ASCII)
+def test_every_character_model_prose_is_full_of_is_outside_the_face(character: str):
+    # The whole reason the non-ASCII question exists: none of these is printable ASCII.
+    assert character not in ASCII_ONLY
+    assert ord(character) > 0x7F
+
+
+def test_ink_refuses_a_substitution_report_that_is_not_single_characters():
+    # A multi-character entry is a substring nobody can look up in their own text.
+    with pytest.raises(ValidationError, match="single characters"):
+        make_ink(substituted=("--",))
+
+
+def test_ink_refuses_a_substitution_report_that_repeats_a_character():
+    # A repeat turns "three characters to fix" into "three occurrences of one".
+    with pytest.raises(ValidationError, match="repeats a character"):
+        make_ink(substituted=("—", "—"))
+
+
+def test_ink_that_drew_nothing_is_not_constructible():
+    # A reply nobody can see is the failure this whole path exists to avoid, so "no strokes" and
+    # "no lines" are both refused rather than returned.
+    with pytest.raises(ValidationError):
+        InkText(strokes=(), lines=("hello",), substituted=(), extent_mm=make_size())
+    with pytest.raises(ValidationError):
+        InkText(strokes=(make_stroke(),), lines=(), substituted=(), extent_mm=make_size())
+
+
+def test_ink_echoes_nothing_of_its_own_request_back():
+    # A receipt that restates its request invites a caller to check the request, not the result.
+    assert set(InkText.model_fields) == {"strokes", "lines", "substituted", "extent_mm"}
+
+
+def test_ink_reports_its_extent_so_a_caller_can_check_the_reply_fits():
+    engraver: TextEngraver = _AsciiEngraver()
+
+    ink = engraver.engrave(
+        "a reply long enough that it has to wrap more than once inside a narrow box",
+        screen=PAPER_PRO_SCREEN,
+        style=make_ink_style(),
+        left_mm=10.0,
+        top_mm=10.0,
+        width_mm=40.0,
+    )
+
+    assert len(ink.lines) > 1
+    assert ink.extent_mm.height_mm > make_ink_style().em_mm
+    assert ink.extent_mm.width_mm <= 40.0
+
+
+def test_the_wrapped_lines_are_what_the_page_will_actually_read():
+    engraver: TextEngraver = _AsciiEngraver()
+
+    ink = engraver.engrave(
+        "one two three four",
+        screen=PAPER_PRO_SCREEN,
+        style=make_ink_style(),
+        left_mm=0.0,
+        top_mm=0.0,
+        width_mm=24.0,
+    )
+
+    assert " ".join(ink.lines) == "one two three four"
+    assert all(line for line in ink.lines)
+
+
+def test_an_engraver_refuses_a_blank_message_and_a_box_too_narrow_to_wrap():
+    engraver: TextEngraver = _AsciiEngraver()
+
+    with pytest.raises(UsageError):
+        engraver.engrave(
+            "   \t ",
+            screen=PAPER_PRO_SCREEN,
+            style=make_ink_style(),
+            left_mm=0.0,
+            top_mm=0.0,
+            width_mm=100.0,
+        )
+    with pytest.raises(UsageError):
+        engraver.engrave(
+            "hello",
+            screen=PAPER_PRO_SCREEN,
+            style=make_ink_style(em_mm=20.0),
+            left_mm=0.0,
+            top_mm=0.0,
+            width_mm=1.0,
+        )
+
+
+def test_the_engraver_publishes_no_coverage_set_for_a_caller_to_branch_on():
+    # A set published here would be a claim about a font file the domain has never opened, and a
+    # caller could not apply it without reimplementing the implementation's own segmentation.
+    assert get_protocol_members(TextEngraver) == {"engrave"}
+    for name in ("characters", "supports", "can_draw", "coverage"):
+        assert not hasattr(TextEngraver, name)
+    assert not hasattr(render_port, "INK_TEXT_CHARACTERS")
+
+
+def test_the_engraver_takes_its_message_positionally_and_the_rest_by_keyword():
+    parameters = inspect.signature(TextEngraver.engrave).parameters
+    assert parameters["text"].kind is inspect.Parameter.POSITIONAL_ONLY
+    keyword_only = [
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    ]
+    assert keyword_only == ["screen", "style", "left_mm", "top_mm", "width_mm"]
+    assert all(parameters[name].default is inspect.Parameter.empty for name in keyword_only)
+
+
+def test_the_engraver_is_a_separate_port_from_the_renderer():
+    # `PageRenderer` has exactly one method so a conforming double is one canned `RenderedPage`,
+    # and every double in the workspace is annotated against it. A second method there would stop
+    # all of them satisfying the port they were written against.
+    assert get_protocol_members(PageRenderer) == {"render"}
+    assert get_protocol_members(PageRenderer).isdisjoint(get_protocol_members(TextEngraver))
+    assert not hasattr(_AsciiEngraver, "render")
+
+
+@pytest.mark.parametrize("port", [TextEngraver, PageRenderer])
+def test_neither_render_port_is_runtime_checkable(port: type):
+    # Parametrized so the Protocol arrives as a `type`, the way `test_ports_device.py` does it:
+    # the call is meant to raise, so naming the class inline would be a static error about a
+    # deliberate runtime one. Nothing needs `isinstance` against either port.
+    with pytest.raises(TypeError, match="runtime_checkable"):
+        isinstance(_AsciiEngraver(), port)
+
+
+def test_engraved_strokes_are_in_centre_origin_screen_units_ready_for_the_appender():
+    # The conversion from millimetres happens inside, once, by the implementation that owns the
+    # font metrics -- so a caller never adds `x_shift` and never adds it twice.
+    engraver: TextEngraver = _AsciiEngraver()
+
+    ink = engraver.engrave(
+        "x",
+        screen=PAPER_PRO_SCREEN,
+        style=make_ink_style(),
+        left_mm=0.0,
+        top_mm=0.0,
+        width_mm=100.0,
+    )
+
+    (first,) = ink.strokes[:1]
+    assert first.points[0].x >= PAPER_PRO_SCREEN.x_shift

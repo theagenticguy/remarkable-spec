@@ -17,6 +17,7 @@ from persistence_contracts import (
     ArtifactCache,
     DiagramCacheCases,
     DocumentSyncStoreContract,
+    OcrArtifactCache,
     OcrCacheCases,
     SyncAuditLogContract,
 )
@@ -169,7 +170,7 @@ class TestSqliteOcrCache(OcrCacheCases):
     """The OCR cache contract over a temporary file."""
 
     @pytest.fixture
-    def cache(self, tmp_db: SqliteDatabase) -> ArtifactCache[OcrCacheKey, OcrArtifact]:
+    def cache(self, tmp_db: SqliteDatabase) -> OcrArtifactCache:
         """Return the SQLite OCR cache.
 
         Parameters
@@ -179,8 +180,8 @@ class TestSqliteOcrCache(OcrCacheCases):
 
         Returns
         -------
-        ArtifactCache[OcrCacheKey, OcrArtifact]
-            The adapter.
+        OcrArtifactCache
+            The adapter, through the four-method view so ``ty`` checks the fourth.
         """
         return SqliteOcrCache(tmp_db)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import struct
 
 import formats_fixtures as ff
 import pytest
@@ -18,7 +19,12 @@ from rmscene import scene_items as si
 from rmscene.scene_tree import SceneTree
 from rmscene.tagged_block_common import CrdtId
 
-from rmspec.domain.errors import CorruptPageData, RmspecError, UnsupportedPageFormat
+from rmspec.domain.errors import (
+    CorruptPageData,
+    RmspecError,
+    SceneRewriteUnsafe,
+    UnsupportedPageFormat,
+)
 from rmspec.domain.models import PageContent, PageDefectCode, PenColor, PenType
 from rmspec.formats import SceneCodec
 from rmspec.formats import scene_codec as codec_module
@@ -130,7 +136,7 @@ def test_a_nested_group_that_will_not_resolve_falls_back_to_its_own_children():
     outer = si.Group(node_id=CrdtId(0, 11))
     outer.children.add(ff._sequence_item(2, nested))
 
-    layer = codec_module._convert_group(outer, _UnresolvableTree(), codec_module._Defects())
+    layer = codec_module._convert_group(outer, _UnresolvableTree(), codec_module._Defects(), {})
 
     assert len(layer.strokes) == 1
 
@@ -156,7 +162,7 @@ def test_an_unknown_wire_tool_id_substitutes_a_fineliner_and_records_it():
     """
     defects = codec_module._Defects()
 
-    stroke = codec_module._convert_line(ff.stroke_item(tool=99), defects)
+    stroke = codec_module._convert_line(ff.stroke_item(tool=99), defects, {})
 
     assert stroke is not None
     assert stroke.pen is PenType.FINELINER_1
@@ -167,7 +173,7 @@ def test_an_unknown_wire_tool_id_substitutes_a_fineliner_and_records_it():
 def test_an_unknown_colour_index_substitutes_black_and_records_it():
     defects = codec_module._Defects()
 
-    stroke = codec_module._convert_line(ff.stroke_item(color=42), defects)
+    stroke = codec_module._convert_line(ff.stroke_item(color=42), defects, {})
 
     assert stroke is not None
     assert stroke.color is PenColor.BLACK
@@ -227,7 +233,7 @@ def test_a_scene_item_type_this_codec_does_not_know_is_dropped_by_name():
     defects = codec_module._Defects()
     builder = codec_module._LayerBuilder(name="", visible=True)
 
-    codec_module._collect_item(si.SceneItem(), builder, defects)
+    codec_module._collect_item(si.SceneItem(), builder, defects, {})
 
     assert builder.is_empty
     assert [defect.code for defect in defects.entries] == [PageDefectCode.ITEM_DROPPED]
@@ -236,11 +242,64 @@ def test_a_scene_item_type_this_codec_does_not_know_is_dropped_by_name():
 
 # ─────────────────────────── typed text ───────────────────────────
 #
-#  Typed text reaches the domain through ``_convert_text`` alone, and no real v6 file
-#  routes it there: ``SceneTextItemBlock`` carries no value and a page's typed text
-#  arrives as ``SceneTree.root_text``, which the legacy reader did not read either.
-#  Relocating the conversion keeps the ``TextBlock`` path honest and testable; reading
-#  ``root_text`` would add text the legacy renderer never drew, so it stays out.
+#  Two sources, and only one of them is reachable from a real file.
+#
+#  A page's typed text is page-scoped: it arrives as ``SceneTree.root_text``, which the
+#  scene-tree walk never visits, so ``_collect_item``'s text arm never ran against real
+#  bytes and every typed page decoded to zero text blocks -- the same shape the legacy
+#  reader had, which is why typed text has never worked here. ``_convert_root_text`` reads
+#  it onto ``PageContent.text_blocks``, page-level, because the block names no layer.
+#
+#  ``Layer.text_blocks`` stays reachable only below this line: ``SceneTextItemBlock`` --
+#  the format's *layer-owned* text item -- decodes its value to nothing in ``rmscene``
+#  0.7.0 and is never added to the tree, and no artifact in the reference corpus carries
+#  one. So the layer-owned arm is exercised directly, and the page-level one through bytes.
+
+
+def test_the_pages_own_typed_text_reaches_the_domain():
+    """The defect, at the level a caller sees it. Previously ``text_blocks`` was empty."""
+    content = SceneCodec().decode_page(ff.texted_scene(), "page-1")
+
+    assert [block.text for block in content.text_blocks] == ["hello world"]
+    assert content.text_blocks[0].width == pytest.approx(400.0)
+    assert content.defects == ()
+
+
+def test_the_pages_own_typed_text_is_not_stapled_to_a_layer():
+    """Layer 0 was rejected: the block names no layer, so claiming one would be a lie.
+
+    A renderer that draws layers separately, or hides the first one, would move or lose
+    text that never belonged to any layer -- which is why this lands page-level instead.
+    """
+    content = SceneCodec().decode_page(ff.texted_scene(), "page-1")
+
+    assert [layer.text_blocks for layer in content.layers] == [()]
+    assert len(content.layers[0].strokes) == 1, "the layer keeps its own ink"
+
+
+def test_a_page_with_no_typed_text_reports_none_rather_than_an_empty_block():
+    content = SceneCodec().decode_page(ff.inked_scene(), "page-1")
+
+    assert content.text_blocks == ()
+
+
+def test_a_page_whose_only_content_is_typed_text_is_not_blank():
+    """And it still reports the layerless defect: the device always writes a layer."""
+    content = SceneCodec().decode_page(ff.scene_bytes(ff.root_text_block()), "page-1")
+
+    assert [block.text for block in content.text_blocks] == ["hello world"]
+    assert content.is_blank is False, "typed text is content, so the page is not blank"
+    assert content.layers == ()
+    assert codes(content) == [PageDefectCode.ITEM_DROPPED], "no layer is still an anomaly"
+
+
+def test_a_page_text_block_the_domain_refuses_is_dropped_and_recorded():
+    """Through real bytes, which is what makes the width guard more than a unit test."""
+    content = SceneCodec().decode_page(ff.texted_scene(width=0.0), "page-1")
+
+    assert content.text_blocks == ()
+    assert codes(content) == [PageDefectCode.ITEM_DROPPED]
+    assert "non-positive width" in content.defects[0].detail
 
 
 def test_a_text_block_flattens_its_crdt_sequence_and_drops_formatting_codes():
@@ -265,7 +324,7 @@ def test_a_text_block_lands_on_the_layer_that_owns_it():
     defects = codec_module._Defects()
     builder = codec_module._LayerBuilder(name="", visible=True)
 
-    codec_module._collect_item(ff.text_item(), builder, defects)
+    codec_module._collect_item(ff.text_item(), builder, defects, {})
 
     assert len(builder.text_blocks) == 1
     assert defects.entries == []
@@ -468,7 +527,7 @@ def test_a_group_inside_a_group_is_collected_into_the_same_layer():
     outer.children.add(ff._sequence_item(2, inner))
     builder = codec_module._LayerBuilder(name="", visible=True)
 
-    codec_module._collect_item(outer, builder, codec_module._Defects())
+    codec_module._collect_item(outer, builder, codec_module._Defects(), {})
 
     assert len(builder.strokes) == 1
 
@@ -488,7 +547,7 @@ def test_a_deleted_sequence_member_is_skipped_without_claiming_ink_went_missing(
     builder = codec_module._LayerBuilder(name="", visible=True)
     defects = codec_module._Defects()
 
-    codec_module._collect_item(None, builder, defects)
+    codec_module._collect_item(None, builder, defects, {})
 
     assert builder.is_empty
     assert defects.entries == [], "a deletion the user made is not a degradation we survived"
@@ -499,7 +558,7 @@ def test_a_scene_item_of_a_type_this_codec_does_not_know_is_still_reported():
     builder = codec_module._LayerBuilder(name="", visible=True)
     defects = codec_module._Defects()
 
-    codec_module._collect_item(object(), builder, defects)
+    codec_module._collect_item(object(), builder, defects, {})
 
     assert builder.is_empty
     assert [defect.code for defect in defects.entries] == [PageDefectCode.ITEM_DROPPED]
@@ -510,10 +569,44 @@ def test_a_dropped_text_block_leaves_the_layer_alone():
     builder = codec_module._LayerBuilder(name="", visible=True)
     defects = codec_module._Defects()
 
-    codec_module._collect_item(ff.text_item(width=0.0), builder, defects)
+    codec_module._collect_item(ff.text_item(width=0.0), builder, defects, {})
 
     assert builder.text_blocks == []
     assert [defect.code for defect in defects.entries] == [PageDefectCode.ITEM_DROPPED]
+
+
+def test_an_erased_stroke_is_normal_content_and_not_a_defect_when_it_arrives_in_bytes():
+    """The tombstone trap, through the writer rather than through ``_collect_item`` directly.
+
+    Six of the live page's 61 item blocks are tombstones. Reporting one would put almost
+    every real document into ``Document.defective_pages`` over ink the user deliberately
+    erased, and dereferencing one is how code that samples "an existing stroke" for its pen
+    and colour meets ``None``.
+    """
+    raw = ff.scene_bytes(
+        *ff.layer_blocks(node=11, items=(ff.stroke_item(),)),
+        ff.tombstone_block(node=11, index=1150),
+    )
+
+    content = SceneCodec().decode_page(raw, "page-1")
+
+    assert len(content.layers) == 1
+    assert len(content.layers[0].strokes) == 1, "the surviving stroke, and nothing invented"
+    assert content.defects == (), "an erasure the user made is not a degradation"
+
+
+def test_nothing_in_a_decode_keys_on_the_scene_ids_that_a_re_save_renumbers():
+    """Measured: a re-save moved a page's layer from ``CrdtId(0, 11)`` to ``CrdtId(1, 334)``.
+
+    Both components moved, so an id read from one parse is worthless against the next one.
+    Two files identical but for their ids must therefore decode to the same value -- which is
+    also what makes a decode cacheable across the tablet rewriting a page it did not change.
+    """
+    before = ff.scene_bytes(*ff.layer_blocks(node=11, items=(ff.stroke_item(),)))
+    after = ff.scene_bytes(*ff.layer_blocks(node=334, author=1, items=(ff.stroke_item(),)))
+
+    assert before != after, "the two files really are different bytes"
+    assert SceneCodec().decode_page(before, "page-1") == SceneCodec().decode_page(after, "page-1")
 
 
 def test_a_domain_error_raised_inside_the_walk_is_re_raised_untouched(
@@ -539,3 +632,120 @@ def test_a_domain_error_raised_inside_the_walk_is_re_raised_untouched(
         SceneCodec().decode_page(ff.inked_scene(), "page-1")
 
     assert caught.value is intended
+
+
+# ──────────────────── the lossless rewrite precondition ────────────────────
+#
+#  The check that stands between an additive rewrite and silently dropping a page of
+#  handwriting. It is verified per call because the fact behind it -- that this parser
+#  reproduces a real page byte for byte even while reporting that it did not read all of
+#  it -- is a measurement of one firmware and one parser version, not a guarantee.
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(ff.inked_scene(), id="one stroke"),
+        pytest.param(ff.texted_scene(), id="typed text the page owns"),
+        pytest.param(
+            ff.tailed_scene(ff.MEASURED_YELLOW_TAIL, ff.NO_TAIL),
+            id="a tail the parser leaves behind",
+        ),
+        pytest.param(
+            ff.scene_bytes(
+                *ff.layer_blocks(node=11, items=(ff.stroke_item(),)),
+                ff.tombstone_block(node=11, index=1150),
+            ),
+            id="an erased stroke",
+        ),
+        pytest.param(
+            ff.scene_bytes(
+                *ff.layer_blocks(node=11, name="first", items=(ff.stroke_item(),)),
+                *ff.layer_blocks(node=12, name="second", visible=False),
+            ),
+            id="two layers, one hidden",
+        ),
+    ],
+)
+def test_every_shape_this_codec_decodes_also_re_encodes_to_itself(raw: bytes):
+    """Including the two the write path cares about most: a tombstone and an unread tail.
+
+    A tail is the case that could only be assumed before it was checked -- the parser stops
+    short of those bytes and hands them over as ``extra_data``, and it is the writer putting
+    them back that makes the round trip lossless at all.
+    """
+    SceneCodec().check_rewritable(raw, "page-1")
+
+
+def test_a_zero_byte_stub_is_refused_by_name_rather_than_as_a_byte_mismatch():
+    """62 of the corpus's 92 artifacts are these, so the message has to be the right one.
+
+    There is nothing to preserve and nothing to allocate a fresh author id against, so
+    writing one is creating a scene. Reporting "produced 43 bytes from 0" would describe the
+    symptom of that and not the thing a caller has to do differently.
+    """
+    with pytest.raises(SceneRewriteUnsafe) as caught:
+        SceneCodec().check_rewritable(b"", "page-1")
+
+    assert caught.value.page_uuid == "page-1"
+    assert "zero-byte" in caught.value.detail
+    assert caught.value.__cause__ is None, "nothing failed; the artifact is simply empty"
+
+
+def test_a_page_whose_channels_the_writer_cannot_pack_is_refused_and_chains_the_cause():
+    """A pre-3.0 page: v1 line blocks read their channels as floats, and the writer packs ints.
+
+    The writer raises before producing anything, so there are no bytes to compare -- which is
+    why the precondition catches a raise as well as a mismatch. The ``struct`` failure is
+    chained and never re-exported.
+    """
+    raw = ff.scene_bytes(*ff.layer_blocks(node=11, items=(ff.stroke_item(),)), version="3.0")
+
+    with pytest.raises(SceneRewriteUnsafe) as caught:
+        SceneCodec().check_rewritable(raw, "page-1")
+
+    assert isinstance(caught.value.__cause__, struct.error)
+    assert "raised" in caught.value.detail
+    assert not any(cls.__module__.startswith("rmscene") for cls in type(caught.value).__mro__)
+
+
+def test_a_page_the_writer_re_encodes_differently_is_refused_with_both_lengths():
+    """Block *header* versions are recomputed from the writer's options, not carried over.
+
+    So a file written by a firmware whose header versions differ from this writer's defaults
+    comes back as a different file with nothing raised, which is the quiet failure that would
+    otherwise return bytes missing part of a page.
+    """
+    raw = ff.scene_bytes(*ff.layer_blocks(node=11), version="3.0")
+
+    with pytest.raises(SceneRewriteUnsafe) as caught:
+        SceneCodec().check_rewritable(raw, "page-1")
+
+    assert str(len(raw)) in caught.value.detail
+    assert caught.value.__cause__ is None, "nothing raised; the bytes simply differ"
+
+
+def test_bytes_that_do_not_decode_are_corrupt_data_rather_than_an_unsafe_rewrite():
+    """Two different things to tell a caller, and this is the one about their file.
+
+    ``SceneRewriteUnsafe`` says the page is fine and this build cannot reproduce it. A
+    truncated artifact is the other claim entirely, and it must not be dressed up as a
+    writer problem.
+    """
+    with pytest.raises(CorruptPageData) as caught:
+        SceneCodec().check_rewritable(ff.TRUNCATED_SCENE, "page-1")
+
+    assert not isinstance(caught.value, SceneRewriteUnsafe)
+    assert isinstance(caught.value.__cause__, EOFError)
+    assert caught.value.offset is not None
+
+
+def test_the_precondition_leaves_the_parser_logger_exactly_as_it_found_it():
+    logger = logging.getLogger("rmscene")
+    before = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        SceneCodec().check_rewritable(ff.inked_scene(), "page-1")
+        assert logger.level == logging.DEBUG
+    finally:
+        logger.setLevel(before)

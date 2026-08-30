@@ -30,7 +30,9 @@ __all__ = [
     "MM_PER_INCH",
     "POINTS_PER_INCH",
     "PRINTABLE_TOLERANCE",
+    "mm_to_pixels",
     "mm_to_points",
+    "pixels_to_mm",
     "points_per_pixel",
     "points_to_mm",
 ]
@@ -104,3 +106,53 @@ def points_to_mm(value: float, /) -> float:
         The same length in millimetres.
     """
     return value * MM_PER_INCH / POINTS_PER_INCH
+
+
+def mm_to_pixels(value: float, /, *, screen: ScreenSpec) -> float:
+    """Convert millimetres to **screen units**, the coordinate space a ``.rm`` scene stores.
+
+    The third edge of the triangle, and the one no oracle constrains: nothing the legacy
+    renderer wrote ever went from millimetres *into* screen units, because it only ever read a
+    scene and only ever emitted points. Text-to-ink goes the other way -- a caller places a
+    reply on a page it measures in millimetres and the strokes have to come out in the units
+    :class:`~rmspec.domain.models.Point` speaks -- so this is where that direction lives, next
+    to the other two rather than spelled out at whichever call site needed it first.
+
+    Written ``value * dpi / MM_PER_INCH`` in the same operation order as :func:`mm_to_points`,
+    for the same reason: one spelling per conversion, so two call sites cannot disagree by an
+    ulp.
+
+    Parameters
+    ----------
+    value
+        A length in millimetres.
+    screen
+        The screen whose pixel density defines the scene's unit.
+
+    Returns
+    -------
+    float
+        The same length in screen units.
+    """
+    return value * screen.dpi / MM_PER_INCH
+
+
+def pixels_to_mm(value: float, /, *, screen: ScreenSpec) -> float:
+    """Convert **screen units** to millimetres.
+
+    The inverse of :func:`mm_to_pixels`, and what turns a synthesised stroke's extent back
+    into a number the caller can compare against the page it is placing ink on.
+
+    Parameters
+    ----------
+    value
+        A length in screen units.
+    screen
+        The screen whose pixel density defines the scene's unit.
+
+    Returns
+    -------
+    float
+        The same length in millimetres.
+    """
+    return value * MM_PER_INCH / screen.dpi

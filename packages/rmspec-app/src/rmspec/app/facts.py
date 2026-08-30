@@ -40,10 +40,18 @@ declare appears in exactly one of five places -- :attr:`ReportDeviceFactsResult.
 :attr:`~ReportDeviceFactsResult.gauges` for the answered ones, which therefore always
 carry a value, and :attr:`~ReportDeviceFactsResult.unsupported`,
 :attr:`~ReportDeviceFactsResult.unanswered` and
-:attr:`~ReportDeviceFactsResult.not_requested` as bare names for the three ways a field can
-be absent. Membership *is* the state, so "unavailable" cannot be misread as "empty" by a
-caller that only looks at values, and a JSON consumer sees the same partition a terminal
-renderer does.
+:attr:`~ReportDeviceFactsResult.not_requested` for the three ways a field can be absent.
+Membership *is* the state, so "unavailable" cannot be misread as "empty" by a caller that
+only looks at values, and a JSON consumer sees the same partition a terminal renderer does.
+
+Five places, and still five: ``unsupported`` holds
+:class:`~rmspec.domain.ports.device.UnsupportedField` entries rather than bare names, so
+that "this transport cannot, SSH can" and "no transport can" are distinguishable. That is
+not a sixth way to be absent and does not get a tuple of its own -- it is a detail of the
+one way the field already is absent, carried on the entry that reports it. The other two
+absence tuples stay bare names, because neither of them has an alternative transport to
+name: a field the device declined to answer might answer next time over the same wire, and
+a field nobody asked for was not asked over any wire.
 
 The fifth place is what makes :attr:`ReportDeviceFactsRequest.include_resources` honest. A
 caller that asks for the fixed facts alone pays one round trip instead of two, which is the
@@ -70,6 +78,7 @@ from typing import TYPE_CHECKING, Final
 from pydantic import BaseModel, Field
 
 from rmspec.domain.errors import Degradation
+from rmspec.domain.ports.device import UnsupportedField
 
 if TYPE_CHECKING:
     from rmspec.domain.ports.device import DeviceFacts, DeviceFactsSource, DeviceResources
@@ -166,11 +175,23 @@ class ReportDeviceFactsResult(BaseModel, frozen=True, extra="forbid"):
     single command, so a pair here never mixes two instants.
     """
 
-    unsupported: tuple[str, ...]
+    unsupported: tuple[UnsupportedField, ...]
     """Names this transport structurally cannot ask for, facts before gauges.
 
-    Rendered as "not available over this transport". ``serial`` is here on every transport
-    that exists today, and no adapter answers it with the SoC uid instead.
+    Entries rather than bare names, and that is the whole of the transport information this
+    result carries -- there is no fourth absence tuple, because "who could answer this" is
+    not a fourth way for a field to be absent. It is a detail of the one way it already is.
+    Each entry's :attr:`~rmspec.domain.ports.device.UnsupportedField.supported_by` says
+    which sentence to print: a non-empty tuple means "not available over this transport, try
+    one of these", ``()`` means "not available over any transport", and ``None`` means the
+    adapter named the field and claimed nothing further, which renders as the original "not
+    available over this transport".
+
+    ``serial`` is here on every transport that exists today, and no adapter answers it with
+    the SoC uid instead. An adapter that annotates it with an empty ``supported_by`` turns
+    that from "try the other transport" into the truth, which is that there is no other
+    transport to try; until one does, this result reports ``None`` for it and says no more
+    than it used to.
     """
 
     unanswered: tuple[str, ...]
@@ -248,7 +269,9 @@ def _partition[T](
     readings
         Name and value per field, in the port's declaration order.
     unsupported
-        The field names the transport declared it structurally cannot ask.
+        The field names the transport declared it structurally cannot ask, as the port's
+        ``unsupported_names`` view -- which is the whole reason that view exists, so no reader
+        here narrows the union its ``unsupported`` set now holds.
 
     Returns
     -------
@@ -269,6 +292,35 @@ def _partition[T](
     return tuple(answered), tuple(absent), tuple(silent)
 
 
+def _annotated(
+    names: tuple[str, ...],
+    alternatives: tuple[UnsupportedField, ...],
+    /,
+) -> tuple[UnsupportedField, ...]:
+    """Attach each unavailable name to whatever the port said about other transports.
+
+    Every name gets an entry, because membership is the state this result reports; a name the
+    port did not annotate gets one whose ``supported_by`` is ``None``, which says exactly
+    what a bare name said before this field existed. Reusing the port's own type rather than
+    restating it is what keeps the three sentences a renderer prints out of this module: the
+    adapter that knows which transports exist is the one that decides.
+
+    Parameters
+    ----------
+    names
+        The unavailable field names, in the port's declaration order.
+    alternatives
+        The port model's partial annotation of those names.
+
+    Returns
+    -------
+    tuple[UnsupportedField, ...]
+        One entry per name, in the same order.
+    """
+    claimed = {record.name: record for record in alternatives}
+    return tuple(claimed.get(name, UnsupportedField(name=name)) for name in names)
+
+
 class ReportDeviceFacts:
     """Report what the attached tablet is, in the port's vocabulary and nothing else.
 
@@ -281,13 +333,20 @@ class ReportDeviceFacts:
     Notes
     -----
     The report is meant to be rendered by walking the four name tuples, so an unavailable
-    field is a sentence rather than a blank::
+    field is a sentence rather than a blank -- and, where the port said so, the *right*
+    sentence::
 
         result = reporter.report(ReportDeviceFactsRequest())
         for fact in result.facts:
             print(f"{fact.name}: {fact.value}")
-        for name in result.unsupported:
-            print(f"{name}: not available over this transport")
+        for entry in result.unsupported:
+            if entry.supported_by:
+                served = ", ".join(kind.value for kind in entry.supported_by)
+                print(f"{entry.name}: not available over this transport; try {served}")
+            elif entry.supported_by == ():
+                print(f"{entry.name}: not available over any transport")
+            else:
+                print(f"{entry.name}: not available over this transport")
     """
 
     def __init__(self, *, facts_source: DeviceFactsSource) -> None:
@@ -318,16 +377,19 @@ class ReportDeviceFacts:
             Raised by the port.
         """
         facts = self._facts_source.read_facts()
-        answered, unsupported, unanswered = _partition(_fact_readings(facts), facts.unsupported)
+        answered, absent_facts, unanswered = _partition(
+            _fact_readings(facts), facts.unsupported_names
+        )
+        unsupported = _annotated(absent_facts, facts.alternatives)
         gauges: tuple[ReportedGauge, ...] = ()
         not_requested: tuple[str, ...] = ()
         if request.include_resources:
             resources = self._facts_source.read_resources()
             readings, absent, silent = _partition(
-                _gauge_readings(resources), resources.unsupported
+                _gauge_readings(resources), resources.unsupported_names
             )
             gauges = tuple(ReportedGauge(name=name, value=value) for name, value in readings)
-            unsupported += absent
+            unsupported += _annotated(absent, resources.alternatives)
             unanswered += silent
         else:
             not_requested = _GAUGE_NAMES

@@ -43,20 +43,29 @@ class PageRendererLike(Protocol):
         ...
 
 
-def visible_text_blocks(page: Page, /) -> int:
-    """Count the page's visible, non-empty typed text blocks.
+def drawable_text_blocks(page: Page, /) -> int:
+    """Count the non-empty typed text blocks a renderer owes the caller.
+
+    Both sources, and each gated by what actually gates it. A layer's blocks are dropped with
+    a hidden layer; the page's own blocks are not gated at all, because the block that carries
+    them in the file has no visibility flag -- so a page whose every layer is hidden still owes
+    its page-level text. Summing only the visible layers, as this helper first did, is the
+    shape of the defect it now guards: the count would agree with a renderer that drew the ink
+    and dropped every typed word the page itself owned.
 
     Computed here from the page rather than read off a production helper, so the expectation
     is independent of the code under test.
     """
     if page.content is None:
         return 0
-    return sum(
+    from_layers = sum(
         1
         for layer in page.content.visible_layers
         for block in layer.text_blocks
         if block.text.strip()
     )
+    from_page = sum(1 for block in page.content.text_blocks if block.text.strip())
+    return from_layers + from_page
 
 
 def assert_page_renderer_contract(
@@ -98,14 +107,15 @@ def assert_page_renderer_contract(
         assert rendered.size.width_mm == screen.width_mm
         assert rendered.size.height_mm == screen.height_mm
 
-    expected_blocks = visible_text_blocks(page)
+    expected_blocks = drawable_text_blocks(page)
     if RenderNoticeCode.TEXT_OMITTED in codes:
         assert rendered.text_block_count < expected_blocks, (
             "a TEXT_OMITTED notice claims blocks were dropped, so the count must be lower"
         )
     else:
         assert rendered.text_block_count == expected_blocks, (
-            "every visible non-empty block must be drawn or reported as omitted"
+            "every drawable non-empty block, layer-owned or page-owned, must be drawn or "
+            "reported as omitted"
         )
 
     return rendered

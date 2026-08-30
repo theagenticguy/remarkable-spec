@@ -42,7 +42,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from hypothesis import given
+from hypothesis import assume, given
 from hypothesis import strategies as st
 from pydantic import BaseModel, ValidationError
 
@@ -64,6 +64,7 @@ from rmspec.domain.models import (
     Layer,
     OcrArtifact,
     OcrCacheKey,
+    OcrProvenance,
     Page,
     PageContent,
     PageContentKind,
@@ -78,6 +79,7 @@ from rmspec.domain.models import (
     Point,
     RecordedSyncAuditEntry,
     Rgb,
+    Rgba,
     ScreenSpec,
     SourceKind,
     Stroke,
@@ -535,6 +537,44 @@ def test_rgb_accepts_both_bounds():
     assert Rgb(r=255, g=255, b=255).as_hex() == "#ffffff"
 
 
+def test_rgba_drops_its_alpha_to_reach_the_type_every_ink_consumer_takes():
+    # The measured highlighter colour: little-endian 0xFFFFED75, i.e. a=255 and #ffed75.
+    colour = Rgba(r=0xFF, g=0xED, b=0x75, a=255)
+
+    assert colour.as_rgb() == Rgb(r=0xFF, g=0xED, b=0x75)
+    assert colour.as_rgb().as_hex() == "#ffed75"
+
+
+def test_rgba_alpha_defaults_to_opaque_which_is_what_the_firmware_writes():
+    assert Rgba(r=1, g=2, b=3).a == 255
+
+
+@pytest.mark.parametrize(("alpha", "expected"), [(0, 0.0), (255, 1.0)])
+def test_rgba_normalizes_its_alpha_onto_the_scale_compositing_wants(alpha: int, expected: float):
+    assert Rgba(r=0, g=0, b=0, a=alpha).alpha_normalized == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("channel", ["r", "g", "b", "a"])
+@pytest.mark.parametrize("value", [-1, 256])
+def test_rgba_refuses_a_channel_outside_eight_bits(channel: str, value: int):
+    channels: dict[str, Any] = {"r": 0, "g": 0, "b": 0, "a": 0}
+    channels[channel] = value
+
+    with pytest.raises(ValidationError):
+        Rgba(**channels)
+
+
+def test_rgba_is_a_separate_type_from_rgb_and_not_interchangeable_with_it():
+    """Both are frozen values, and a palette ink is deliberately still the three-channel one.
+
+    A palette says what a colour *index* means and has no opinion about coverage; this says
+    what one *stroke* carried. Folding the two would put an alpha on every palette entry that
+    nothing writes and nothing reads.
+    """
+    assert Rgba(r=1, g=2, b=3, a=255) != Rgb(r=1, g=2, b=3)
+    assert Rgba(r=1, g=2, b=3) == Rgba(r=1, g=2, b=3)
+
+
 @pytest.mark.parametrize("palette", [EXPORT_PALETTE, PAPER_PRO_PHYSICAL_PALETTE])
 def test_shipped_palettes_resolve_every_pen_colour(palette: Palette):
     # Totality is what deletes the three silent `return (0, 0, 0)` fallbacks: `rgb` cannot miss.
@@ -834,12 +874,38 @@ def test_stroke_classification_is_read_off_its_pen():
     assert make_stroke(pen=PenType.HIGHLIGHTER_2).pen.is_highlighter is True
 
 
+def test_a_stroke_carries_no_colour_override_unless_the_wire_gave_it_one():
+    # None is not "black": it is "the colour index is the whole truth", which is every pen.
+    assert make_stroke().color_override is None
+
+
+def test_two_strokes_of_one_colour_index_can_carry_two_different_colours():
+    """The state that makes the highlighter renderable, expressed in the domain alone.
+
+    Both strokes report ``PenColor.HIGHLIGHT``, because that is what the firmware writes for
+    every highlight whatever colour it was drawn in. The override is what keeps them apart,
+    and it is additional to the index rather than a replacement for it.
+    """
+    yellow = Stroke(
+        pen=PenType.HIGHLIGHTER_2,
+        color=PenColor.HIGHLIGHT,
+        color_override=Rgba(r=0xFF, g=0xED, b=0x75),
+        thickness_scale=2.0,
+    )
+    blue = yellow.model_copy(update={"color_override": Rgba(r=0xBE, g=0xEA, b=0xFE)})
+
+    assert yellow.color is blue.color is PenColor.HIGHLIGHT
+    assert yellow.color_override != blue.color_override
+    assert yellow != blue
+
+
 # ──────────────────────── pages ────────────────────────
 
 
 def test_page_defect_codes_are_the_closed_survivable_set():
     assert {member.value for member in PageDefectCode} == {
         "artifact_absent",
+        "block_bytes_unread",
         "content_undecodable",
         "item_dropped",
         "layer_synthesised",
@@ -915,6 +981,29 @@ def test_a_page_whose_only_content_is_hidden_reads_as_blank():
     assert content.is_blank is True
     assert content.stroke_count == 0
     assert content.bounding_box is None
+
+
+def test_a_page_whose_only_content_is_typed_text_is_not_blank():
+    # The page-level tuple, which a codec fills from the one text block a page owns. It is
+    # not on any layer, so no layer aggregate can see it and `is_blank` has to.
+    content = PageContent(text_blocks=(TextBlock(pos_x=0.0, pos_y=0.0, width=400.0, text="hi"),))
+
+    assert content.is_blank is False
+    assert content.layers == ()
+    assert content.stroke_count == 0, "typed text is not ink"
+    assert content.bounding_box is None, "how tall text draws depends on the font"
+
+
+def test_page_level_text_is_not_gated_by_layer_visibility():
+    # The block carrying it has no visible flag, so hiding every layer cannot hide it.
+    hidden = Layer(visible=False, strokes=(make_stroke(points=(make_point(0, 0),)),))
+    content = PageContent(
+        layers=(hidden,),
+        text_blocks=(TextBlock(pos_x=0.0, pos_y=0.0, width=400.0),),
+    )
+
+    assert content.visible_layers == ()
+    assert content.is_blank is False
 
 
 def test_page_content_bounding_box_folds_every_visible_stroke():
@@ -1702,6 +1791,44 @@ def test_the_two_key_types_do_not_collide_on_shared_components():
     assert ocr.digest != diagram.digest
 
 
+def test_raster_identity_ignores_the_page_hash_and_nothing_else():
+    # The measured case: the tablet rewrote one page from 18,813 to 24,534 bytes with the ink
+    # unchanged, which moves `page_hash` and must leave the identity of the work alone.
+    rewritten = OcrCacheKey(**ocr_parts(page_hash="after-the-rewrite"))
+    original = OcrCacheKey(**ocr_parts())
+
+    assert original.digest != rewritten.digest
+    assert original.raster_identity == rewritten.raster_identity
+
+
+@given(parts=ocr_key_parts(), field=st.sampled_from(sorted(set(OCR_KEY_PARTS) - {"page_hash"})))
+def test_every_component_but_the_page_hash_moves_the_raster_identity(
+    parts: dict[str, Any], field: str
+):
+    mutated: dict[str, Any] = dict(parts)
+    mutated[field] = ("a wholly other slug",) if field == "recognizers" else "a wholly other value"
+    assume(mutated[field] != parts[field])
+
+    assert OcrCacheKey(**parts).raster_identity != OcrCacheKey(**mutated).raster_identity
+
+
+def test_raster_identity_is_a_derived_property_and_never_a_stored_field():
+    key = OcrCacheKey(**ocr_parts())
+
+    assert "raster_identity" not in key.model_dump()
+    assert OcrCacheKey.model_validate(key.model_dump()).raster_identity == key.raster_identity
+
+
+def test_raster_identity_cannot_collide_with_the_key_s_own_digest():
+    # Two digests over overlapping component lists, so they carry different domain tags:
+    # a collision would let a fallback lookup match a row it has no business matching.
+    key = OcrCacheKey(**ocr_parts())
+
+    assert key.raster_identity != key.digest
+    assert len(key.raster_identity) == 64
+    assert set(key.raster_identity) <= set("0123456789abcdef")
+
+
 @given(parts=ocr_key_parts(), field=st.sampled_from(sorted(OCR_KEY_PARTS)), data=st.data())
 def test_two_ocr_keys_differing_in_any_field_are_different_keys(
     parts: dict[str, Any], field: str, data: st.DataObject
@@ -1905,6 +2032,67 @@ def test_an_ocr_artifact_cannot_be_cached_without_a_creation_time():
 def test_an_ocr_artifact_refuses_a_naive_creation_time():
     with pytest.raises(ValidationError):
         OcrArtifact(text="x", created_at=NAIVE_MOMENT)
+
+
+def test_an_artifact_built_without_provenance_reads_as_the_tier_three_merge_it_was():
+    # The default is not a placeholder: before this field existed the tier-3 merge was the
+    # only thing a writer would store, so this is what every such row actually means.
+    artifact = OcrArtifact(text="x", created_at=MOMENT)
+
+    assert artifact.provenance == OcrProvenance()
+    assert artifact.provenance.tier_reached == 3
+    assert artifact.provenance.short_circuited is False
+    assert artifact.provenance.contributors == ()
+    assert artifact.provenance.agreement is None
+
+
+def test_a_row_written_before_provenance_existed_still_validates():
+    # The forward direction of the compatibility bargain. The backward one -- an older build
+    # reading a newer row -- fails as StoredRecordUnreadableError, which the class docstring
+    # states rather than papers over, and no default can prevent.
+    rehydrated = OcrArtifact.model_validate(
+        {"text": "x", "mean_confidence": 0.5, "truncated": False, "created_at": MOMENT}
+    )
+
+    assert rehydrated.provenance == OcrProvenance()
+
+
+def test_provenance_is_not_a_component_of_the_cache_key():
+    # Adding one would change every digest and mass-invalidate every cached row to record
+    # something the artifact carries for free.
+    assert "provenance" not in OcrCacheKey.model_fields
+
+
+def test_a_short_circuited_provenance_must_say_how_closely_the_readings_agreed():
+    with pytest.raises(ValidationError, match="not a cache-key component"):
+        OcrProvenance(tier_reached=1, short_circuited=True, contributors=("device-index@1",))
+
+
+def test_a_merged_provenance_needs_no_agreement():
+    provenance = OcrProvenance(tier_reached=3, contributors=("textract", "vision-read:m"))
+
+    assert provenance.agreement is None
+    assert provenance.short_circuited is False
+
+
+@pytest.mark.parametrize("tier", [-1, 4])
+def test_a_provenance_outside_the_four_tiers_is_unconstructible(tier: int):
+    with pytest.raises(ValidationError):
+        OcrProvenance(tier_reached=tier)
+
+
+@pytest.mark.parametrize("agreement", [-0.1, 1.1])
+def test_a_provenance_agreement_outside_the_ratio_is_unconstructible(agreement: float):
+    with pytest.raises(ValidationError):
+        OcrProvenance(short_circuited=True, agreement=agreement)
+
+
+def test_a_provenance_forbids_an_unknown_field():
+    # Frozen-ness is covered for every exported model by the module-surface check above;
+    # what is worth stating here is that a newer build's extra component is a refusal and
+    # not a silent drop, which is the forward-compatibility cost `OcrArtifact` documents.
+    with pytest.raises(ValidationError):
+        OcrProvenance.model_validate({"tier_reached": 1, "surprise": True})
 
 
 def test_a_text_only_page_carries_no_mermaid():

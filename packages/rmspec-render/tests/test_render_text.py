@@ -4,6 +4,15 @@ The legacy renderer never read ``Layer.text_blocks``. There is therefore no orac
 file -- and no oracle entry contains a text block either, which is why drawing text cannot move
 a single differential hash. What these tests pin is the port's obligation: a visible non-empty
 block is either drawn and counted, or reported as omitted, never silently dropped.
+
+Two sources, and the second one had never been drawn in this project's history
+-----------------------------------------------------------------------------
+A page carries typed text in two places: ``Layer.text_blocks`` and ``PageContent.text_blocks``.
+The second is where a page's *real* typed text lives -- one page-scoped block naming no layer --
+and until the renderer read it, that text was decoded by the codec and drawn by nobody, so a
+page a human had typed on rendered as a blank with a valid-looking ``<svg>`` around it. The
+tests below pin the three properties that fix: it is drawn, it is drawn **last**, and it is not
+gated by layer visibility, because the block that carries it has no visibility flag.
 """
 
 from __future__ import annotations
@@ -31,6 +40,7 @@ from rmspec.render._text import block_extent, wrap_text
 
 RENDERER = SvgPageRenderer()
 TEXT_TAG = f"{{{SVG_NAMESPACE}}}text"
+GROUP_TAG = f"{{{SVG_NAMESPACE}}}g"
 
 
 def render(subject: Page, *, render_style: RenderStyle = LEGACY_STYLE) -> RenderedPage:
@@ -190,6 +200,99 @@ def test_blocks_across_two_layers_are_both_counted() -> None:
         layer(text_blocks=(block("second"),), name="Layer 2"),
     )
     assert render(subject).text_block_count == 2
+
+
+# ──────────────────── the page's own typed text, drawn last ────────────────────
+
+
+def test_a_page_level_block_is_drawn_and_counted() -> None:
+    """The defect: this text was decoded and then drawn by nobody.
+
+    ``PageContent.text_blocks`` is where a page's real typed text arrives -- one page-scoped
+    block naming no layer -- so a renderer that read only ``Layer.text_blocks`` rendered a
+    typed page as an indistinguishable blank.
+    """
+    rendered = render(page(text_blocks=(block("typed on the tablet"),)))
+
+    assert rendered.text_block_count == 1
+    assert "typed on the tablet" in rendered.svg
+
+
+def test_a_page_level_block_is_drawn_last_and_outside_every_layer_group() -> None:
+    """Document order is paint order, and the page's own text sits above the whole page.
+
+    Two properties in one test because they are one decision: a page-level block cannot be
+    gated by ``Layer.visible`` and cannot inherit a layer group's membership, so it is appended
+    to the root after the last layer group. If it were appended inside a group it would be
+    neither last nor ungrouped, and this assertion is what makes that a failure.
+    """
+    subject = page(
+        layer(
+            stroke(point(0.0, 0.0), point(1.0, 1.0)),
+            text_blocks=(block("owned by the layer"),),
+        ),
+        text_blocks=(block("owned by the page", pos_y=400.0),),
+    )
+    svg = render(subject).svg
+    root = parse_svg(svg)
+    groups = [child for child in root if child.tag == GROUP_TAG]
+    root_text = [child for child in root if child.tag == TEXT_TAG]
+
+    assert [element.text for element in root_text] == ["owned by the page"]
+    assert [element.text for group in groups for element in group.iter(TEXT_TAG)] == [
+        "owned by the layer"
+    ]
+    assert list(root).index(root_text[0]) > list(root).index(groups[-1])
+    assert svg.index("owned by the layer") < svg.index("owned by the page")
+
+
+def test_both_sources_are_counted_together() -> None:
+    """They are not alternatives, so reading one and not the other drops words."""
+    subject = page(
+        layer(text_blocks=(block("owned by the layer"),)),
+        text_blocks=(block("owned by the page", pos_y=400.0),),
+    )
+    rendered = render(subject)
+
+    assert rendered.text_block_count == 2
+    assert "owned by the layer" in rendered.svg
+    assert "owned by the page" in rendered.svg
+
+
+def test_a_page_level_block_survives_every_layer_being_hidden() -> None:
+    """It carries no visibility flag, because the block behind it has none."""
+    subject = page(
+        layer(stroke(point(0.0, 0.0), point(1.0, 1.0)), visible=False),
+        text_blocks=(block("still here"),),
+    )
+    rendered = render(subject)
+
+    assert rendered.text_block_count == 1
+    assert "still here" in rendered.svg
+
+
+def test_an_empty_page_level_block_is_not_counted_and_draws_nothing() -> None:
+    rendered = render(page(text_blocks=(block("   \n "),)))
+
+    assert rendered.text_block_count == 0
+    assert "<text" not in rendered.svg
+
+
+def test_a_page_level_block_far_off_the_left_edge_moves_the_viewbox() -> None:
+    """The anti-vanishing guarantee has to cover the second source, or the words are clipped.
+
+    A block that is drawn but not measured lands outside the ``viewBox``: counted as drawn, no
+    ``TEXT_OMITTED`` notice, and gone from the PNG, the PDF and both OCR paths.
+    """
+    subject = page(text_blocks=(block("vanishing page words", pos_x=-2000.0, pos_y=100.0),))
+    rendered = render(subject)
+    root = parse_svg(rendered.svg)
+    origin_x, origin_y, width, height = (float(part) for part in root.get("viewBox", "").split())
+    element = next(root.iter(TEXT_TAG))
+
+    assert rendered.text_block_count == 1
+    assert origin_x <= float(element.get("x", "0")) <= origin_x + width
+    assert origin_y <= float(element.get("y", "0")) <= origin_y + height
 
 
 def test_a_block_far_off_the_left_edge_moves_the_viewbox_instead_of_vanishing() -> None:

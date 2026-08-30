@@ -33,7 +33,12 @@ from rmspec.app.facts import (
     ReportedGauge,
 )
 from rmspec.domain.errors import DeviceUnreachable, RmspecError, TransportKind
-from rmspec.domain.ports.device import DeviceFacts, DeviceFactsSource, DeviceResources
+from rmspec.domain.ports.device import (
+    DeviceFacts,
+    DeviceFactsSource,
+    DeviceResources,
+    UnsupportedField,
+)
 
 BUILD_STAMP = "20260612085811"
 IMG_VERSION = "3.27.3.0"
@@ -84,8 +89,16 @@ def _report(
     )
 
 
-def _named(reported: tuple[ReportedFact, ...] | tuple[ReportedGauge, ...]) -> list[str]:
+def _named(
+    reported: tuple[ReportedFact, ...] | tuple[ReportedGauge, ...] | tuple[UnsupportedField, ...],
+) -> list[str]:
     return [item.name for item in reported]
+
+
+def _claim(result: ReportDeviceFactsResult, name: str) -> tuple[TransportKind, ...] | None:
+    """Return what the report says about which transports can answer one absent name."""
+    (entry,) = [item for item in result.unsupported if item.name == name]
+    return entry.supported_by
 
 
 def _assign(target: object, field: str, value: object) -> None:
@@ -128,8 +141,11 @@ def test_the_version_a_user_recognises_is_whatever_the_port_reported():
 
 def test_a_field_the_transport_cannot_ask_is_named_rather_than_valued():
     result = _report(DeviceFacts(firmware=IMG_VERSION, unsupported=frozenset({"model"})))
-    assert result.unsupported == ("model",)
+    assert _named(result.unsupported) == ["model"]
     assert "model" not in _named(result.facts)
+    # A bare name claims nothing about other transports, which is all an adapter that passes
+    # a name set ever knew.
+    assert _claim(result, "model") is None
 
 
 def test_the_serial_is_unsupported_on_both_transports_and_is_never_the_soc_uid():
@@ -138,7 +154,7 @@ def test_the_serial_is_unsupported_on_both_transports_and_is_never_the_soc_uid()
         DeviceFacts(firmware=IMG_VERSION, unsupported=frozenset({"serial"})),
         DeviceResources(available_storage_bytes=GIBIBYTE),
     )
-    assert "serial" in result.unsupported
+    assert "serial" in _named(result.unsupported)
     assert "serial" not in _named(result.facts)
     assert SOC_UID not in [fact.value for fact in result.facts]
 
@@ -149,8 +165,66 @@ def test_an_unsupported_field_reaches_the_caller_as_a_name_it_must_render():
         DeviceFacts(unsupported=frozenset({"firmware", "model", "serial"})),
         include_resources=False,
     )
-    assert sorted(result.unsupported) == ["firmware", "model", "serial"]
+    assert sorted(_named(result.unsupported)) == ["firmware", "model", "serial"]
     assert result.facts == ()
+
+
+def test_a_field_no_transport_can_answer_is_told_apart_from_one_this_transport_cannot():
+    """The distinction a bare name set could not express, and both halves are real."""
+    result = _report(
+        DeviceFacts(
+            unsupported=frozenset(
+                {
+                    UnsupportedField(name="serial", supported_by=()),
+                    UnsupportedField(name="firmware", supported_by=(TransportKind.SSH,)),
+                    "model",
+                }
+            ),
+        ),
+        include_resources=False,
+    )
+    # Empty is a real answer: stop asking, no transport reads this.
+    assert _claim(result, "serial") == ()
+    # Non-empty: change transports.
+    assert _claim(result, "firmware") == (TransportKind.SSH,)
+    # Bare: this transport cannot, and nothing is claimed about the others.
+    assert _claim(result, "model") is None
+    assert sorted(_named(result.unsupported)) == ["firmware", "model", "serial"]
+
+
+def test_an_unsupported_gauge_may_name_the_transport_that_can_read_it():
+    """The gauges are as asymmetric as the facts, which is why both models carry the shape."""
+    result = _report(
+        DeviceFacts(firmware=IMG_VERSION, unsupported=frozenset({"model", "serial"})),
+        DeviceResources(
+            unsupported=frozenset(
+                {
+                    UnsupportedField(
+                        name="total_memory_bytes",
+                        supported_by=(TransportKind.SSH,),
+                    ),
+                    "available_memory_bytes",
+                    "total_storage_bytes",
+                    "available_storage_bytes",
+                }
+            ),
+        ),
+    )
+    assert _claim(result, "total_memory_bytes") == (TransportKind.SSH,)
+    assert _claim(result, "available_memory_bytes") is None
+
+
+def test_the_transport_claim_rides_on_the_unsupported_entry_and_adds_no_fourth_tuple():
+    """Who could answer this is a detail of one absence, not a fourth kind of absence."""
+    absence_tuples = {
+        name
+        for name, field in ReportDeviceFactsResult.model_fields.items()
+        if name not in {"facts", "gauges", "degradations"}
+    }
+    assert absence_tuples == {"unsupported", "unanswered", "not_requested"}
+    # And only the one that can name an alternative carries entries; the other two are names.
+    assert ReportDeviceFactsResult.model_fields["unanswered"].annotation == tuple[str, ...]
+    assert ReportDeviceFactsResult.model_fields["not_requested"].annotation == tuple[str, ...]
 
 
 # ──────────────────── unanswered: asked for, and no usable answer ────────────────────
@@ -161,7 +235,7 @@ def test_a_field_asked_for_and_unanswered_is_a_different_fact_from_an_unsupporte
         DeviceFacts(firmware=IMG_VERSION, unsupported=frozenset({"serial"})),
         include_resources=False,
     )
-    assert result.unsupported == ("serial",)
+    assert _named(result.unsupported) == ["serial"]
     assert result.unanswered == ("model",)
 
 
@@ -203,7 +277,11 @@ def test_an_unsupported_gauge_is_named_after_the_unsupported_facts():
             unsupported=frozenset({"total_memory_bytes", "available_memory_bytes"}),
         ),
     )
-    assert result.unsupported == ("serial", "total_memory_bytes", "available_memory_bytes")
+    assert _named(result.unsupported) == [
+        "serial",
+        "total_memory_bytes",
+        "available_memory_bytes",
+    ]
 
 
 def test_an_unanswered_gauge_joins_the_unanswered_facts_in_declaration_order():
@@ -234,7 +312,7 @@ def test_the_five_places_partition_every_field_of_both_port_models():
     placed = [
         *_named(result.facts),
         *_named(result.gauges),
-        *result.unsupported,
+        *_named(result.unsupported),
         *result.unanswered,
         *result.not_requested,
     ]

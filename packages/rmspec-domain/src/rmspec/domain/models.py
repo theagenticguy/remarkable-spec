@@ -77,6 +77,7 @@ __all__ = [
     "Layer",
     "OcrArtifact",
     "OcrCacheKey",
+    "OcrProvenance",
     "Page",
     "PageContent",
     "PageContentKind",
@@ -91,6 +92,7 @@ __all__ = [
     "Point",
     "RecordedSyncAuditEntry",
     "Rgb",
+    "Rgba",
     "ScreenSpec",
     "SourceKind",
     "Stroke",
@@ -493,6 +495,16 @@ class PageId(BaseModel, frozen=True, extra="forbid"):
 #  therefore the export palette with those nine overridden, and the five unmeasured colours
 #  keep their export inks. Stating the fallback here, once, is better than a ``dict.get`` at
 #  every read site that cannot say what it fell back to.
+#
+#  Where the palette is not the whole story
+#  ----------------------------------------
+#  One tool writes its colour twice. A highlighter stroke reports :attr:`PenColor.HIGHLIGHT`
+#  whatever colour it was drawn in -- measured against firmware 3.27.3.0, two strokes in two
+#  visibly different colours both carried colour id 9 -- and carries its real colour as a
+#  separate per-stroke value. :class:`Rgba` is that value and :attr:`Stroke.color_override`
+#  is where it lands. It is *additional*, never a replacement: a pen stroke has no such field
+#  and its colour id is correct, so :class:`PenColor` and :class:`Palette` are untouched by
+#  it and a renderer prefers the override only when a stroke actually carries one.
 
 
 class PenColor(IntEnum):
@@ -575,6 +587,60 @@ class Rgb(BaseModel, frozen=True, extra="forbid"):
             For example ``rgb(78, 105, 201)``.
         """
         return f"rgb({self.r}, {self.g}, {self.b})"
+
+
+class Rgba(BaseModel, frozen=True, extra="forbid"):
+    """One 8-bit-per-channel colour that also carries its own alpha.
+
+    A separate model from :class:`Rgb` rather than an alpha field bolted onto it, because
+    the two answer different questions. Every :class:`Palette` ink is an :class:`Rgb`: a
+    palette states what a colour *index* means and has no opinion about coverage. This is
+    the colour a *stroke* carried on the wire, alpha included, and it exists because the
+    highlighter is the one tool whose real colour the colour index does not record.
+
+    Why the alpha is kept even though the SVG renderer does not use it
+    -----------------------------------------------------------------
+    Both measured highlighter strokes carried ``a=255``, and a highlighter drawn at full
+    opacity would obliterate the text underneath it -- the translucency comes from the pen's
+    own calibrated opacity formula, not from this channel. Dropping the channel at the parse
+    boundary would nonetheless be a lossy decode of a field the firmware writes, and the
+    next tool that writes a meaningful alpha would need the wire format re-measured to find
+    out it had been discarded. So it is decoded, carried, and left for a consumer to use.
+    """
+
+    r: int = Field(ge=0, le=255)
+    """Red channel."""
+
+    g: int = Field(ge=0, le=255)
+    """Green channel."""
+
+    b: int = Field(ge=0, le=255)
+    """Blue channel."""
+
+    a: int = Field(default=255, ge=0, le=255)
+    """Alpha channel. ``255`` is fully opaque, which is what the firmware writes today."""
+
+    def as_rgb(self) -> Rgb:
+        """Return the colour channels alone, dropping the alpha.
+
+        Returns
+        -------
+        Rgb
+            The same three channels, in the type every ink-consuming call site takes.
+        """
+        return Rgb(r=self.r, g=self.g, b=self.b)
+
+    @property
+    def alpha_normalized(self) -> float:
+        """Alpha on a 0-1 scale.
+
+        Returns
+        -------
+        float
+            ``a`` divided by its full-scale value, which is the scale SVG's ``opacity``
+            and every compositing formula want.
+        """
+        return self.a / _UINT8_MAX
 
 
 class Palette(BaseModel, frozen=True, extra="forbid"):
@@ -978,6 +1044,17 @@ class Stroke(BaseModel, frozen=True, extra="forbid"):
     color: PenColor
     """The colour index, resolved to ink by a ``Palette`` at render time."""
 
+    color_override: Rgba | None = None
+    """This stroke's own colour, when the wire carried one. ``None`` for almost every stroke.
+
+    Set only for a tool that writes its colour twice, which today means the highlighter:
+    :attr:`color` reports :attr:`PenColor.HIGHLIGHT` for every highlight regardless of the
+    colour it was drawn in, so the index alone renders four different highlighter colours as
+    one yellow. A renderer prefers this value over the palette entry for :attr:`color` when
+    it is present, and is otherwise unaffected -- ``None`` is not "black", it is "the colour
+    index is the whole truth for this stroke", which is the case for every pen.
+    """
+
     thickness_scale: float = Field(ge=0)
     """The tablet's thickness-slider value, before any per-pen formula is applied."""
 
@@ -1039,6 +1116,27 @@ class PageDefectCode(StrEnum):
 
     ARTIFACT_ABSENT = "artifact_absent"
     """The document lists this page but the store holds no scene file for it."""
+
+    BLOCK_BYTES_UNREAD = "block_bytes_unread"
+    """A block held bytes nothing in the codec understood, so the format is ahead of the reader.
+
+    Nothing is known to be missing from the page. What is known is that the artifact carries a
+    field this reader cannot name, which is the one signal that a decode has fallen silently
+    behind the firmware -- and it is the signal that found the highlighter's per-stroke colour,
+    where the bytes turned out to be a colour four highlights were all being drawn wrong
+    without it.
+
+    Bytes a codec *does* decode are not reported here, even though the third-party parser
+    stopped before them. "Unread" is a claim about the page a caller acts on, not a note about
+    a parser's internals, and a page whose every leftover byte has been read and used is not
+    degraded. So this stays quiet on the pages whose answer is already known and fires on
+    exactly the ones a next measurement should start from -- which is what keeps it a signal
+    rather than a permanent property of every page that happens to hold a highlight.
+
+    Its name follows the ``<subject>_<what happened>`` shape of every member here, so the
+    still-open item for v1 pressure clamping lands beside it as ``CHANNEL_CLAMPED`` without
+    either one being renamed or reworded.
+    """
 
     CONTENT_UNDECODABLE = "content_undecodable"
     """The scene file exists and could not be decoded, so the page has no content."""
@@ -1113,7 +1211,22 @@ class Layer(BaseModel, frozen=True, extra="forbid"):
     """Strokes in draw order."""
 
     text_blocks: tuple[TextBlock, ...] = ()
-    """Typed text, drawn above this layer's strokes."""
+    """Typed text this layer owns, drawn above its strokes. Nothing decodes one today.
+
+    Kept rather than deleted, and on a measurement rather than a preference. The v6 format
+    does declare a layer-owned text item -- scene item type 5, carried by block type 6 -- so
+    this field does not describe something that cannot exist. What cannot happen *yet* is
+    reading one: ``rmscene`` 0.7.0 decodes that block's value as nothing and never places it
+    in the scene tree, and no artifact in the reference corpus's 30 non-empty pages carries
+    one at all. The formats adapter's conversion path for such an item is live and tested, so
+    one parser change fills this field; that is the difference between it and a field whose
+    producer could never exist, which this project has deleted before.
+
+    Typed text as the tablet's own typing tool produces it is *not* this. That text is
+    page-scoped, names no layer, and arrives on :attr:`PageContent.text_blocks`. A caller
+    that reads only this field therefore sees no typed text on any real page, which is the
+    defect :attr:`PageContent.text_blocks` exists to fix.
+    """
 
     @property
     def is_empty(self) -> bool:
@@ -1131,13 +1244,40 @@ class PageContent(BaseModel, frozen=True, extra="forbid"):
     """What a codec read out of one page's scene bytes.
 
     Carries its own defects, so a codec that had to substitute a pen or drop an item reports
-    that as part of its result. An empty ``layers`` with an empty ``defects`` therefore means
-    one specific thing -- the page really is blank -- which is the distinction the legacy
-    "return an empty layer list on any problem" behaviour destroyed.
+    that as part of its result. Empty ``layers`` and empty ``text_blocks`` with an empty
+    ``defects`` therefore means one specific thing -- the page really is blank -- which is the
+    distinction the legacy "return an empty layer list on any problem" behaviour destroyed.
     """
 
     layers: tuple[Layer, ...] = ()
     """Layers in render order, bottom first."""
+
+    text_blocks: tuple[TextBlock, ...] = ()
+    """Typed text the page itself owns, above every layer. Empty for almost every page.
+
+    Page-level, and not folded onto a :class:`Layer`, because that is where the file puts it:
+    a page's typed text arrives in one page-scoped block that names no layer at all. The only
+    two places it could land were here or on a layer the decoder picked, and picking layer 0
+    was rejected -- it would encode a provenance the bytes do not support, and the first
+    caller to draw layers one at a time, or to hide layer 0, would silently move or drop text
+    that never belonged to any layer. One field that matches the file cannot drift from it.
+
+    What a renderer does now that a page has two sources of text
+    -----------------------------------------------------------
+    Draw both, and draw these last. :attr:`Layer.text_blocks` sits above the strokes of the
+    layer that owns it; these sit above the whole page. They are not alternatives, so a
+    renderer that reads one and not the other silently drops text. These carry no visibility
+    flag of their own -- the block behind them has none -- so :attr:`visible_layers` does not
+    gate them, and a page whose every layer is hidden still has this text to draw.
+
+    Reading typed text is the point; writing one back is not a way to show text
+    -------------------------------------------------------------------------
+    Measured on firmware 3.27.3.0: the tablet's own reader **preserves** a page-scoped text
+    block written into a page by a foreign author -- it survived a full re-save at the exact
+    position set, with the foreign author id intact -- and **never draws it**. Strokes are
+    what it renders. So this field is how a caller reads what a human typed, and it is not a
+    channel for putting text a human can see onto a page: that has to be ink.
+    """
 
     defects: tuple[PageDefect, ...] = ()
     """Substitutions and omissions the decode survived, in the order they occurred."""
@@ -1174,9 +1314,12 @@ class PageContent(BaseModel, frozen=True, extra="forbid"):
         Returns
         -------
         bool
-            ``True`` when every visible layer is empty.
+            ``True`` when every visible layer is empty *and* the page owns no typed text.
+            Page-level text is not gated by layer visibility, because the block that carries
+            it has no visible flag, so a page whose every layer is hidden is still not blank
+            while it holds one.
         """
-        return all(layer.is_empty for layer in self.visible_layers)
+        return not self.text_blocks and all(layer.is_empty for layer in self.visible_layers)
 
     @property
     def bounding_box(self) -> tuple[float, float, float, float] | None:
@@ -2190,6 +2333,113 @@ class OcrCacheKey(BaseModel, frozen=True, extra="forbid"):
             self.request_digest.encode(),
         )
 
+    @property
+    def raster_identity(self) -> str:
+        """Return the digest of every component except :attr:`page_hash`.
+
+        Returns
+        -------
+        str
+            Lowercase hex SHA-256 over the pixels, the engines, the merging model and the
+            request -- everything that describes *the work*, and nothing that describes the
+            bytes the page happens to be stored as. Two keys sharing this value name the
+            same transcription of the same pixels, which is what
+            :meth:`~rmspec.domain.ports.persistence.OcrCache.equivalent_raster` matches on:
+            the tablet rewrote one measured page from 18,813 to 24,534 bytes without
+            touching the ink, moving :attr:`page_hash` and leaving this value alone.
+
+            A different domain tag from :attr:`digest`'s, so a key's two digests cannot
+            collide, and deliberately not a key component: folding it into :attr:`digest`
+            would change every digest and mass-invalidate every cached row.
+        """
+        return digest_of(
+            b"rmspec.cache.ocr.raster.v1",
+            self.render_digest.encode(),
+            self.raster_digest.encode(),
+            *(slug.encode() for slug in self.recognizers),
+            self.model_fingerprint.encode(),
+            self.request_digest.encode(),
+        )
+
+
+class OcrProvenance(BaseModel, frozen=True, extra="forbid"):
+    """Which tier produced a cached transcription, and out of what.
+
+    Not :class:`TextProvenance`, which describes the text a *search result* carries. This
+    describes the *row*, and it exists so that a hit can say something other than "some tier
+    produced this". Without it the tier-3 merge was the only writable reading: a
+    short-circuited one, stored under a key naming an adjudicator that never ran, would have
+    been served as though that adjudicator had merged it. The cost of not writing it was that
+    a page which short-circuits re-paid its recognizers on every run -- exactly the cost
+    tier 0 exists to avoid.
+
+    Every field has a default, and the defaults are not a guess. They are what a row written
+    before this model existed means: the tier-3 merge was the only write, so
+    ``tier_reached=3`` with ``short_circuited=False`` is that row's own truth, and
+    :attr:`contributors` empty is unambiguously "not recorded" because a row written since
+    always names at least one source.
+    """
+
+    tier_reached: int = Field(default=3, ge=0, le=3)
+    """The highest tier that ran before this reading was accepted.
+
+    ``1`` for a short-circuit, ``3`` for a merge. Never ``2``: a tier-2 vision read is a
+    reading and tier 3 always adjudicates it, so it is not a tier a reading can stop at.
+    """
+
+    short_circuited: bool = False
+    """Whether the reading was accepted on agreement rather than adjudicated.
+
+    The one thing a reader of a hit cannot infer from anything else, and the reason the row
+    is now writable at all: the key names a merging model either way, because the key is the
+    identity of the *lookup*, and this field is the identity of the *work*.
+    """
+
+    contributors: tuple[str, ...] = ()
+    """The sources whose readings were folded in, in fold order.
+
+    Not the same tuple as :attr:`OcrCacheKey.recognizers`, and deliberately so: that one is
+    sorted and holds every source the run was configured with, because it has to digest the
+    same way for identical work. This one is fold order and holds only the sources that
+    actually reached the text. Empty means an older build wrote the row and did not record
+    them; a reader falls back to the key's tuple, which is all that build ever had.
+    """
+
+    agreement: float | None = Field(default=None, ge=0.0, le=1.0)
+    """The measured similarity that justified a short-circuit, or ``None``.
+
+    Required whenever :attr:`short_circuited` is set, and the validator below enforces it,
+    because the agreement *threshold* is a request field and is not a cache-key component.
+    So a run with a stricter threshold can hit a row that short-circuited under a lenient
+    one. No key can prevent that -- the threshold cannot join the key without invalidating
+    every stored row -- so the row carries the number instead and the caller compares. The
+    same bargain :attr:`OcrArtifact.truncated` strikes: the fact survives the round trip and
+    a caller that ignores it gets a reading it would not have accepted.
+    """
+
+    @model_validator(mode="after")
+    def _check_agreement_was_measured(self) -> Self:
+        """Refuse a short-circuit that does not say how closely the two readings agreed.
+
+        Returns
+        -------
+        OcrProvenance
+            The validated provenance.
+
+        Raises
+        ------
+        ValueError
+            If :attr:`short_circuited` is set and :attr:`agreement` is not.
+        """
+        if self.short_circuited and self.agreement is None:
+            msg = (
+                "short_circuited is set with no agreement: the threshold that justified it "
+                "is not a cache-key component, so the measured value is the only way a "
+                "later run can tell whether it would have accepted this reading"
+            )
+            raise ValueError(msg)
+        return self
+
 
 class OcrArtifact(BaseModel, frozen=True, extra="forbid"):
     """One page's transcription, as it was cached.
@@ -2198,6 +2448,18 @@ class OcrArtifact(BaseModel, frozen=True, extra="forbid"):
     exception: a half-transcribed page is a wrong page, and caching it without recording that
     it was cut short is how the legacy pipeline served half pages indefinitely. The flag is
     stored so a use case can decide to recompute rather than trust the row.
+
+    :attr:`provenance` carries a forward-compatibility cost, and it is stated rather than
+    papered over. This model is ``extra="forbid"`` and every stored payload is validated on
+    read, so a row written by a build with one more field than this one has does not validate
+    here -- it raises :class:`~rmspec.domain.errors.StoredRecordUnreadableError`, whose own
+    docstring already names "a newer build added a field" as one of its causes. The reverse
+    direction is safe by construction: every field of
+    :class:`OcrProvenance` has a default, so a row written before it existed still validates,
+    and the defaults say what that row actually means. That asymmetry is the price of
+    ``extra="forbid"``, and the alternative -- ``extra="ignore"`` -- buys downgrade safety by
+    silently discarding a component of a paid result, which is the trade this project has
+    refused everywhere else.
     """
 
     text: str
@@ -2211,6 +2473,17 @@ class OcrArtifact(BaseModel, frozen=True, extra="forbid"):
 
     created_at: AwareDatetime
     """When the transcription was produced. Required, so no clock lives in the domain."""
+
+    provenance: OcrProvenance = OcrProvenance()
+    """Which tier produced this reading, and out of what.
+
+    Defaulted rather than required, so every construction site that predates it keeps
+    working and every row that predates it keeps validating -- with a value that is what
+    those rows mean rather than a placeholder. Never a component of
+    :class:`OcrCacheKey`: the key's ``digest`` is what identifies a row, and a new key
+    component would mass-invalidate every cached row to record something the artifact can
+    carry for free.
+    """
 
 
 class DiagramCacheKey(BaseModel, frozen=True, extra="forbid"):

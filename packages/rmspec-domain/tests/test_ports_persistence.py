@@ -211,7 +211,7 @@ class InMemoryDocumentSyncStore:
 class InMemoryOcrCache:
     """In-memory :class:`OcrCache`: one dict keyed by ``key.digest``.
 
-    All three methods are total, so the ``fail_reads`` and ``fail_writes`` seams
+    All four methods are total, so the ``fail_reads`` and ``fail_writes`` seams
     swallow rather than raise. Through this port a swallowed fault and a genuine
     miss are the same ``None``, which is why the double also counts its calls:
     without the counters, totality is unassertable.
@@ -223,6 +223,7 @@ class InMemoryOcrCache:
         self.get_calls = 0
         self.put_calls = 0
         self.superseded_calls = 0
+        self.equivalent_raster_calls = 0
         self._entries: dict[str, tuple[OcrCacheKey, OcrArtifact]] = {}
 
     def get(self, key: OcrCacheKey, /) -> OcrArtifact | None:
@@ -253,6 +254,21 @@ class InMemoryOcrCache:
         if not same_page:
             return None
         return max(same_page, key=lambda stored: stored.digest)
+
+    def equivalent_raster(self, key: OcrCacheKey, /) -> OcrArtifact | None:
+        """Return a stored artifact for identical pixels under a different page hash."""
+        self.equivalent_raster_calls += 1
+        if self.fail_reads:
+            return None
+        wanted = key.raster_identity
+        qualifying = {
+            digest: artifact
+            for digest, (stored, artifact) in self._entries.items()
+            if stored.page_hash != key.page_hash and stored.raster_identity == wanted
+        }
+        if not qualifying:
+            return None
+        return qualifying[max(qualifying)]
 
 
 class InMemoryDiagramCache:
@@ -1080,6 +1096,92 @@ def test_ocr_superseded_never_returns_an_artifact() -> None:
     cache.put(_ocr_key(request_digest="v1"), _ocr_artifact(text="paid output"))
     result = cache.superseded(_ocr_key(request_digest="v2"))
     assert not isinstance(result, OcrArtifact)
+
+
+# ─────────────── OcrCache.equivalent_raster: the one sanctioned fallback ───────────────
+
+
+def test_equivalent_raster_serves_a_row_stored_under_other_page_bytes() -> None:
+    """The measured case: the bytes were rewritten and the pixels were not."""
+    cache = InMemoryOcrCache()
+    paid = _ocr_artifact(text="paid output")
+    cache.put(_ocr_key(page_hash="page-hash-before"), paid)
+    assert cache.get(_ocr_key(page_hash="page-hash-after")) is None
+    assert cache.equivalent_raster(_ocr_key(page_hash="page-hash-after")) == paid
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["render_digest", "raster_digest", "model_fingerprint", "request_digest"],
+)
+def test_equivalent_raster_still_misses_when_any_other_component_moves(component: str) -> None:
+    """Only ``page_hash`` may differ; this is a fallback, not a blanket one."""
+    cache = InMemoryOcrCache()
+    stored = _ocr_key(page_hash="page-hash-before")
+    cache.put(stored, _ocr_artifact())
+    probe = stored.model_copy(update={"page_hash": "page-hash-after", component: "moved"})
+    assert cache.equivalent_raster(probe) is None
+
+
+def test_equivalent_raster_misses_when_the_recognizer_set_changes() -> None:
+    cache = InMemoryOcrCache()
+    cache.put(_ocr_key(page_hash="page-hash-before", recognizers=("vision",)), _ocr_artifact())
+    probe = _ocr_key(page_hash="page-hash-after", recognizers=("vision", "textract"))
+    assert cache.equivalent_raster(probe) is None
+
+
+def test_equivalent_raster_ignores_a_row_for_the_very_same_page() -> None:
+    """``page_hash`` must differ: this page's own rows are ``get``'s or ``superseded``'s."""
+    cache = InMemoryOcrCache()
+    cache.put(_ocr_key(page_hash="page-hash-1"), _ocr_artifact())
+    assert cache.equivalent_raster(_ocr_key(page_hash="page-hash-1")) is None
+
+
+def test_equivalent_raster_is_none_on_a_cold_cache() -> None:
+    assert InMemoryOcrCache().equivalent_raster(_ocr_key()) is None
+
+
+@given(
+    st.sets(
+        st.text(alphabet="0123456789abcdef", min_size=2, max_size=4),
+        min_size=2,
+        max_size=5,
+    )
+)
+def test_equivalent_raster_returns_the_greatest_stored_digest(page_hashes: set[str]) -> None:
+    """The same arbitrary-but-declared tie-break ``superseded`` follows."""
+    cache = InMemoryOcrCache()
+    stored = [_ocr_key(page_hash=f"stored-{page_hash}") for page_hash in sorted(page_hashes)]
+    for index, key in enumerate(stored):
+        cache.put(key, _ocr_artifact(text=f"reading {index}"))
+    winner = max(stored, key=lambda key: key.digest)
+    found = cache.equivalent_raster(_ocr_key(page_hash="probe-not-stored"))
+    assert found is not None
+    assert found.text == f"reading {stored.index(winner)}"
+
+
+def test_equivalent_raster_is_total_and_swallows_faults() -> None:
+    """A read fault is a miss here too, and only the counter proves the call happened."""
+    cache = InMemoryOcrCache()
+    cache.put(_ocr_key(page_hash="page-hash-before"), _ocr_artifact())
+    cache.fail_reads = True
+    assert cache.equivalent_raster(_ocr_key(page_hash="page-hash-after")) is None
+    assert cache.equivalent_raster_calls == 1
+
+
+def test_equivalent_raster_returns_a_truncated_row_and_leaves_the_decision_to_the_caller() -> None:
+    """Same rule as ``get``: the flag survives the round trip and the caller re-decides."""
+    cache = InMemoryOcrCache()
+    cache.put(_ocr_key(page_hash="page-hash-before"), _ocr_artifact(truncated=True))
+    found = cache.equivalent_raster(_ocr_key(page_hash="page-hash-after"))
+    assert found is not None
+    assert found.truncated is True
+
+
+def test_the_diagram_cache_declares_no_equivalent_raster() -> None:
+    """Its matched set names ``recognizers``, which a ``DiagramCacheKey`` does not have."""
+    assert hasattr(OcrCache, "equivalent_raster")
+    assert not hasattr(DiagramCache, "equivalent_raster")
 
 
 # ──────────────────────────── DiagramCache ────────────────────────────

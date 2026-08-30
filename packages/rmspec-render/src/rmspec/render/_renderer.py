@@ -33,7 +33,7 @@ from rmspec.render._units import mm_to_points, points_to_mm
 if TYPE_CHECKING:
     import xml.etree.ElementTree as ET
 
-    from rmspec.domain.models import Layer, Page, Palette, ScreenSpec, Stroke
+    from rmspec.domain.models import Layer, Page, Palette, ScreenSpec, Stroke, TextBlock
     from rmspec.domain.ports.render import PageBackground, RenderStyle, TextStyle
     from rmspec.render._layout import PageLayout
 
@@ -96,6 +96,37 @@ class SvgPageRenderer:
         decision over those. A zero-byte scene stub -- two thirds of a real PDF-backed
         document -- therefore renders as what it is: a page with no ink.
 
+        Two sources of typed text, and the order they are drawn in
+        ---------------------------------------------------------
+        A page carries typed text in two places and both are drawn: ``Layer.text_blocks``,
+        inside that layer's group and above that layer's ink, and ``PageContent.text_blocks``,
+        which the file scopes to the whole page and which is drawn **last** -- after every
+        layer group, as a direct child of the root ``<svg>``. Reading one and not the other is
+        how words go missing, which is the defect this ordering exists to close: until this
+        method read the page-level tuple, typed text was decoded by the codec and drawn by
+        nobody.
+
+        Last, and outside every group, for one reason: a page-level block carries no
+        visibility flag, because the block behind it in the file has none -- which
+        ``PageContent.text_blocks``' own docstring records. So it cannot be gated by
+        ``Layer.visible`` the way a layer's blocks are, and it cannot be appended inside a
+        layer's group without inheriting a group whose membership it does not have. A page
+        whose every layer is hidden still has this text to draw. Document order is what fixes
+        SVG paint order, so being last in the document is the whole of "on top"; no wrapper
+        group is opened for these, because one would be empty for a page whose page-level text
+        is all whitespace and the grouping buys nothing the ordering does not already give.
+
+        Drawing this text is a deliberate divergence from the tablet
+        -----------------------------------------------------------
+        Measured on firmware 3.27.3.0: xochitl **preserves** a page-scoped text block written
+        by a foreign author -- read back at the exact position set, with the foreign author id
+        intact, across the tablet's own re-save -- and **never draws it**. Strokes are what it
+        renders. This renderer draws it anyway, on purpose: the job of a tool whose whole
+        purpose is reading a file is to show a caller what the file contains, not to reproduce
+        one reader's blind spot. Do not "fix" this to match the device, and do not read it as a
+        licence to build a reply feature by writing one of these blocks back -- the device will
+        keep it and show nobody. Text a human is meant to see has to be ink.
+
         Parameters
         ----------
         page
@@ -123,6 +154,9 @@ class SvgPageRenderer:
             element is not ``<svg>``.
         """
         layers: tuple[Layer, ...] = () if page.content is None else page.content.layers
+        page_blocks: tuple[TextBlock, ...] = (
+            () if page.content is None else page.content.text_blocks
+        )
         underlay = None if background is None else background.underlay
         underlay_size_pt = (
             None
@@ -136,7 +170,7 @@ class SvgPageRenderer:
             layers,
             screen=screen,
             min_padding_pt=mm_to_points(style.min_padding_mm),
-            text_extents=self._text_extents(layers, text=style.text),
+            text_extents=self._text_extents(layers, page_blocks, text=style.text),
             underlay_size_pt=underlay_size_pt,
         )
 
@@ -162,11 +196,18 @@ class SvgPageRenderer:
                     thickness=style.thickness_scale,
                     page_ref=page.ref,
                 )
-            for block in layer.text_blocks:
-                if block.text.strip():
-                    drawable += 1
-                if append_text_block(group, block, style=style.text, layout=layout):
-                    drawn += 1
+            offered, committed = self._draw_text(
+                group,
+                layer.text_blocks,
+                style=style.text,
+                layout=layout,
+            )
+            drawable += offered
+            drawn += committed
+
+        offered, committed = self._draw_text(root, page_blocks, style=style.text, layout=layout)
+        drawable += offered
+        drawn += committed
 
         return RenderedPage(
             page_ref=page.ref,
@@ -180,11 +221,12 @@ class SvgPageRenderer:
     @staticmethod
     def _text_extents(
         layers: tuple[Layer, ...],
+        page_blocks: tuple[TextBlock, ...],
         /,
         *,
         text: TextStyle,
     ) -> tuple[tuple[float, float, float, float], ...]:
-        """Estimate where every visible block will land, before the layout exists.
+        """Estimate where every block that will be drawn lands, before the layout exists.
 
         The padding scan needs the boxes up front, which is why they are measured in screen
         units and transformed inside ``layout_for`` rather than here: the alternative is to
@@ -192,24 +234,82 @@ class SvgPageRenderer:
         centre-origin correction is exactly the duplication that puts ink half a page to one
         side.
 
+        Both sources are measured, and the set measured here has to be exactly the set
+        :meth:`render` draws: a block that is drawn but not measured is laid out outside the
+        ``viewBox`` and clipped by every rasterizer, which is the silent vanishing act
+        ``TEXT_OMITTED`` exists to make loud. Hence the layer filter applies to layer blocks
+        only -- a page-level block has no visibility flag to filter on, and it is drawn
+        whatever the layers do.
+
         Parameters
         ----------
         layers
             The page's layers in render order.
+        page_blocks
+            Typed text the page itself owns, drawn above every layer.
         text
             The text policy, which fixes the size and line height the estimate uses.
 
         Returns
         -------
         tuple[tuple[float, float, float, float], ...]
-            One ``(min_x, min_y, max_x, max_y)`` box per visible block, in screen units.
+            One ``(min_x, min_y, max_x, max_y)`` box per block that will be drawn, in screen
+            units, layer blocks first and in draw order.
         """
-        return tuple(
-            block_extent(block, style=text)
-            for layer in layers
-            if layer.visible
-            for block in layer.text_blocks
+        return (
+            *(
+                block_extent(block, style=text)
+                for layer in layers
+                if layer.visible
+                for block in layer.text_blocks
+            ),
+            *(block_extent(block, style=text) for block in page_blocks),
         )
+
+    @staticmethod
+    def _draw_text(
+        parent: ET.Element,
+        blocks: tuple[TextBlock, ...],
+        /,
+        *,
+        style: TextStyle,
+        layout: PageLayout,
+    ) -> tuple[int, int]:
+        """Draw one tuple of typed text blocks under ``parent``, and count both halves.
+
+        One path for both of a page's text sources, and the parameter that tells them apart is
+        ``parent``: a layer's group for ``Layer.text_blocks``, the root ``<svg>`` for
+        ``PageContent.text_blocks``. Two spellings of this loop is how the two sources would
+        drift into different placement, different escaping or -- the original defect -- one of
+        them not being drawn at all.
+
+        Parameters
+        ----------
+        parent
+            The element the lines are appended to.
+        blocks
+            The blocks to draw, in order.
+        style
+            Family, size and line height.
+        layout
+            The geometry.
+
+        Returns
+        -------
+        tuple[int, int]
+            ``(offered, committed)``: how many blocks held something to draw, and how many
+            were actually placed. The difference is what the caller reports as
+            ``TEXT_OMITTED``, and it is non-zero only for a block whose corner is not a finite
+            number.
+        """
+        offered = 0
+        committed = 0
+        for block in blocks:
+            if block.text.strip():
+                offered += 1
+            if append_text_block(parent, block, style=style, layout=layout):
+                committed += 1
+        return (offered, committed)
 
     @staticmethod
     def _draw_stroke(
@@ -235,7 +335,9 @@ class SvgPageRenderer:
         stroke
             The stroke to draw.
         palette
-            Palette resolving the stroke's colour. Total, so there is no unknown-ink path.
+            Palette resolving the stroke's colour index. Total, so there is no unknown-ink
+            path -- but consulted only when the stroke carries no colour of its own; see
+            :func:`_ink_for`.
         layout
             The geometry.
         thickness
@@ -255,7 +357,7 @@ class SvgPageRenderer:
         append_stroke(
             group,
             stroke,
-            base_color=palette.rgb(stroke.color).as_tuple(),
+            base_color=_ink_for(stroke, palette=palette),
             layout=layout,
             profile=profile,
             model=model,
@@ -349,3 +451,35 @@ class SvgPageRenderer:
                 )
             )
         return tuple(notices)
+
+
+def _ink_for(stroke: Stroke, /, *, palette: Palette) -> tuple[int, int, int]:
+    """Resolve one stroke's ink, preferring the colour the stroke carried itself.
+
+    The palette is a mapping from a colour *index* to an ink, and for thirteen of the
+    fourteen indices the index is the whole truth. It is not for the highlighter: the
+    firmware writes ``PenColor.HIGHLIGHT`` for every highlight whatever colour it was drawn
+    in, and puts the real colour in a per-stroke field the formats adapter now reads into
+    ``Stroke.color_override``. Without this preference, four highlighter colours all resolve
+    to the palette's one yellow, which is what they did.
+
+    The override's alpha is deliberately not consulted. Coverage is the pen's business --
+    ``HighlighterModel.segment_opacity`` returns a calibrated ``0.3`` -- and both measured
+    strokes carried a fully opaque ``a=255``, so honouring it here would replace a
+    translucent highlight with an opaque block that hides the writing underneath it.
+
+    Parameters
+    ----------
+    stroke
+        The stroke being drawn.
+    palette
+        Palette resolving the stroke's colour index. Total, so the fallback cannot miss.
+
+    Returns
+    -------
+    tuple[int, int, int]
+        Channels in ``0``-``255``, in the shape the pen models take.
+    """
+    override = stroke.color_override
+    ink = palette.rgb(stroke.color) if override is None else override.as_rgb()
+    return ink.as_tuple()

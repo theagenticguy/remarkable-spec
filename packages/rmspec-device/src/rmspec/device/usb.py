@@ -3,28 +3,42 @@
 Firmware 3.27.3.0 answers on ``10.11.99.1:80`` over the USB-C gadget interface with a
 route table closed at six path families. This module binds four of the five Protocols in
 ``rmspec.domain.ports.device`` to that table -- :class:`UsbCatalog`,
-:class:`UsbBundleSource`, :class:`UsbFacts` and :class:`UsbUploader` -- over one injected
-``httpx.Client``. It
+:class:`UsbBundleSource`, :class:`UsbFacts` and :class:`UsbUploader` -- over one
+``httpx.Client`` they share. It
 decodes nothing itself: entry shapes belong to ``_wire``, archive members to ``_archive``,
 the page order to ``_pages``, and failure classification to ``_errors``. What is left here
 is the part that is genuinely about *moving bytes over HTTP*: the request, the breadth-first
 walk the route table forces, the assembly of a bundle from members somebody else routed,
 and the one multipart body this package builds.
 
-The client is injected and never constructed
---------------------------------------------
-:class:`UsbWebApi` takes an ``httpx.Client``. It does not build one and does not own a
-lifetime -- the composition root in step 6 does, and a test passes
-``httpx.Client(transport=httpx.MockTransport(handler))``. Legacy
-``WebAPI._get_client`` built a fresh client per call behind a lazy ``import httpx``, so
-every request paid a connection setup, the timeout was a constructor default nobody could
-override per call, and a missing extra surfaced as an ``ImportError`` from inside a command
-body rather than as ``MissingDependencyError`` at composition.
+The client is accepted or built here, and either way this module owns its lifetime
+---------------------------------------------------------------------------------
+:class:`UsbWebApi` takes an ``httpx.Client`` in ``__init__``, which is how a test passes
+``httpx.Client(transport=httpx.MockTransport(handler))``, and
+:meth:`UsbWebApi.over_usb` builds the real one from an ``Endpoint`` for everybody else.
+The second exists because ``httpx`` is this package's dependency and no other package in the
+workspace declares it, so a composition root cannot legally construct the argument the
+constructor asks for. Either way the instance owns the client it holds and
+:meth:`UsbWebApi.close` releases it -- the container binds ``over_usb`` as a generator provider
+and calls ``close`` from the finalizer, which is the same lifetime pair
+:meth:`~rmspec.device._shell.ParamikoShell.connect`/``close`` spells for the other transport.
 
-No *read* here spells a timeout, for the same reason: the client's own ceiling is tuned for
-listings that answer in milliseconds and it belongs to whoever built the client. The upload
-is the one exception and it is a per-request override, because its ceiling is a property of
-that route rather than of this link -- see :data:`UPLOAD_TIMEOUT_SECONDS`.
+This heading previously read "the client is injected and never constructed" and said the
+lifetime belonged to the composition root. Both halves stopped being true when ``over_usb``
+landed, and the correction is recorded rather than quietly applied: a module docstring that
+contradicts two methods in its own file is worse than no docstring, because a reader trusts it.
+
+What has not changed is the objection to what came before. Legacy ``WebAPI._get_client`` built a
+fresh client *per call* behind a lazy ``import httpx``, so every request paid a connection setup,
+the timeout was a constructor default nobody could override per call, and a missing extra
+surfaced as an ``ImportError`` from inside a command body rather than as
+``MissingDependencyError`` at composition. ``over_usb`` is one client per command with an
+explicit close, which is the opposite shape.
+
+No *read* here spells a timeout: the client's own ceiling is tuned for listings that answer in
+milliseconds -- see :data:`USB_TIMEOUT_SECONDS` -- and a read has no reason to override it. The
+upload is the one exception and it is a per-request override, because its ceiling is a property
+of that route rather than of this link -- see :data:`UPLOAD_TIMEOUT_SECONDS`.
 
 Relocated from ``src/remarkable_spec/device/web_api.py``, with every divergence named
 ------------------------------------------------------------------------------------
@@ -204,6 +218,15 @@ for every field either model has or gains, and deriving it means the adapter can
 of step with the port. ``test_device_usb.py`` pins the literal names, so the derivation is
 checked rather than trusted.
 
+Each derived name is then annotated with who *can* answer it, which is a second fact and a
+different sentence. ``firmware``, ``model`` and both gauge pairs are "this transport cannot, SSH
+can" -- every one of them is a file, and no route family here serves a file from the xochitl
+tree. ``serial`` carries the **empty** tuple, which says no transport can: the only sources are
+a file this workspace may not name and a journal ``GET /log.txt`` redacts, so SSH declines it
+too. The annotation is an override layered on the derivation rather than a replacement for it --
+see :data:`_USB_ALTERNATIVES` and :func:`_declared` -- so a field either port model gains
+tomorrow still appears in the report, bare, instead of vanishing from it.
+
 Parsing ``/log.txt`` for a firmware string is rejected: 9.7 MB of the user's own journal,
 from a rolling byte-capped window, to obtain one version number is not a trade worth making.
 """
@@ -212,7 +235,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Self
 from urllib.parse import quote
 
 import httpx
@@ -240,6 +263,7 @@ from rmspec.domain.ports.device import (
     LibraryRefresh,
     SkippedEntry,
     SkipReason,
+    UnsupportedField,
     UploadMedia,
     UploadReceipt,
 )
@@ -260,6 +284,7 @@ __all__ = [
     "UPLOAD_OPERATION",
     "UPLOAD_ROUTE",
     "UPLOAD_TIMEOUT_SECONDS",
+    "USB_TIMEOUT_SECONDS",
     "UsbBundleSource",
     "UsbCatalog",
     "UsbFacts",
@@ -312,6 +337,13 @@ refuse. A verb no client sends is a guard no guard can catch.
 #: The one route on this firmware that creates a document. Spelled here rather than in a
 #: ``_``-prefixed sibling because no module decodes its payload: the body this package sends
 #: is one it builds, and the body it receives carries nothing to decode.
+#:
+#: It takes no destination, and an external source documents it as uploading to the last folder
+#: that was listed -- which makes the destination device-global mutable state rather than an
+#: absent feature. A reader of this constant alone should not conclude "no parameter, therefore
+#: always the root": :meth:`UsbUploader.upload` sends ``GET /documents/`` immediately before this
+#: route to make that true, and its docstring carries both readings and why the guarantee is
+#: established there rather than by whatever a caller happened to request beforehand.
 UPLOAD_ROUTE: Final = "/upload"
 
 #: The multipart field name the handler checks. Measured: one part named ``document`` is
@@ -346,6 +378,26 @@ UPLOAD_OPERATION: Final = "upload"
 #: timeout the client owns.
 UPLOAD_TIMEOUT_SECONDS: Final = 120.0
 
+#: Seconds the client :meth:`UsbWebApi.over_usb` builds gives one request, and therefore the
+#: ceiling every *read* inherits, since no read spells a timeout of its own.
+#:
+#: 30, which is what the tablet's own SPA gives a request over this cable, and the number to
+#: match for the same reason the SPA can afford it: every read here is a route the firmware
+#: answers from memory or from one file, and a read that has not answered in thirty seconds is
+#: a link that has stopped rather than a device still working.
+#:
+#: This is the *client's* ceiling and :data:`UPLOAD_TIMEOUT_SECONDS` is a per-request override
+#: that outranks it, so raising or lowering this number never shortens an upload:
+#: :meth:`UsbWebApi.post_file` passes its own 120 on every call and ``httpx`` prefers the
+#: per-request value. That separation is the whole reason the two constants are not one.
+#:
+#: Applied as a plain float, which ``httpx`` spreads over all four phases it can bound --
+#: connect, read, write and pool. A connect phase bounded at thirty seconds costs nothing in
+#: the failure that matters: an absent tablet means nothing is listening on
+#: ``10.11.99.1:80``, and the kernel answers that with ``ECONNREFUSED`` in milliseconds
+#: rather than by timing out.
+USB_TIMEOUT_SECONDS: Final = 30.0
+
 _CONTENT_LENGTH: Final = "content-length"
 """The header naming how many bytes the device said it was sending."""
 
@@ -355,10 +407,87 @@ _ROUTE_ID: Final = "{id}"
 _UNSUPPORTED_FIELD: Final = "unsupported"
 """The one field of a facts model that is not itself a fact, so never named as unsupported."""
 
-_UNANSWERABLE_FACTS: Final = frozenset(DeviceFacts.model_fields) - {_UNSUPPORTED_FIELD}
+_OVER_SSH: Final = (TransportKind.SSH,)
+"""The one transport that answers what this one cannot: it has a shell, this has six routes.
+
+Not ``LOCAL_MIRROR`` alongside it. A mirror is an already-pulled copy of a xochitl tree on this
+host, and no mirror adapter implements
+:class:`~rmspec.domain.ports.device.DeviceFactsSource` -- ``read_facts`` exists on exactly two
+classes in this workspace, one per wire. So SSH is the whole of the answer rather than the first
+entry in a longer one.
+"""
+
+_USB_ALTERNATIVES: Final[Mapping[str, tuple[TransportKind, ...]]] = {
+    "firmware": _OVER_SSH,
+    "model": _OVER_SSH,
+    "serial": (),
+    "total_memory_bytes": _OVER_SSH,
+    "available_memory_bytes": _OVER_SSH,
+    "total_storage_bytes": _OVER_SSH,
+    "available_storage_bytes": _OVER_SSH,
+}
+"""Who can answer each field this transport cannot, keyed by the port's own field name.
+
+Every entry is a measurement rather than an inference. ``firmware`` is the ``IMG_VERSION`` line
+of ``/etc/os-release``, ``model`` is ``/sys/devices/soc0/machine``, and the two gauge pairs are
+``/proc/meminfo`` and ``df -Pk``. All four sources are *files*, and this route table is closed
+at six families with none that serves a file from the xochitl tree, so each field is the sentence
+"this transport cannot, SSH can" -- which tells a user to change transports and is worth
+printing. :class:`~rmspec.device.ssh.SshFacts` answers all six on the reference device, so the
+claim is checked by that adapter's own tests rather than asserted here.
+
+``serial`` is the empty tuple, and empty is a claim rather than a blank: **no** transport can
+answer it. ``/sys/devices/soc0/serial_number`` and ``/proc/device-tree/serial-number`` both
+exist and both hold 16 characters, but that is the i.MX8MM SoC unique id -- a *different fact*
+from the ``RM02A...`` serial the tablet UI shows, which is recorded only in the tablet's own
+credential-bearing config file, a file no source in this workspace may name, and in journal
+lines ``GET /log.txt`` redacts. So SSH does not answer it either, and telling a user to retry
+over SSH would send them somewhere the value is not. See
+``specs/device/3.27.3.0/filesystem.json``, claim ``identity:no-device-serial-source``, whose
+recorded consequence names both transports. :data:`~rmspec.device.ssh.NO_SERIAL_SOURCE` is the
+SSH adapter's spelling of the same empty tuple, which is what makes the two agree.
+
+A field absent from this mapping is declared as a bare name, which claims nothing -- what every
+adapter said before :class:`~rmspec.domain.ports.device.UnsupportedField` existed, and all it
+knew. That is what keeps a field either port model gains tomorrow *in* the report:
+:func:`_declared` derives the set from the model's own fields and consults this mapping only to
+annotate, so a new field arrives unannotated rather than not at all. Unannotated is the honest
+state for a field nobody has measured a second transport against.
+"""
+
+
+def _declared(fields: frozenset[str], /) -> frozenset[str | UnsupportedField]:
+    """Annotate each unanswerable field with who can answer it, leaving unmeasured ones bare.
+
+    Parameters
+    ----------
+    fields
+        Every field of one facts model this transport cannot answer, which here is every field
+        the model has.
+
+    Returns
+    -------
+    frozenset[str | UnsupportedField]
+        One member per name, never fewer: an
+        :class:`~rmspec.domain.ports.device.UnsupportedField` for each name
+        :data:`_USB_ALTERNATIVES` carries a claim for, and the bare name for every other. A
+        field cannot be dropped on the way through, which is the property that matters when the
+        port grows one.
+    """
+    return frozenset(
+        UnsupportedField(name=name, supported_by=_USB_ALTERNATIVES[name])
+        if name in _USB_ALTERNATIVES
+        else name
+        for name in fields
+    )
+
+
+_UNANSWERABLE_FACTS: Final = _declared(frozenset(DeviceFacts.model_fields) - {_UNSUPPORTED_FIELD})
 """Every fixed fact the port can report, none of which the closed route table reaches."""
 
-_UNANSWERABLE_RESOURCES: Final = frozenset(DeviceResources.model_fields) - {_UNSUPPORTED_FIELD}
+_UNANSWERABLE_RESOURCES: Final = _declared(
+    frozenset(DeviceResources.model_fields) - {_UNSUPPORTED_FIELD}
+)
 """Every gauge the port can report, none of which the closed route table reaches."""
 
 UPLOAD_MEDIA_TYPES: Final[Mapping[UploadMedia, str]] = {
@@ -399,15 +528,56 @@ class UsbWebApi:
     *means*: it takes the path, returns the body, and raises a domain error for every way that
     can fail, so the four ports below contain no ``httpx`` and no status codes.
 
-    The client is a constructor argument and is never built here, which is what lets a test
-    pass an ``httpx.MockTransport`` and the composition root own the real client's lifetime.
-    No *read* spells a timeout for the same reason; :meth:`post_file` overrides one per
-    request, and :data:`UPLOAD_TIMEOUT_SECONDS` carries the argument for the value.
+    The client is a constructor argument and is never built in ``__init__``, which is what
+    lets a test pass an ``httpx.MockTransport``. :meth:`over_usb` is the route a composition
+    root takes instead: it builds the one client a real cable needs, so nothing outside this
+    package has to import ``httpx`` to reach a tablet. Either way the instance owns the client
+    it holds and :meth:`close` is what releases it -- the client is lent for the life of this
+    object, not shared with whatever built it.
+
+    No *read* spells a timeout, because the client carries one; :meth:`post_file` overrides one
+    per request, and :data:`UPLOAD_TIMEOUT_SECONDS` carries the argument for that value.
     """
 
     def __init__(self, *, client: httpx.Client, endpoint: Endpoint) -> None:
         self._client = client
         self._endpoint = endpoint
+
+    @classmethod
+    def over_usb(cls, endpoint: Endpoint, /, *, timeout: float = USB_TIMEOUT_SECONDS) -> Self:
+        """Build one over a fresh client aimed at an attached tablet.
+
+        The composition root's route to this transport, and the reason ``httpx`` stays a
+        dependency of this package alone: a caller holding an ``Endpoint`` has everything a
+        working instance needs, and the client is a detail it never names. The alternative --
+        a module-level function handing back a bare client -- was rejected because it puts an
+        object the caller can do nothing else with into the caller's hands, and then leaves
+        closing it as a second obligation nothing in the type system ties to the first.
+
+        What this deliberately does *not* do is configure the connection pool. On this
+        firmware a ``HEAD`` poisons a keep-alive connection, and :meth:`head` answers that by
+        sending ``Connection: close`` on that verb alone; disabling reuse here would make every
+        ``GET`` in a library walk pay a fresh connection setup to fix a defect that only
+        ``HEAD`` has.
+
+        Parameters
+        ----------
+        endpoint
+            Where to connect. Not given to the client as a ``base_url``: :meth:`_answer`
+            joins it to the route itself, so one spelling of the address serves both the
+            request and every error message.
+        timeout
+            Seconds one request may take, defaulting to :data:`USB_TIMEOUT_SECONDS`. Raising
+            it does not extend an upload and lowering it does not shorten one, because
+            :meth:`post_file` passes :data:`UPLOAD_TIMEOUT_SECONDS` per request.
+
+        Returns
+        -------
+        Self
+            An instance that owns its client. The caller must call :meth:`close` when the
+            command is over, which is what the container's finalizer is for.
+        """
+        return cls(client=httpx.Client(timeout=timeout), endpoint=endpoint)
 
     def get(self, route: str, /, *, doc_uuid: str | None = None) -> bytes:
         """Fetch one route's body.
@@ -591,6 +761,27 @@ class UsbWebApi:
                 endpoint=self._endpoint.base_url,
                 name=subject,
             )
+
+    def close(self) -> None:
+        """Release the client's connection pool.
+
+        The counterpart to :meth:`over_usb`, and the same shape as
+        :meth:`~rmspec.device._shell.ParamikoShell.close`: a plain method, so a container can
+        bind this transport as a generator provider and call it from the finalizer, which is
+        where every other per-command resource in this project is released. It is not a
+        context manager for exactly that reason -- a ``with`` block would move lifetime into
+        each of the four adapters' call sites, and there is no call site that wants it there.
+
+        Idempotent, because ``httpx.Client.close`` is: a finalizer that runs after a caller
+        already closed is not an error worth inventing.
+
+        Returns
+        -------
+        None
+            Nothing. Every connection this instance opened is closed; the instance itself is
+            spent, since ``httpx`` refuses a request on a closed client.
+        """
+        self._client.close()
 
     def _answer(
         self,
@@ -827,12 +1018,19 @@ class UsbUploader:
     fetch("/upload", {method:"post", body:n})``, with ``r.status !== 201`` as its own success
     test -- and then four probes measured the handler.
 
-    This is the *supported* write path, and the only one. reMarkable's own documentation says
-    "Xochitl must not run when manually accessing document files", and this route is served by
-    xochitl itself: it parses the container, writes ``.metadata``, ``.content``, ``.local``,
-    ``.pagedata``, the underlay and an empty ``<uuid>/``, and updates ``.tree``. The client
-    supplies none of them, which is the whole reason to prefer it over
-    :class:`~rmspec.device.ssh.SshUploader`.
+    This is the *supported* write path, and the only one. reMarkable's own documentation, at
+    <https://developer.remarkable.com/documentation/xochitl>, says of the store directory that
+    *"It is possible to copy this directory, but note that Xochitl should not be running when
+    accessing and/or changing the stored documents."* This route is served by xochitl itself: it
+    parses the container, writes ``.metadata``, ``.content``, ``.local``, ``.pagedata``, the
+    underlay and an empty ``<uuid>/``, and updates ``.tree``. The client supplies none of them,
+    which is the whole reason to prefer it over :class:`~rmspec.device.ssh.SshUploader`. That
+    sentence is a *should* and it is about accessing documents, not about a filesystem: reading
+    "so a direct filesystem write is unsafe while the UI runs" out of it is **our inference**,
+    not their words. The hazard is real on its own evidence -- see
+    :class:`~rmspec.device.ssh.SshSearchIndexSource`, where an image truncated to ~99% of its
+    length deserialised cleanly and answered with the wrong rows -- so the argument does not
+    rest on the quotation being stronger than it is.
 
     What it cannot do, and why each is a raise rather than a degradation
     -------------------------------------------------------------------
@@ -844,12 +1042,100 @@ class UsbUploader:
     outright, because a receipt reporting success for a placement the caller did not ask for
     is the exact failure the "no ``accepts()``" rule exists to prevent.
 
+    **What our measurement did not reach: the destination is device-global state.** Everything
+    above stands -- there is no folder parameter, and the entry we created carried
+    ``Parent == ""``. But ``remarkable.guide/tech/usb-web-interface.html`` (updated 2026-08-20)
+    documents this same route as *"Upload a document to the last folder that was listed."*
+    **That is an external claim and we have not measured it.** Measuring it means issuing
+    ``POST /upload`` against a real tablet, and the six route families include none that
+    deletes, so the cost of the experiment is a document in the author's library that only a
+    manual delete on the tablet removes; the request hook in ``test_device_hardware.py`` refuses
+    this route for that reason and is load-bearing rather than precautionary. Treat the claim as
+    plausible and unverified here. The same page also lists ``POST /search/{keyword}``, which
+    this firmware does **not** serve -- ``/search`` is one of the 59 paths its own log records as
+    ``Bad path`` / ``ERROR "Unknown file"`` (``specs/device/3.27.3.0/http.json``,
+    ``route-table:closed``) -- so it describes a family of firmwares rather than this one, which
+    is a second reason to record the claim as theirs.
+
+    The two are consistent, and reconciling them is the point rather than a formality. A folder
+    is not something the *request* names; on their reading it is something
+    ``GET /documents/{id}`` **sets**, on the device, for whichever client uploads next. Our
+    probe listed nothing between the two requests, so "the last folder that was listed" was the
+    root -- which is exactly what we observed. It also re-reads the SPA's pre-flight
+    ``GET /documents/{parent}``, called a view refresh above: on this reading it is a view
+    refresh that happens to be load-bearing, which is why the SPA can appear to target a folder
+    while sending no parameter for one.
+
+    Two things follow. The first is why nothing about the refusal changes; the second is the
+    pre-flight below.
+
+    It **strengthens** the refusal rather than softening it. Honouring ``parent_uuid`` would
+    mean listing the target and then uploading -- owning device-global traversal state
+    *exclusively* for the span between two requests. Nothing can promise that: another process,
+    another client, or the tablet's own web UI listing any folder in that window moves the
+    destination, and the upload answers ``201`` either way, with no field in the response to
+    check it against. That is a race, not an API. So ``DeviceOperationUnsupported`` is now the
+    right answer twice: the route cannot express a destination, *and* the state that decides one
+    is not this adapter's to hold.
+
+    It is also a hazard for **us** specifically, because our own read path lists folders.
+    :class:`_Walk` is breadth-first and ends on some folder's children rather than on the root,
+    so anything that lists and then uploads over one transport would hand the destination to
+    whatever it listed last -- while this adapter promises the root and reports
+    :attr:`~rmspec.domain.ports.device.LibraryRefresh.ALREADY_VISIBLE`. That combination is
+    reachable today: ``rmspec.app.create.CreateDocument.create`` calls ``list_documents`` and
+    then ``upload``, over one ``Scope.REQUEST`` transport.
+
+    The pre-flight: ``GET /documents/`` immediately before every ``POST``
+    -------------------------------------------------------------------
+    :meth:`upload` therefore sends the root listing itself, one request before the write, and
+    discards the body. That makes the destination the root by construction rather than by
+    inheritance, and it is the whole of the fix.
+
+    **Established here rather than in the caller's ordering, deliberately.** This class is the
+    only object that knows this route reads device-global state; an invariant that lives in a
+    use case's statement order holds exactly as long as every caller remembers it, and breaks
+    silently the first time somebody reorders one or writes a second. Established locally it
+    holds whatever ran before -- including a listing from the tablet's own web UI or another
+    process, which *no* caller ordering can defend against. Same distinction this repo draws
+    when a ``banned-api`` entry without a matching per-package exemption makes a rule a wall
+    rather than a boundary.
+
+    **On every media, not only the ones a caller happens to list before.** The trigger is any
+    prior listing by anyone, which is not a property of the media, so media is the wrong axis to
+    condition on. Today ``CreateDocument`` lists for
+    :attr:`~rmspec.domain.ports.device.UploadMedia.PDF` and
+    :attr:`~rmspec.domain.ports.device.UploadMedia.EPUB` and returns before listing for
+    :attr:`~rmspec.domain.ports.device.UploadMedia.RMDOC` -- but keying this adapter's requests
+    on what one use case currently does for one media is precisely the caller-coupling the
+    paragraph above rejects, and it would leave the archive path defended against our own
+    listings and not against anyone else's. The three media differ in how much the pre-flight
+    buys, never in whether it applies.
+
+    **Belt-and-braces against an unverified claim, and priced accordingly.** We have not
+    measured the last-listed-folder behaviour and will not, for the reason above -- so this is
+    not a fix for something observed. One extra ``GET`` makes the destination deterministic
+    *either way*: harmless if the claim is false, and the difference between the root and
+    wherever a breadth-first walk stopped if it is true. The cost is one round trip on a
+    point-to-point cable, against an upload body measured in kilobytes-to-megabytes with a
+    120-second ceiling, in a command that already pays several reads. It is a ``GET`` and not a
+    ``HEAD``: ``GET`` is what the SPA sends, ``HEAD`` on this firmware poisons the keep-alive
+    connection and would cost one, and whether the handler updates traversal state for a ``HEAD``
+    is unmeasured -- three reasons pointing the same way. As a ``GET`` it sends no
+    ``Connection: close`` and reuses the connection the ``POST`` then goes out on.
+
+    If the pre-flight fails, no write is attempted. That ordering is the point: the alternative
+    -- upload anyway, with the destination unpinned -- is the silent wrong placement this whole
+    section is about.
+
     **No identifier.** The ``201`` body is ``{"status": "Upload successful"}`` and carries no
     id, so ``UploadReceipt.doc_uuid`` is ``None`` -- the field is typed nullable for precisely
-    this wire. This adapter does not re-list ``/documents/`` to work out which new entry is
-    its own: two concurrent uploads make that answer wrong, and a use case that needs the
-    identifier resolves it against :class:`~rmspec.domain.ports.device.DeviceCatalog` as an
-    explicit, testable step.
+    this wire. This adapter does not list ``/documents/`` *after* the write to work out which new
+    entry is its own: two concurrent uploads make that answer wrong, and a use case that needs
+    the identifier resolves it against
+    :class:`~rmspec.domain.ports.device.DeviceCatalog` as an explicit, testable step. The
+    pre-flight below is the other direction and is not that -- it runs *before* the write, when
+    no new entry exists yet, and its body is discarded unparsed.
 
     **No update.** Uploading a document's own archive back produced a new document uuid *and*
     a new page uuid while preserving the page bytes exactly. The route creates; it cannot
@@ -897,6 +1183,11 @@ class UsbUploader:
     def upload(self, request: UploadRequest, /) -> UploadReceipt:
         """Place one document at the library root and report what the device said.
 
+        Two requests, always in this order: ``GET /documents/`` and then ``POST /upload``. The
+        first is the pre-flight that pins the destination -- see the class docstring -- and it
+        is sent on every media, so "at the library root" in this summary is a guarantee this
+        method establishes rather than an assumption it inherits from whatever ran before.
+
         Parameters
         ----------
         request
@@ -912,22 +1203,31 @@ class UsbUploader:
         Raises
         ------
         DeviceOperationUnsupported
-            ``request.parent_uuid`` is not ``None``. Raised before the first byte is sent, and
-            never replaced by a placement at the root.
+            ``request.parent_uuid`` is not ``None``. Raised before the first byte is sent --
+            before the pre-flight, not merely before the write -- and never replaced by a
+            placement at the root.
         DeviceUploadRejected
             The device answered something other than ``201``, carrying a message this adapter
             has not met. On this route that means the document itself was declined.
         DeviceUnreachable
-            The tablet did not answer, or the link died mid-body.
+            The tablet did not answer, or the link died mid-body. From either request: a
+            pre-flight that cannot reach the tablet is raised before the write is attempted, so
+            nothing was created.
         DeviceProtocolError
             The device reported that no file arrived -- a defect in the multipart body this
-            adapter built -- or answered in a shape this adapter cannot read.
+            adapter built -- or answered in a shape this adapter cannot read. Also raised when
+            the pre-flight itself is refused, in which case no document exists: the destination
+            could not be pinned, and uploading anyway is the silent wrong placement this method
+            exists to prevent.
         DeviceTransferInterrupted
-            Never, over this wire, and named here only because the port declares it. HTTP has
-            no partial-acceptance state: the handler answers ``201`` after parsing the whole
-            body, so there is no observation under which a receipt could report fewer bytes
-            than were offered. A link that dies mid-upload is ``DeviceUnreachable`` from the
-            shared translation seam, which is a different fact and a better one.
+            Never from the ``POST``, and named by the port for that request. HTTP has no
+            partial-acceptance state: the handler answers ``201`` after parsing the whole body,
+            so there is no observation under which a receipt could report fewer bytes than were
+            offered, and a link that dies mid-upload is ``DeviceUnreachable`` from the shared
+            translation seam. It *is* reachable from the pre-flight, whose body has an announced
+            ``Content-Length`` like any other read. A short listing means the traversal state may
+            not have been set, so the write is abandoned rather than sent hopefully -- and
+            because it is abandoned, this exception still never accompanies a created document.
         """
         if request.parent_uuid is not None:
             raise DeviceOperationUnsupported(
@@ -935,6 +1235,11 @@ class UsbUploader:
                 operation=UPLOAD_OPERATION,
                 supported_by=(TransportKind.SSH,),
             )
+        # The pre-flight. Its body is discarded: what is wanted is the side effect an external
+        # source attributes to this route -- that the destination is the last folder listed --
+        # and listing the root immediately before the write is what makes it the root. See the
+        # class docstring for why this is established here rather than by a caller's ordering.
+        self._api.get(LISTING_ROUTE)
         self._api.post_file(
             UPLOAD_ROUTE,
             field=UPLOAD_FIELD,
@@ -960,6 +1265,12 @@ class UsbFacts:
     both methods name every field ``unsupported`` -- the port's own spelling of
     "structurally cannot ask", as distinct from a field that was asked for and not answered.
 
+    Each name also says who *can*, which is what makes the report actionable rather than merely
+    empty: six of the seven fields are "SSH can, change transports", and ``serial`` is "no
+    transport can", because the value exists only in places this project does not read. See
+    :data:`_USB_ALTERNATIVES` for the evidence behind each, and :func:`_declared` for why a
+    field the port gains later is still reported.
+
     Both still make one request. See the module docstring: a facts source that never
     touched the wire would report a detached tablet as "everything unsupported", and the
     port documents ``DeviceUnreachable`` as a raise from both.
@@ -974,7 +1285,9 @@ class UsbFacts:
         Returns
         -------
         DeviceFacts
-            Every field ``None`` and every field named in ``unsupported``.
+            Every field ``None`` and every field named in ``unsupported``: ``firmware`` and
+            ``model`` annotated as answerable over SSH, ``serial`` annotated as answerable
+            nowhere.
 
         Raises
         ------
@@ -992,7 +1305,9 @@ class UsbFacts:
         Returns
         -------
         DeviceResources
-            Every field ``None`` and every field named in ``unsupported``.
+            Every field ``None`` and every field named in ``unsupported``, all four annotated
+            as answerable over SSH -- ``/proc/meminfo`` and ``df -Pk`` are files, and no route
+            family here serves one.
 
         Raises
         ------

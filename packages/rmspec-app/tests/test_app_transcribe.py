@@ -62,6 +62,7 @@ from rmspec.domain.models import (
     PAPER_PRO_SCREEN,
     OcrArtifact,
     OcrCacheKey,
+    OcrProvenance,
 )
 from rmspec.domain.ports.export import ImageMedia, RasterImage
 from rmspec.domain.ports.ocr import (
@@ -247,6 +248,8 @@ class _Cache:
         self.rows: dict[str, tuple[OcrCacheKey, OcrArtifact]] = {}
         self.gets: list[OcrCacheKey] = []
         self.puts: list[tuple[OcrCacheKey, OcrArtifact]] = []
+        self.supersedes: list[OcrCacheKey] = []
+        self.equivalents: list[OcrCacheKey] = []
 
     def get(self, key: OcrCacheKey, /) -> OcrArtifact | None:
         """Return the artifact stored under this exact key, or ``None``."""
@@ -261,6 +264,7 @@ class _Cache:
 
     def superseded(self, key: OcrCacheKey, /) -> OcrCacheKey | None:
         """Return the greatest stored key for the same page under other inputs."""
+        self.supersedes.append(key)
         qualifying = [
             stored
             for stored, _ in self.rows.values()
@@ -269,6 +273,19 @@ class _Cache:
         if not qualifying:
             return None
         return max(qualifying, key=lambda stored: stored.digest)
+
+    def equivalent_raster(self, key: OcrCacheKey, /) -> OcrArtifact | None:
+        """Return the greatest stored artifact for identical pixels under other bytes."""
+        self.equivalents.append(key)
+        wanted = key.raster_identity
+        qualifying = {
+            stored.digest: artifact
+            for stored, artifact in self.rows.values()
+            if stored.page_hash != key.page_hash and stored.raster_identity == wanted
+        }
+        if not qualifying:
+            return None
+        return qualifying[max(qualifying)]
 
 
 # ──────────────────────────────── the builders ────────────────────────────────
@@ -551,11 +568,78 @@ def test_tier_zero_wins_when_a_recognizer_agrees():
     assert bench.adjudicator.requests == []
 
 
-def test_a_short_circuit_writes_no_cache_row():
-    """A row cannot say which tier produced it, so only a merged reading may be stored."""
+def test_a_short_circuit_writes_a_row_that_says_which_tier_produced_it():
+    """The row is writable because it carries provenance; without it, tier 0 was not free."""
     bench = _bench(recognizers=(_Recognizer(TEXTRACT, text=INK),), index=_Index(_indexed(INK)))
     bench.run()
-    assert bench.cache.puts == []
+    assert len(bench.cache.puts) == 1
+    key, artifact = bench.cache.puts[0]
+    provenance = artifact.provenance
+    assert provenance.tier_reached == 1
+    assert provenance.short_circuited is True
+    assert provenance.contributors == (INDEX, TEXTRACT)
+    assert provenance.agreement == 1.0
+    assert artifact.text == INK
+    # The key is the identity of the lookup, so it still names the adjudicator this run was
+    # configured with. The artifact is the identity of the work, and it says no merge ran.
+    assert key.model_fingerprint == ADJUDICATOR
+    assert bench.adjudicator.requests == []
+
+
+def test_the_recorded_agreement_is_the_measured_one_and_not_the_threshold():
+    """The threshold is not a key component, so the row carries the number a caller compares."""
+    bench = _bench(
+        recognizers=(_Recognizer(TEXTRACT, text="the quick brown fox jumped over a lazy dog"),),
+        index=_Index(_indexed(INK)),
+    )
+    bench.run(_request(agreement_threshold=0.5))
+    recorded = bench.cache.puts[0][1].provenance.agreement
+    assert recorded is not None
+    assert 0.5 <= recorded < 1.0
+
+
+def test_a_short_circuiting_page_stops_re_paying_its_recognizers():
+    """The whole cost of the old rule: tier 0 is free and the page still paid every run."""
+    cache = _Cache()
+    _bench(
+        recognizers=(_Recognizer(TEXTRACT, text=INK),),
+        index=_Index(_indexed(INK)),
+        cache=cache,
+    ).run()
+    replay = _bench(
+        recognizers=(_Recognizer(TEXTRACT, text=INK),),
+        index=_Index(_indexed(INK)),
+        cache=cache,
+    )
+    page = _only(replay.run())
+    assert page.cached is True
+    assert replay.recognizers[0].calls == 0
+    assert replay.reader.requests == []
+    assert replay.adjudicator.requests == []
+
+
+def test_a_hit_on_a_short_circuited_row_names_no_merging_model():
+    """Storing it used to be wrong precisely because a hit claimed an adjudicator."""
+    cache = _Cache()
+    _bench(
+        recognizers=(_Recognizer(TEXTRACT, text=INK),),
+        index=_Index(_indexed(INK)),
+        cache=cache,
+    ).run()
+    replay = _bench(
+        recognizers=(_Recognizer(TEXTRACT, text=INK),),
+        index=_Index(_indexed(INK)),
+        cache=cache,
+    )
+    page = _only(replay.run())
+    assert page.page.provenance.model_fingerprint is None
+    assert page.page.provenance.recognizers == (INDEX, TEXTRACT)
+    assert page.cached_provenance is not None
+    assert page.cached_provenance.tier_reached == 1
+    assert page.cached_provenance.short_circuited is True
+    assert page.cached_provenance.agreement == 1.0
+    # `tier_reached` describes what this run paid, which is nothing.
+    assert page.tier_reached == 0
 
 
 def test_tier_zero_text_wins_even_where_the_recognizer_differs():
@@ -783,6 +867,59 @@ def test_a_cache_hit_skips_every_paid_tier():
     assert replay.adjudicator.requests == []
 
 
+def test_a_hit_on_a_merged_row_names_the_adjudicator_and_the_recorded_fold_order():
+    cache = _Cache()
+    _bench(
+        recognizers=(_Recognizer(VISION, text=OTHER), _Recognizer(TEXTRACT, text=OTHER)),
+        index=_Index(_indexed(INK)),
+        cache=cache,
+    ).run()
+    replay = _bench(
+        recognizers=(_Recognizer(VISION, text=OTHER), _Recognizer(TEXTRACT, text=OTHER)),
+        index=_Index(_indexed(INK)),
+        cache=cache,
+    )
+    page = _only(replay.run())
+    fold_order = (INDEX, VISION, TEXTRACT, f"{_READER_PREFIX}{READER}")
+    assert page.cached_provenance is not None
+    assert page.cached_provenance.tier_reached == 3
+    assert page.cached_provenance.short_circuited is False
+    assert page.cached_provenance.contributors == fold_order
+    assert page.cached_provenance.agreement is None
+    # Fold order, not the key's sorted tuple, because the row recorded it.
+    assert page.page.provenance.recognizers == fold_order
+    assert page.page.provenance.model_fingerprint == ADJUDICATOR
+
+
+def test_a_row_written_before_provenance_existed_falls_back_to_the_key():
+    """An older build recorded no contributors, and the key's sorted tuple is all it had."""
+    cache = _Cache()
+    seeded = _bench(
+        recognizers=(_Recognizer(TEXTRACT, text=OTHER),), index=_Index(None), cache=cache
+    )
+    seeded.run()
+    key = cache.puts[0][0]
+    cache.rows[key.digest] = (
+        key,
+        OcrArtifact(text=INK, mean_confidence=0.5, truncated=False, created_at=EARLIER),
+    )
+    replay = _bench(
+        recognizers=(_Recognizer(TEXTRACT, text=OTHER),), index=_Index(None), cache=cache
+    )
+    page = _only(replay.run())
+    assert page.cached_provenance == OcrProvenance()
+    assert page.page.provenance.recognizers == key.recognizers
+    assert page.page.provenance.model_fingerprint == ADJUDICATOR
+
+
+def test_a_fresh_page_reports_no_cached_provenance():
+    """``None`` exactly when nothing was served from the cache."""
+    merged = _bench(recognizers=(_Recognizer(TEXTRACT, text=OTHER),), index=_Index(None))
+    assert _only(merged.run()).cached_provenance is None
+    short = _bench(recognizers=(_Recognizer(TEXTRACT, text=INK),), index=_Index(_indexed(INK)))
+    assert _only(short.run()).cached_provenance is None
+
+
 def test_a_hit_reports_the_row_s_own_extraction_time():
     cache = _Cache()
     bench = _bench(
@@ -849,6 +986,89 @@ def test_a_row_under_other_inputs_is_reported_rather_than_served():
     assert degradation.kind is DegradationKind.CACHE_MISS_KEY_CHANGED
     assert degradation.subject == PAGE_A
     assert cache.puts[0][0].digest in degradation.detail
+    assert _only(result).tier_reached == 3
+
+
+# ────────── a rewrite of the bytes, with the pixels unchanged ──────────
+
+
+def _rewritten(cache: _Cache, *, page_hash: str = HASH_B) -> _Bench:
+    """Replay the same page under a different ``page_hash``, which is what the tablet does."""
+    return _bench(
+        recognizers=(_Recognizer(TEXTRACT, text=OTHER),),
+        index=_Index(None),
+        cache=cache,
+        pipeline=_Pipeline(_artifact(page_hash=page_hash)),
+    )
+
+
+def test_a_rewritten_page_reuses_the_reading_its_pixels_already_have():
+    """Measured: 18,813 bytes became 24,534 with the ink unchanged, and it used to re-bill."""
+    cache = _Cache()
+    _rewritten(cache, page_hash=HASH_A).run()
+    replay = _rewritten(cache)
+    result = replay.run()
+    page = _only(result)
+    assert page.cached is True
+    assert page.tier_reached == 0
+    assert page.page.text == INK
+    assert replay.recognizers[0].calls == 0
+    assert replay.reader.requests == []
+    assert replay.adjudicator.requests == []
+
+
+def test_a_reused_equivalent_raster_is_reported_as_its_own_degradation():
+    cache = _Cache()
+    first = _rewritten(cache, page_hash=HASH_A)
+    first.run()
+    result = _rewritten(cache).run()
+    assert len(result.degradations) == 1
+    degradation = result.degradations[0]
+    assert degradation.kind is DegradationKind.CACHE_HIT_RASTER_EQUIVALENT
+    assert degradation.subject == PAGE_A
+    assert degradation.substituted == NOW.isoformat()
+
+
+def test_an_equivalent_raster_hit_ends_the_lookup_before_superseded_is_asked():
+    """A hit is a hit; ``superseded`` only ever explains a miss."""
+    cache = _Cache()
+    _rewritten(cache, page_hash=HASH_A).run()
+    asked_before = len(cache.supersedes)
+    _rewritten(cache).run()
+    assert cache.equivalents[-1].page_hash == HASH_B
+    assert len(cache.supersedes) == asked_before
+
+
+def test_a_truncated_equivalent_row_is_read_as_a_miss_and_recomputed():
+    """The same rule the exact lookup applies: a half page is a wrong page."""
+    cache = _Cache()
+    seeded = _rewritten(cache, page_hash=HASH_A)
+    seeded.run()
+    key = cache.puts[0][0]
+    cache.rows[key.digest] = (
+        key,
+        OcrArtifact(text="half a p", mean_confidence=None, truncated=True, created_at=EARLIER),
+    )
+    replay = _rewritten(cache)
+    page = _only(replay.run())
+    assert page.cached is False
+    assert page.tier_reached == 3
+    assert replay.recognizers[0].calls == 1
+
+
+def test_a_rewrite_under_moved_inputs_is_still_a_plain_miss():
+    """Only ``page_hash`` may differ, so a moved adjudicator is paid for as before."""
+    cache = _Cache()
+    _rewritten(cache, page_hash=HASH_A).run()
+    moved = _bench(
+        recognizers=(_Recognizer(TEXTRACT, text=OTHER),),
+        index=_Index(None),
+        cache=cache,
+        pipeline=_Pipeline(_artifact(page_hash=HASH_B)),
+        adjudicator=_Model("adjudicator-fingerprint-2", text=INK),
+    )
+    result = moved.run()
+    assert result.degradations == ()
     assert _only(result).tier_reached == 3
 
 

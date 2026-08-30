@@ -49,6 +49,13 @@ cache tables is impossible -- a digest folds ``render_digest``,
 ``raster_digest``, ``request_digest`` and ``model_fingerprint``, none of which the
 legacy row recorded -- and synthesising one would manufacture exactly the
 stale-hit-that-looks-valid the new keys exist to prevent.
+
+Refusing is not the same as stranding the user, though it was until this module
+started attaching a ``remediation``. This refusal is what **every** holder of a
+legacy ``sync.db`` meets on their first run of this build, and it exits
+``EX_CONFIG`` -- the environment is wrong, not the request -- so there is always an
+action available and the error now names it. Two situations, two sentences:
+:data:`LEGACY_REMEDIATION_TEMPLATE` and :data:`NEWER_SCHEMA_REMEDIATION`.
 """
 
 from __future__ import annotations
@@ -63,8 +70,10 @@ if TYPE_CHECKING:
     from rmspec.persistence._sqlite import StoreConnection
 
 __all__ = [
+    "LEGACY_REMEDIATION_TEMPLATE",
     "LEGACY_TABLES",
     "MIGRATIONS",
+    "NEWER_SCHEMA_REMEDIATION",
     "SCHEMA_VERSION",
     "Migration",
     "apply_migrations",
@@ -81,6 +90,23 @@ SCHEMA_VERSION: Final = 1
 #: Tables that only a legacy database has. Their presence at ``user_version`` 0
 #: is what tells a pre-rewrite file apart from an empty one.
 LEGACY_TABLES: Final = frozenset({"schema_version", "documents", "pages", "sync_log"})
+
+#: What a user can do about a file this build refuses to migrate forward, and the
+#: reason the refusal is not the end of the story. Every user of the legacy CLI
+#: reaches this on their first run of this build, so the sentence is reviewed here
+#: rather than assembled inside the ``raise``. Both options are measured: moving the
+#: file aside lets ``open`` create a current one, and pointing ``RMSPEC_SYNC_DB`` at a
+#: new path leaves the old file in place for
+#: ``StoreMaintenance.rescue_legacy_page_texts`` to lift its paid OCR text out of.
+#: ``{store}`` is the label the error already carries, which is the file's name --
+#: this package never learns the path the user set, by design.
+LEGACY_REMEDIATION_TEMPLATE: Final = "move {store} aside, or set RMSPEC_SYNC_DB to a new path"
+
+#: What a user can do about a file a *newer* build wrote. Downgrading the file is not
+#: an option this package offers -- ``PRAGMA user_version`` records that a migration
+#: ran and nothing here reverses one -- so the two real moves are to run the build
+#: that wrote it or to give this one its own file.
+NEWER_SCHEMA_REMEDIATION: Final = "upgrade rmspec, or set RMSPEC_SYNC_DB to a new path"
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,13 +288,26 @@ def apply_migrations(conn: StoreConnection, /) -> int:
         Deliberately a subclass of ``StoreUnavailableError``, so a caller that
         only cares that the store did not open keeps working, while the CLI can
         map this one to the exit code that means "delete the database".
+
+        Both refusals carry a ``remediation``, and they carry *different* ones:
+        :data:`NEWER_SCHEMA_REMEDIATION` for a file this build is too old for, and
+        :data:`LEGACY_REMEDIATION_TEMPLATE` for a pre-rewrite file, which is the
+        one every user of the legacy CLI meets on their first run. Refusing is
+        correct -- migrating a legacy row would have to invent the four digests it
+        never recorded -- but a refusal with nothing to do next is an upgrade wall,
+        and this is the layer that knows which of the two situations it is in.
     StoreUnavailableError
         A statement failed. The transaction is rolled back, so the previous
         version and shape survive.
     """
     found = _found_version(conn)
     if found > SCHEMA_VERSION:
-        raise StoreSchemaMismatchError(store=conn.store, found=found, expected=SCHEMA_VERSION)
+        raise StoreSchemaMismatchError(
+            store=conn.store,
+            found=found,
+            expected=SCHEMA_VERSION,
+            remediation=NEWER_SCHEMA_REMEDIATION,
+        )
     if found == 0:
         legacy = _legacy_tables_present(conn)
         if legacy:
@@ -281,6 +320,7 @@ def apply_migrations(conn: StoreConnection, /) -> int:
                 store=conn.store,
                 found=found,
                 expected=SCHEMA_VERSION,
+                remediation=LEGACY_REMEDIATION_TEMPLATE.format(store=conn.store),
             )
     pending = tuple(step for step in MIGRATIONS if step.version > found)
     for step in pending:

@@ -1,22 +1,22 @@
-"""The six measurements this package's design rests on, re-taken against the real tablet.
+"""The eight measurements this package's design rests on, re-taken against the real tablet.
 
 Deselected by default. Every mise task passes ``-m 'not hardware'``, so the default suite and
 CI never reach this file; ``mise run test-hardware`` is the only thing that does, and it needs
 the tablet plugged in. The marker is applied at module scope *and* on each test: the module
-marker is what makes a seventh test impossible to add without it, and the per-test decorators
-are what a reader grepping for the marker finds.
+marker is what makes an unmarked test impossible to add here, and the per-test decorators are
+what a reader grepping for the marker finds.
 
 These tests exist because every number in ``DESIGN-step4-device.md`` came from one probe pass
 on 2026-08-29, and a firmware update or a settings change can falsify any of them. When one
 goes red the answer is to re-measure and update the design, not to relax the assertion.
 
-A detached tablet makes all six fail with ``DeviceUnreachable``, whose remediation already
+A detached tablet makes all eight fail with ``DeviceUnreachable``, whose remediation already
 reads "check the cable and the host". That is deliberate rather than a rough edge: selecting
 ``-m hardware`` is an assertion that the tablet is plugged in, and a skip would let a run that
 re-measured nothing read as a run that confirmed everything.
 
-Six tests, and one port with none: the uploader
------------------------------------------------
+Eight tests, and one port with none: the uploader
+------------------------------------------------
 :class:`~rmspec.device.usb.UsbUploader` is the only device port in this package that is *not*
 re-measured here, and the omission is the point rather than an oversight. ``POST /upload``
 **creates** a document, and the firmware's route table is closed at six path families with
@@ -51,11 +51,33 @@ request method meant even a ``GET`` to it could not be proven non-mutating. It i
 this package sends it, and it is exactly the request this module must never make.
 
 **Nothing here writes over SSH.** :class:`~rmspec.device.ssh.SshUploader` is never constructed,
-no ``systemctl`` is run, and no service is restarted. The only commands sent are the four
-:class:`~rmspec.device.ssh.SshFacts` builds, each a ``sed``, a ``cat`` or a ``df`` against a
-path ``addresses.py`` spells, plus one SFTP *read* of
-``<xochitl>/rm-search-index.db`` -- also a path ``addresses.py`` spells, and the only file in
-the store this module opens.
+:class:`~rmspec.device.writeback.SshSceneWriter` is constructed but only
+:meth:`~rmspec.device.writeback.SshSceneWriter.verify` is ever called on it, and **no service is
+restarted**. The commands sent are the four :class:`~rmspec.device.ssh.SshFacts` builds -- each a
+``sed``, a ``cat`` or a ``df`` against a path ``addresses.py`` spells -- one ``ls -A`` of the
+xochitl root, and the two reads the guarded restart takes *before* it acts:
+``systemctl is-active`` and a ``cat`` of the boot identifier. There is no ``mkdir``, no ``mv``
+and no ``rm``, which are the three commands the write path needs, so a write is not merely
+unwritten here: the temp file it would rename has nothing to create it.
+
+``systemctl`` therefore appears in this module, which it did not before, and the line between
+what is read-only about it and what is not is worth stating: ``is-active`` reports state and
+changes none, while ``reset-failed`` mutates a counter and ``restart`` spends one of the four
+starts per ten minutes that the firmware allows before it isolates ``emergency.target``.
+:data:`~rmspec.device.ssh.RESET_FAILED_TEMPLATE` and
+:data:`~rmspec.device.ssh.RESTART_TEMPLATE` are **never** built here. The refusals they trigger
+are asserted in ``test_device_ssh.py`` against a command log, which is where a test of a
+restart belongs; what needs the real tablet is the *precondition* -- that the probe answers
+``active`` and the fence answers a stable identifier -- because a guard whose reads do not work
+on the real device refuses every upload instead of protecting one.
+
+The SFTP *reads* are ``<xochitl>/rm-search-index.db``, one or more ``.content`` sidecars, and
+one page's ``.rm``. The last of those is the widening a reader should notice, and it is why
+:func:`test_the_write_precondition_agrees_with_the_real_page` exists at all: the
+concurrency precondition is a comparison of an artifact's digest across two reads, so proving
+it works against the real filesystem requires reading a real artifact. No ``.metadata`` is
+read at all -- the page is found from the root listing and a ``.content``, neither of which
+carries a document title.
 
 **Nothing here reads the tablet's own configuration file.** It holds a cleartext developer
 password and two bearer tokens, ``tests/architecture/test_secret_containment.py`` fails the
@@ -69,15 +91,22 @@ set relation or a firmware constant. No document title, no page identifier and n
 compared against a literal or captured into a file, so a green run reveals nothing about the
 library it ran against and nothing from the device is committed.
 
-That rule is strictest for the search index, because unlike everything else this module
-touches, the index *is* the user's handwriting -- 90 of the 92 rows on the measured device
-carry recognised text.
-:func:`test_the_search_index_is_a_whole_sqlite_image_of_a_plausible_size` therefore reads it
-into memory, looks at the first sixteen bytes and the length, and stops. It does not decode the
+That rule is strictest for the two things that *are* the user's handwriting: the search index,
+90 of whose 92 rows on the measured device carry recognised text, and the one page artifact the
+precondition test reads.
+
+:func:`test_the_search_index_is_a_whole_sqlite_image_of_a_plausible_size` reads the index into
+memory, looks at the first sixteen bytes and the length, and stops. It does not decode the
 database and asserts on no row; this package cannot even import ``sqlite3``, so the reading
 half is unreachable from here by construction rather than by restraint. The bytes are never
 written to local disk, which is the rule that replaced an earlier session's ``scp`` of that
 same file.
+
+:func:`test_the_write_precondition_agrees_with_the_real_page` reads one page's strokes and
+asserts on nothing but their SHA-256 -- against *itself*, twice, never against a literal. A
+digest is not the content and the test commits none, so a green run says the check works and
+says nothing about what is on the page. The page id it uses comes from the device and is never
+compared with anything either.
 
 Authentication
 --------------
@@ -109,9 +138,27 @@ from rmspec.device import (
     UsbFacts,
     UsbWebApi,
 )
+from rmspec.device._pages import decode_page_order
 from rmspec.device._wire import LISTING_ROUTE, decode_entries, entry_parent
-from rmspec.device.addresses import DEFAULT_USB_HOST, SSH_PORT, Endpoint
-from rmspec.device.ssh import SERIAL_FIELD
+from rmspec.device.addresses import (
+    BOOT_ID,
+    CONTENT_SUFFIX,
+    DEFAULT_USB_HOST,
+    SSH_PORT,
+    Endpoint,
+    RemoteCommand,
+    RemotePath,
+    document_paths,
+)
+from rmspec.device.ssh import (
+    ACTIVE_STATE,
+    BOOT_ID_TEMPLATE,
+    NO_SERIAL_SOURCE,
+    SERVICE_STATE_TEMPLATE,
+    UI_SERVICE,
+)
+from rmspec.device.writeback import ScenePrecondition, SshSceneWriter
+from rmspec.domain.errors import DeviceProtocolError, TransportKind
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -120,6 +167,14 @@ pytestmark = pytest.mark.hardware
 
 #: Where the USB web API answers, and the origin every route below is appended to.
 WEB_ENDPOINT: Final = Endpoint()
+
+#: The xochitl store on the attached device.
+STORE_ROOT: Final = RemotePath.root()
+
+#: A digest no page can have: 64 zeroes. Used to make the precondition *fail* against a real
+#: read without any second writer, which is the only half of the check that cannot be
+#: demonstrated by simply reading the same file twice.
+IMPOSSIBLE_DIGEST: Final = "0" * 64
 
 #: Where the SSH daemon answers. Spelled from ``addresses.py`` rather than resolved from an
 #: ``~/.ssh/config`` host alias, because ``ParamikoShell`` does not read that file.
@@ -166,6 +221,15 @@ SEARCH_INDEX_BYTES: Final = 503_808
 #: while the index is rebuilt at a different length, and it is precisely what a torn read of a
 #: file being written breaks.
 SQLITE_PAGE_BYTES: Final = 4096
+
+#: Characters in a canonical uuid, which is what the kernel writes into the boot identifier.
+#: The length is asserted rather than the value: a truncated or empty read would make the reboot
+#: fence unarmable and every SSH upload refuse.
+BOOT_ID_LENGTH: Final = 36
+
+#: Hyphens in that shape. Together with the length, enough to say "this is a uuid" without
+#: importing a parser or naming the value.
+BOOT_ID_GROUPS: Final = 4
 
 #: How far from :data:`SEARCH_INDEX_BYTES` the live index may be before this test calls the
 #: reading implausible. A factor rather than a byte tolerance, because the index grows with the
@@ -340,8 +404,17 @@ def test_the_head_probe_answers_and_the_facts_source_reports_attached(api: UsbWe
 
     facts = UsbFacts(api=api).read_facts()
 
-    assert facts.unsupported == UNANSWERABLE_FACTS
+    assert facts.unsupported_names == UNANSWERABLE_FACTS
     assert (facts.firmware, facts.model, facts.serial) == (None, None, None)
+    # Against the live tablet, not just a fake: the two fields SSH answers on this very device
+    # are annotated as answerable there, and the one it does not is annotated as answerable
+    # nowhere. `test_the_facts_are_the_ones_this_firmware_reports` below is the other half --
+    # it reads `firmware` and `model` over SSH on the same run.
+    assert {entry.name: entry.supported_by for entry in facts.alternatives} == {
+        "firmware": (TransportKind.SSH,),
+        "model": (TransportKind.SSH,),
+        "serial": (),
+    }
 
 
 @pytest.mark.hardware
@@ -428,7 +501,8 @@ def test_the_facts_are_the_ones_this_firmware_reports(shell: ParamikoShell) -> N
     assert facts.firmware == FIRMWARE
     assert facts.model == MODEL
     assert facts.serial is None
-    assert facts.unsupported == frozenset({SERIAL_FIELD})
+    assert facts.unsupported == frozenset({NO_SERIAL_SOURCE})
+    assert facts.alternatives[0].supported_by == ()
 
 
 @pytest.mark.hardware
@@ -455,3 +529,127 @@ def test_the_search_index_is_a_whole_sqlite_image_of_a_plausible_size(
     assert len(image) % SQLITE_PAGE_BYTES == 0
     assert len(image) >= SEARCH_INDEX_BYTES // PLAUSIBLE_FACTOR
     assert len(image) <= SEARCH_INDEX_BYTES * PLAUSIBLE_FACTOR
+
+
+@pytest.mark.hardware
+def test_the_restart_guard_can_read_what_it_refuses_on(shell: ParamikoShell) -> None:
+    """The two reads the guarded restart takes before it acts. Sends neither command that acts.
+
+    :meth:`~rmspec.device.ssh.SshUploader._refresh` refuses to restart unless both of these
+    answer, so a guard whose reads do not work against the real firmware does not fail safe --
+    it fails *closed*, and every SSH upload stops working. That makes these two the only halves
+    of the guard worth taking against hardware, and the halves that must never be:
+    ``reset-failed`` mutates a counter and ``restart`` spends one of four starts per ten minutes.
+    Neither template is built anywhere in this module.
+
+    Three claims.
+
+    **The probe answers exactly** :data:`~rmspec.device.ssh.ACTIVE_STATE`. The unit is
+    ``loaded/active/running`` per ``specs/device/3.27.3.0/systemd.json`` claim
+    ``unit:xochitl.service``, and it must be: it is the process serving the USB web API that the
+    tests above just used, so any other answer here would mean the tablet's UI is down.
+
+    **The probe exits zero even so.** ``is-active`` exits 3 for every state that is not active,
+    and the ``|| true`` in the template is what keeps the *state* reaching the adapter as stdout
+    instead of being replaced by an exit status. This is the measurement that the shell on this
+    firmware honours the operator at all -- a ``systemctl is-active`` that raised here would mean
+    the guard could never read a state and would refuse every upload.
+
+    **The fence is a stable 36-character identifier.** Two reads, one value: a fence that
+    changed while nothing restarted would make every upload report a phantom reboot. Its shape is
+    asserted, its value is not compared with any literal, and it is not committed -- it is a
+    per-boot random value that identifies no user and no device across boots, but the rule in this
+    module is that nothing from the tablet is captured, and it holds here too.
+    """
+    state = shell.run(RemoteCommand.of(SERVICE_STATE_TEMPLATE, UI_SERVICE))
+    fence = RemoteCommand.of(BOOT_ID_TEMPLATE, RemotePath.absolute(BOOT_ID))
+    first = shell.run(fence).strip()
+    second = shell.run(fence).strip()
+
+    assert state.strip() == ACTIVE_STATE
+    assert first == second
+    assert len(first) == BOOT_ID_LENGTH
+    assert first.count("-") == BOOT_ID_GROUPS
+    assert first == first.lower()
+
+
+def _first_page_on_the_device(shell: ParamikoShell) -> tuple[str, str]:
+    """Find one real page to check the precondition against, reading no ``.metadata``.
+
+    Walks the root listing for ``.content`` sidecars and returns the first document whose
+    sidecar claims at least one page. A ``.content`` carries the page order and the layout
+    facts and no document title, so this route to a page id exposes strictly less of the
+    library than :meth:`~rmspec.device.ssh.SshCatalog.list_documents` would.
+
+    Parameters
+    ----------
+    shell
+        The connected shell.
+
+    Returns
+    -------
+    tuple[str, str]
+        The document uuid and the first page id its sidecar records.
+    """
+    stems = sorted(
+        name.removesuffix(CONTENT_SUFFIX)
+        for name in shell.list_dir(STORE_ROOT)
+        if name.endswith(CONTENT_SUFFIX)
+    )
+    for doc_uuid in stems:
+        order = decode_page_order(shell.read_file(document_paths(STORE_ROOT, doc_uuid).content))
+        if order:
+            return doc_uuid, order[0].page_id
+    pytest.fail(
+        "no document on the attached tablet records a page, so the precondition cannot be "
+        "checked against a real artifact. This is a fact about the library, not about the "
+        "code -- but it is not a pass either."
+    )
+
+
+@pytest.mark.hardware
+def test_the_write_precondition_agrees_with_the_real_page(shell: ParamikoShell) -> None:
+    """The concurrency precondition, run against a real page. Reads only; writes nothing.
+
+    Three claims, and the third is the one that matters.
+
+    **An artifact's identity is stable across two real reads.** Two ``read_scene`` calls over
+    the live SFTP channel produce equal preconditions. That is not a tautology: it is the
+    property the whole design rests on, because if a page's bytes were not byte-stable at rest
+    -- if the firmware rewrote or re-serialised them between reads -- then every precondition
+    would fail spuriously and refusing on mismatch would be useless. It also proves the read is
+    whole rather than truncated, twice, since a torn read would differ from the other one.
+
+    **The check passes against the artifact it was taken from.** ``verify`` returns the same
+    bytes it read.
+
+    **The check fails against an identity the artifact does not have**, with the page's path in
+    ``route`` and the real identity in ``got``. This is what makes the refusal a measured
+    behaviour rather than an in-memory one: the digest it compares against came off the device
+    on this run. :data:`IMPOSSIBLE_DIGEST` stands in for the concurrent human -- the adapter
+    cannot tell "the digest I was given is not this file's" apart from "somebody changed this
+    file", because they are the same condition.
+
+    What this test deliberately cannot show is that a write is refused, because reaching
+    ``write_scene``'s check means first staging a temp file on the device. That half is asserted
+    in ``test_device_writeback.py`` against an in-memory store, and the two together are the
+    whole property: the comparison is measured here, the refusal it triggers is measured there.
+    """
+    doc_uuid, page_id = _first_page_on_the_device(shell)
+    writer = SshSceneWriter(shell=shell, root=STORE_ROOT)
+
+    first = writer.read_scene(doc_uuid, page_id)
+    second = writer.read_scene(doc_uuid, page_id)
+
+    assert first.precondition == second.precondition
+    assert writer.verify(first.precondition) == first.scene
+    assert first.precondition.digest != IMPOSSIBLE_DIGEST
+
+    stale = ScenePrecondition(doc_uuid=doc_uuid, page_id=page_id, digest=IMPOSSIBLE_DIGEST)
+    with pytest.raises(DeviceProtocolError) as caught:
+        writer.verify(stale)
+
+    assert caught.value.transport is TransportKind.SSH
+    assert caught.value.route == first.path.value
+    assert caught.value.expected == f"sha256 {IMPOSSIBLE_DIGEST}"
+    assert caught.value.got != caught.value.expected

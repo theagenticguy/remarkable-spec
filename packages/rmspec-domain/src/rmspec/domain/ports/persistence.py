@@ -421,7 +421,18 @@ class OcrCache(Protocol):
     the model id and DPI as non-key columns, which made exactly that stale hit
     representable.
 
-    All three methods are total: none raises. A read fault is a miss, a write
+    Lookup is by ``key.digest`` with one sanctioned exception, and it is spelled
+    out as its own method rather than hidden in :meth:`get`:
+    :meth:`equivalent_raster` allows ``page_hash`` -- and only ``page_hash`` -- to
+    differ, because that component fingerprints the bytes the page is stored as
+    while every reader below tier 0 reads the pixels. A caller that serves such a
+    row has to say so, which is what
+    :attr:`~rmspec.domain.errors.DegradationKind.CACHE_HIT_RASTER_EQUIVALENT` is
+    for. Keeping it out of :meth:`get` is the point: a fallback nobody asked for
+    is how a stale hit becomes invisible, and a second named method is a fallback
+    a caller opts into and reports.
+
+    All four methods are total: none raises. A read fault is a miss, a write
     fault is dropped after the adapter logs it, and a cache that cannot be opened
     at all fails when it is constructed in the ``Scope.APP`` provider. That is
     sound because a miss only costs a recomputation, and it means the error
@@ -458,9 +469,10 @@ class OcrCache(Protocol):
     inside a use case; ``InMemoryOcrCache`` in ``rmspec-persistence.testing``,
     a dict keyed by digest, contract-exact because the port declares no error it
     cannot produce. The double takes ``fail_reads`` and ``fail_writes`` flags and
-    counts its calls, because totality is otherwise unassertable: through this
-    port a swallowed fault and a genuine miss are the same ``None``, so only a
-    double that can be told to fault proves the swallow happened at all.
+    counts every one of the four methods' calls, because totality is otherwise
+    unassertable: through this port a swallowed fault and a genuine miss are the
+    same ``None``, so only a double that can be told to fault proves the swallow
+    happened at all.
     """
 
     def get(self, key: OcrCacheKey, /) -> OcrArtifact | None:
@@ -530,12 +542,73 @@ class OcrCache(Protocol):
         """
         ...
 
+    def equivalent_raster(self, key: OcrCacheKey, /) -> OcrArtifact | None:
+        """Return a stored artifact for identical pixels under a different page hash.
+
+        The one fallback this port sanctions, and it is sound because the single
+        component it lets differ is the only one that does not describe the work.
+        ``page_hash`` fingerprints the *bytes* the page is stored as; every tier
+        below tier 0 reads the *pixels*. A stored row whose ``render_digest``,
+        ``raster_digest``, ``recognizers``, ``model_fingerprint`` and
+        ``request_digest`` all equal this key's was produced from the same pixels
+        by the same engines under the same prompt by the same model, so serving it
+        is not a stale hit: it is the same answer, reached from bytes that were
+        rewritten underneath it. The matched set is exactly
+        :attr:`~rmspec.domain.models.OcrCacheKey.raster_identity`, which exists so
+        that no two implementations can disagree about what "the same work" means.
+
+        Measured, not hypothetical: the tablet rewrote one page from 18,813 to
+        24,534 bytes with the ink unchanged, so ``page_hash`` moved,
+        ``raster_digest`` did not, and :meth:`get` missed on a page nobody had
+        edited. :meth:`superseded` cannot cover it, twice over -- it matches on
+        *equal* ``page_hash``, which is precisely the component that moved, and it
+        returns a key rather than an artifact by design.
+
+        A caller that serves this row must report
+        :attr:`~rmspec.domain.errors.DegradationKind.CACHE_HIT_RASTER_EQUIVALENT`.
+        The row it used is not the row its key names, and that is a fact about the
+        run rather than an implementation detail.
+
+        Declared on this port and not on :class:`DiagramCache`, unlike
+        :meth:`superseded`: the matched set names ``recognizers``, which
+        :class:`~rmspec.domain.models.DiagramCacheKey` does not have, so this
+        method is not expressible over the diagram key at all and cannot be lifted
+        into the one adapter class the two ports share. That class still
+        implements the three methods they do share; this is the fourth, and it is
+        OCR's alone.
+
+        When several stored artifacts qualify, the one whose stored key's
+        ``digest`` is greatest in lexicographic order is returned -- the same
+        arbitrary-but-declared rule :meth:`superseded` follows, so that the double
+        and the adapter cannot disagree.
+
+        Parameters
+        ----------
+        key
+            The key that missed. Every component except ``page_hash`` is matched,
+            and ``page_hash`` must differ: a stored row for this very page is
+            :meth:`get`'s business or :meth:`superseded`'s, never this method's.
+
+        Returns
+        -------
+        OcrArtifact | None
+            A stored artifact produced from identical pixels under a different
+            ``page_hash``; ``None`` when there is none and ``None`` on any read
+            fault, on the same totality rule as the other three methods. A
+            returned artifact may have ``truncated`` set, exactly as :meth:`get`'s
+            may, and the caller re-decides from the flag the same way.
+        """
+        ...
+
 
 class DiagramCache(Protocol):
     """Memoize Mermaid diagram extraction under a fully-specified key.
 
     Same contract as :class:`OcrCache` -- exact ``key.digest`` lookup, no
-    fallback, all three methods total -- over the diagram artifact type. See that
+    fallback, its three methods total -- over the diagram artifact type. Three,
+    not four: ``OcrCache`` carries an ``equivalent_raster`` fallback whose matched
+    set names ``recognizers``, a component :class:`~rmspec.domain.models.DiagramCacheKey`
+    does not have, so the method is not expressible here. See that
     class for why the two are separate Protocols rather than one generic, why an
     unavailable cache fails at container composition instead of at a call site,
     and why ``key.raster_digest`` means a lookup only ever saves the model call and
@@ -604,9 +677,11 @@ class DiagramCache(Protocol):
         :meth:`OcrCache.superseded`: same ``page_hash``, different ``digest``,
         greatest digest wins, diagnostic only. It is declared on both caches
         because ``DegradationKind.CACHE_MISS_KEY_CHANGED`` is one member serving
-        both passes, and because the two ports are deliberately implemented by one
-        adapter class over two tables -- a method on only one of them would make
-        that claim false.
+        both passes, and because the three methods the two ports share are
+        deliberately implemented by one adapter class over two tables -- a *shared*
+        method on only one of them would make that claim false.
+        :meth:`OcrCache.equivalent_raster` is the declared exception and is not
+        shared: its matched set names a component this key does not have.
 
         Parameters
         ----------

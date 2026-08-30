@@ -511,7 +511,10 @@ class SqliteDatabase:
             did not take effect.
         StoreSchemaMismatchError
             The file's schema is newer than this build's, or it is a legacy
-            database.
+            database. Carries the ``remediation``
+            :func:`~rmspec.persistence.migrations.apply_migrations` authored for
+            whichever of the two it is -- this is the failure every user of the
+            legacy CLI reaches on their first run, so it never arrives bare.
         """
         store = path.name
         if sqlite3.sqlite_version_info < MINIMUM_SQLITE_VERSION:

@@ -24,6 +24,7 @@ from rmspec.domain.models import (
     PenColor,
     PenType,
     Point,
+    Rgba,
     Stroke,
     TextBlock,
 )
@@ -96,9 +97,16 @@ def stroke(
     pen: PenType = PenType.FINELINER_1,
     color: PenColor = PenColor.BLACK,
     thickness_scale: float = 2.0,
+    color_override: Rgba | None = None,
 ) -> Stroke:
     """Build one stroke from samples."""
-    return Stroke(pen=pen, color=color, thickness_scale=thickness_scale, points=points)
+    return Stroke(
+        pen=pen,
+        color=color,
+        color_override=color_override,
+        thickness_scale=thickness_scale,
+        points=points,
+    )
 
 
 def layer(
@@ -111,12 +119,21 @@ def layer(
     return Layer(name=name, visible=visible, strokes=strokes, text_blocks=text_blocks)
 
 
-def page(*layers: Layer, defects: tuple[PageDefect, ...] = ()) -> Page:
-    """Build a readable page from layers, at the manifest's page identity."""
+def page(
+    *layers: Layer,
+    text_blocks: tuple[TextBlock, ...] = (),
+    defects: tuple[PageDefect, ...] = (),
+) -> Page:
+    """Build a readable page from layers, at the manifest's page identity.
+
+    ``text_blocks`` is the page's *own* typed text -- ``PageContent.text_blocks``, the
+    page-scoped block naming no layer -- and is a different field from the identically named
+    keyword on :func:`layer`. The two are not alternatives and a renderer owes both.
+    """
     return Page(
         page_id=PageId(uuid=ZERO_PAGE_UUID),
         index=0,
-        content=PageContent(layers=layers, defects=defects),
+        content=PageContent(layers=layers, text_blocks=text_blocks, defects=defects),
     )
 
 

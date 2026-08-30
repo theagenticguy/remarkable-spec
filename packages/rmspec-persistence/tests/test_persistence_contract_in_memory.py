@@ -21,6 +21,7 @@ from persistence_contracts import (
     ArtifactCache,
     DiagramCacheCases,
     DocumentSyncStoreContract,
+    OcrArtifactCache,
     OcrCacheCases,
     SyncAuditLogContract,
 )
@@ -105,13 +106,13 @@ class TestInMemoryOcrCache(OcrCacheCases):
     """The OCR cache contract over a dict."""
 
     @pytest.fixture
-    def cache(self) -> ArtifactCache[OcrCacheKey, OcrArtifact]:
+    def cache(self) -> OcrArtifactCache:
         """Return the double.
 
         Returns
         -------
-        ArtifactCache[OcrCacheKey, OcrArtifact]
-            The double.
+        OcrArtifactCache
+            The double, through the four-method view so ``ty`` checks the fourth.
         """
         return InMemoryOcrCache()
 

@@ -1,6 +1,6 @@
 """Ports for the formats slice: getting parsed reMarkable documents into the app layer.
 
-Two Protocols and one sentinel live here and nothing else:
+Three Protocols, one value object and one sentinel live here and nothing else:
 
 :class:`DocumentRepository`
     The app-facing altitude. Identity in, domain models out. Every use case that
@@ -10,6 +10,13 @@ Two Protocols and one sentinel live here and nothing else:
     to, so exactly one package in the system imports ``rmscene``. Kept as a
     separate port because ``rmspec inspect rm <path>`` decodes a user-supplied
     file that has no document identity and no xochitl root at all.
+:class:`SceneAppender`
+    Scene bytes plus ink in, scene bytes out. The write direction of the same
+    format, and a *separate* port rather than a second method on
+    :class:`PageCodec` -- see below.
+:class:`SceneEdit`
+    What :meth:`SceneAppender.append_strokes` returns: the new bytes plus the two
+    decisions the adapter made on the caller's behalf.
 :data:`ABSENT_ARTIFACT_FINGERPRINT`
     The digest :meth:`DocumentRepository.page_fingerprint` returns for a page the
     document claims but stores no scene artifact for, so a blank page of an
@@ -71,6 +78,51 @@ supported-version set. A multi-version codec is a composite adapter that
 dispatches internally; the observed version is carried on the raised error, not
 returned for callers to compare against integers.
 
+**Writing is its own port, and the reason is mechanical.** :class:`PageCodec` has
+exactly one method so that a conforming fake is one canned return value, and every
+fake in the workspace is annotated against it -- ``rmspec-app``'s render tests
+include a one-method double declared as a ``PageCodec``. A second method there would
+stop all of them satisfying the port they were written against, to publish something
+only a writer calls. So the encoder gets :class:`SceneAppender`, and the split says
+something true rather than merely convenient: reading a page is available everywhere
+and safe by construction, while writing one is a capability a composition root binds
+deliberately, over a transport that has to hold a precondition, and its failures are a
+different set. A container that only reads never resolves the writer at all.
+
+**The write surface is additive and nothing else.** There is no method that edits,
+reorders or removes what is already on a page. That is not an unfinished surface: the
+tablet's own guidance is that its reader must not be running while its files are
+touched, so every write here races a human who may be drawing. Appending cannot
+destroy an existing stroke even when that race is lost, which is the only class of
+edit for which that is true, and it is the reason the port stops there. The
+transport's own precondition -- capture the artifact's identity at read time,
+re-check it immediately before the write, refuse if it moved -- is a device-slice
+concern and is not restated here.
+
+**Ink, not typed text, and that is a measurement.** A page-scoped typed-text block
+written into a real page by a foreign author was *preserved* by firmware 3.27.3.0
+across the tablet's own re-save, at the exact position set, with the foreign author
+id intact -- and was never *drawn*. Strokes are what the tablet renders. So a reply a
+human can read has to be ink, and a port method that wrote text would put bytes on a
+page nobody can see. Text becomes ink by tracing glyph outlines into polylines, which
+happens above this port; what arrives here is
+:class:`~rmspec.domain.models.Stroke`.
+
+**Coordinates are the domain's, not the wire's.** :class:`SceneAppender` takes strokes
+whose samples are already in screen units with x measured from the centre of the page,
+because that is what :class:`~rmspec.domain.models.Point` means everywhere else and
+what ``ports/render.py`` draws. A port that took normalised ``[0, 1]`` coordinates and
+scaled them inside the adapter would mean the ink that got written is not the ink that
+got previewed, and the centre-origin convention would be stated in two places.
+
+**No bounds check, measured rather than assumed.** The page's own scene info declares a
+paper size, and it is tempting to refuse ink outside it, since ink off the page is
+invisible to the human -- the same defect as the text block above. The reference corpus
+refutes it: 13 of its 30 non-empty pages carry strokes outside the declared x range and
+17 outside the y range, one of them reaching y 81,159 on a page that declares 2,160.
+So a coordinate range is not a validity test on this format, and the honest check is to
+render the proposed page with this project's own renderer before writing it.
+
 **Failure altitude.** An exception means the request cannot be answered at all:
 no such document, an unreadable store, document-level metadata that will not
 decode, or a page id the document does not claim. Everything the store *can*
@@ -130,13 +182,16 @@ format, so a second codec omits fields rather than fabricating them. Binding a
 different codec does not make the format free.
 
 This module expects ``DocumentId``, ``PageId``, ``DocumentSummary``,
-``Document``, ``Page``, and ``PageContent`` from :mod:`rmspec.domain.models`, and
-names its errors from :mod:`rmspec.domain.errors`.
+``Document``, ``Page``, ``PageContent`` and ``Stroke`` from
+:mod:`rmspec.domain.models`, and names its errors from
+:mod:`rmspec.domain.errors`.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, Protocol
+
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -148,9 +203,16 @@ if TYPE_CHECKING:
         Page,
         PageContent,
         PageId,
+        Stroke,
     )
 
-__all__ = ["ABSENT_ARTIFACT_FINGERPRINT", "DocumentRepository", "PageCodec"]
+__all__ = [
+    "ABSENT_ARTIFACT_FINGERPRINT",
+    "DocumentRepository",
+    "PageCodec",
+    "SceneAppender",
+    "SceneEdit",
+]
 
 ABSENT_ARTIFACT_FINGERPRINT: Final = "absent"
 """Fingerprint of a page the document claims but stores no scene artifact for.
@@ -452,7 +514,11 @@ class PageCodec(Protocol):
             Layers, strokes, and text blocks, together with the defects the
             decode had to accept -- an unknown pen or colour that fell back to a
             default, dropped items, a synthesised layer. Degradations are values
-            here, so nothing is lost to a log line.
+            here, so nothing is lost to a log line. Typed text arrives on
+            ``PageContent.text_blocks``, page-level, because the scene block
+            carrying it names no layer; ``Layer.text_blocks`` is the format's
+            separate layer-owned text item, which no current parser decodes. A
+            consumer of "the text on this page" reads both.
 
         Raises
         ------
@@ -463,5 +529,128 @@ class PageCodec(Protocol):
         CorruptPageData
             The bytes are not a decodable scene file -- truncated, malformed, or
             structurally invalid -- reported against ``page_ref``.
+        """
+        ...
+
+
+class SceneEdit(BaseModel, frozen=True, extra="forbid"):
+    """One page's new scene bytes, plus the decisions the writer made for the caller.
+
+    A receipt rather than a wrapper. The bytes are what a transport writes; the other two
+    fields are the two things :meth:`SceneAppender.append_strokes` decided that the caller
+    did not, and both are facts about the file rather than about the call. Reporting them is
+    what keeps "which identity wrote this, and where did it land" answerable without
+    re-decoding the result and guessing.
+
+    There is deliberately no field echoing the input back -- no original length, no stroke
+    count. A receipt that restates its own request invites a caller to check the request
+    instead of the result.
+    """
+
+    scene: bytes = Field(min_length=1)
+    """The whole page, ready to write. Never a patch, a diff or a tail.
+
+    An implementation that appends may make the input a literal prefix of this, and one
+    that re-encodes may not; a caller cannot tell and must not try, because "is my input a
+    prefix of the output" is a property of the adapter rather than of the format. Write
+    these bytes as the file's entire new contents.
+    """
+
+    author_id: int = Field(gt=0)
+    """The CRDT author component every id in the appended ink was minted under.
+
+    Positive, and greater than every author already present in the artifact, which is what
+    makes the minted ids collision-free by construction rather than by searching for an
+    unused sequence number. Measured on firmware 3.27.3.0: a foreign author id written this
+    way was accepted and *kept* through the tablet's own re-save of the page, so this is the
+    identity a later reader will attribute the ink to.
+    """
+
+    layer_index: int = Field(ge=0)
+    """Which layer of the page the ink was attached to, indexed as the codec reports layers.
+
+    The same index into ``PageContent.layers`` that decoding :attr:`scene` produces, so a
+    caller can render exactly the layer it just wrote into. Present because the layer is a
+    choice the adapter makes -- a page has one or more, the caller named none -- and an
+    unreported choice is one nobody can preview or disagree with.
+    """
+
+
+class SceneAppender(Protocol):
+    """Add ink to a page that already exists, and hand back the whole page's new bytes.
+
+    The write direction of :class:`PageCodec`, and the narrowest surface that serves it:
+    one method, additive only, whole bytes in and whole bytes out. It performs no I/O and
+    holds no state -- the bytes arrive from a transport and the result goes back to one --
+    so an implementation is cheap to construct and a fake is one canned
+    :class:`SceneEdit`.
+
+    Notes
+    -----
+    **Every failure is a refusal, never a repair.** A page is the only copy of something a
+    human made by hand, so an implementation that cannot do exactly what was asked raises
+    instead of doing something adjacent. In particular it must not invent a layer for a
+    scene that has none, must not create a scene for an artifact that is empty, and must
+    not return the input unchanged when there was nothing to add.
+
+    **The lossless precondition is per call.** An implementation must establish, for the
+    bytes in hand, that this build's own reader and writer agree about them before it
+    returns anything derived from them -- and raise ``SceneRewriteUnsafe`` when they do not.
+    That is a checked fact about one artifact rather than an assumption about a firmware and
+    a parser version, and it is checked on every call because a page whose ink was silently
+    dropped looks exactly like a page.
+
+    **Nothing may key on a scene id across a round trip.** The tablet renumbers them: a
+    measured page's layer moved from author 0 / sequence 11 to author 1 / sequence 334
+    across xochitl's own re-save. An implementation reads every id it needs out of the bytes
+    it was handed, on every call, and caches none of them -- and a caller that stored
+    :attr:`SceneEdit.layer_index` from an earlier call must re-derive it rather than trust
+    it against later bytes.
+    """
+
+    def append_strokes(
+        self, raw: bytes, page_ref: str, /, *, strokes: tuple[Stroke, ...]
+    ) -> SceneEdit:
+        """Append strokes to a page's scene bytes.
+
+        Parameters
+        ----------
+        raw
+            The entire, uninterpreted contents of the page's scene file, read immediately
+            before this call. Checking or amending a stale copy is meaningless: the bytes
+            passed here are the bytes the result is derived from, and the transport's own
+            precondition is what establishes that they are still the bytes on the device.
+        page_ref
+            What to call these bytes when reporting a failure: the page uuid when the caller
+            holds one, the path the user typed when it does not. Required and without a
+            default, for the same reason as on :meth:`PageCodec.decode_page` -- every error
+            below takes it as a mandatory field. Never resolved, never validated, and never
+            reflected in the returned bytes.
+        strokes
+            The ink to add, in draw order, with samples already in screen units. Must not be
+            empty. Each stroke lands above everything already on its layer, and the tuple's
+            own order is preserved, so the last stroke draws last. A stroke with no samples
+            is legal and means a tap. ``Stroke.color_override`` is carried through to the
+            wire field it came from, so a decode-then-append round trip does not silently
+            turn a coloured highlight yellow.
+
+        Returns
+        -------
+        SceneEdit
+            The whole page's new bytes, the author id the ink was minted under, and the
+            layer it landed on.
+
+        Raises
+        ------
+        UsageError
+            ``strokes`` is empty. A write that appends nothing would report success for a
+            transport round trip, a snapshot and a rewrite that changed no ink, which is
+            worse than a refusal.
+        CorruptPageData
+            The bytes are not a decodable scene file, so there is nothing to append to.
+        SceneRewriteUnsafe
+            The bytes decode and this build will not write them: a zero-byte artifact, which
+            is a scene to *create* rather than one to amend; a round trip this build cannot
+            reproduce; or a scene with no layer that ink could be attached to and be seen on.
         """
         ...

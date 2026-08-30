@@ -41,6 +41,7 @@ from rmspec.domain.errors import (
     DeviceError,
     DeviceOperationUnsupported,
     DeviceProtocolError,
+    DeviceStateMismatchError,
     DeviceTransferInterrupted,
     DeviceUnreachable,
     DeviceUploadRejected,
@@ -71,6 +72,7 @@ from rmspec.domain.errors import (
     RecognitionFailed,
     RenderError,
     RmspecError,
+    SceneRewriteUnsafe,
     StoredRecordUnreadableError,
     StoreSchemaMismatchError,
     StoreUnavailableError,
@@ -113,6 +115,10 @@ SAMPLES: Final[tuple[RmspecError, ...]] = (
         observed_version="7.0",
         supported_versions=("6.0",),
     ),
+    SceneRewriteUnsafe(
+        page_uuid="9c1e-page",
+        detail="re-encoding the unmodified scene produced 18349 byte(s) from 18355",
+    ),
     RenderError("a base instance, which only a test ever builds"),
     UnsupportedPenType(pen="airbrush-2", page_ref="9c1e-page"),
     BackgroundUnreadable(page_ref="9c1e-page", detail="root element is not svg"),
@@ -149,6 +155,13 @@ SAMPLES: Final[tuple[RmspecError, ...]] = (
         transport=TransportKind.SSH,
         detail="lastModified is not an integer",
         document_uuid="1f0a-notes",
+    ),
+    DeviceStateMismatchError(
+        transport=TransportKind.SSH,
+        subject="1f0a-notes/9c1e-page.rm",
+        expected="sha256 6c1f",
+        observed="sha256 b204",
+        retryable=True,
     ),
     DeviceTransferInterrupted(
         transport=TransportKind.SSH,
@@ -188,7 +201,12 @@ SAMPLES: Final[tuple[RmspecError, ...]] = (
     ),
     PersistenceError("a base instance, which only a test ever builds"),
     StoreUnavailableError(store="sync.db", detail="the parent cannot be created"),
-    StoreSchemaMismatchError(store="sync.db", found=3, expected=5),
+    StoreSchemaMismatchError(
+        store="sync.db",
+        found=3,
+        expected=5,
+        remediation="move sync.db aside, or set RMSPEC_SYNC_DB to a new path",
+    ),
     StoredRecordUnreadableError(
         store="sync.db",
         table="ocr_cache",
@@ -217,6 +235,7 @@ EXPECTED_STATUS: Final[dict[type[RmspecError], int]] = {
     MalformedDocument: 65,
     CorruptPageData: 65,
     UnsupportedPageFormat: 65,
+    SceneRewriteUnsafe: 70,
     RenderError: 70,
     UnsupportedPenType: 70,
     BackgroundUnreadable: 70,
@@ -230,6 +249,7 @@ EXPECTED_STATUS: Final[dict[type[RmspecError], int]] = {
     DeviceUnreachable: 69,
     DeviceAuthFailed: 77,
     DeviceProtocolError: 69,
+    DeviceStateMismatchError: 69,
     DeviceDocumentNotFound: 66,
     MalformedDeviceMetadata: 65,
     DeviceTransferInterrupted: 69,
@@ -268,7 +288,7 @@ DECLARED_ROWS: Final[dict[int, frozenset[type[RmspecError]]]] = {
     ),
     66: frozenset({DocumentSourceError, PdfPageOutOfRange, DeviceDocumentNotFound}),
     69: frozenset({DocumentStoreUnavailable, DeviceError, OcrError}),
-    70: frozenset({RenderError}),
+    70: frozenset({RenderError, SceneRewriteUnsafe}),
     73: frozenset({ExportError}),
     74: frozenset({PersistenceError}),
     75: frozenset({ModelThrottled}),
@@ -310,11 +330,22 @@ CARRIES_REMEDIATION: Final = frozenset(
         AmbiguousDocument,
         DeviceUnreachable,
         DeviceOperationUnsupported,
+        DeviceStateMismatchError,
         ModelUnavailable,
         ModelAccessDenied,
+        StoreSchemaMismatchError,
     }
 )
-"""The classes that offer a single obvious next action. Every other one offers none."""
+"""The classes that offer a single obvious next action. Every other one offers none.
+
+Three of them assemble none themselves. :class:`ModelAccessDenied` requires the prose as an
+argument and :class:`DeviceStateMismatchError` derives it from ``retryable``, so both always
+carry one. :class:`StoreSchemaMismatchError` takes it optionally, because one of its two
+raise sites names a database the user cannot move -- that site is what
+``test_persistence_migrations.py`` pins, and it pins the two user-facing refusals as the ones
+that must supply it. Membership here is therefore what the *sample* must offer, which is why
+that second pin exists rather than this set being read as a guarantee about every instance.
+"""
 
 CLOSED_ENUMS: Final = (TransportKind, ArtifactWriteReason, DegradationKind)
 
@@ -364,8 +395,8 @@ def test_no_two_samples_share_a_class() -> None:
 
 
 def test_the_tree_has_the_documented_size() -> None:
-    assert len(TREE) == 48
-    assert len(LEAVES) == 37
+    assert len(TREE) == 50
+    assert len(LEAVES) == 39
 
 
 def test_exported_names_all_resolve() -> None:
@@ -405,6 +436,26 @@ def test_document_source_and_format_branches_are_disjoint() -> None:
 def test_a_missing_document_is_not_a_device_protocol_violation() -> None:
     assert not issubclass(DeviceDocumentNotFound, DeviceProtocolError)
     assert issubclass(DeviceDocumentNotFound, DeviceError)
+
+
+def test_a_moved_device_state_is_not_a_device_protocol_violation() -> None:
+    assert not issubclass(DeviceStateMismatchError, DeviceProtocolError)
+    assert not issubclass(DeviceProtocolError, DeviceStateMismatchError)
+    assert issubclass(DeviceStateMismatchError, DeviceError)
+
+
+def test_adopting_the_state_mismatch_does_not_move_a_shells_exit_status() -> None:
+    """The stand-in and its replacement exit alike, so a call site can switch freely."""
+    stale = DeviceStateMismatchError(
+        transport=TransportKind.SSH,
+        subject="9c1e-page.rm",
+        expected="sha256 6c1f",
+        observed="sha256 b204",
+        retryable=True,
+    )
+    assert exit_code(stale) == exit_code(SAMPLE_BY_CLASS[DeviceProtocolError])
+    assert exit_code(stale) == exit_code(SAMPLE_BY_CLASS[DeviceError])
+    assert DeviceStateMismatchError not in {cls for row in DECLARED_ROWS.values() for cls in row}
 
 
 def test_catching_store_unavailable_still_catches_a_schema_mismatch() -> None:
@@ -726,6 +777,64 @@ def test_an_interrupted_transfer_reports_what_it_moved_and_what_it_expected() ->
     assert unknown.bytes_expected is None
 
 
+def test_a_moved_state_names_both_identities_and_advises_on_retryability() -> None:
+    safe = DeviceStateMismatchError(
+        transport=TransportKind.SSH,
+        subject="9c1e-page.rm",
+        expected="sha256 6c1f",
+        observed="sha256 b204",
+        retryable=True,
+    )
+    hazardous = DeviceStateMismatchError(
+        transport=TransportKind.SSH,
+        subject="the boot identifier",
+        expected="9d2a",
+        observed="4e71",
+        retryable=False,
+    )
+    assert safe.message == "9c1e-page.rm is sha256 b204, and the operation needed sha256 6c1f"
+    assert safe.remediation == "re-read 9c1e-page.rm and repeat the operation"
+    assert hazardous.remediation is not None
+    assert "may repeat its effect" in hazardous.remediation
+    assert safe.retryable is True
+    assert hazardous.retryable is False
+
+
+def test_a_moved_state_carries_no_advice_that_contradicts_its_retryability() -> None:
+    """The two remediations are distinct sentences, not one string with a flag beside it."""
+    fields = {
+        "transport": TransportKind.SSH,
+        "subject": "xochitl",
+        "expected": "active",
+        "observed": "inactive",
+    }
+    safe = DeviceStateMismatchError(**fields, retryable=True)
+    hazardous = DeviceStateMismatchError(**fields, retryable=False)
+    assert safe.message == hazardous.message
+    assert safe.remediation != hazardous.remediation
+
+
+def test_a_schema_mismatch_offers_advice_only_where_a_user_can_act() -> None:
+    """The upgrade wall names a next step; the device's own index has none to name."""
+    users_file = StoreSchemaMismatchError(
+        store="sync.db",
+        found=0,
+        expected=1,
+        remediation="move sync.db aside, or set RMSPEC_SYNC_DB to a new path",
+    )
+    device_index = StoreSchemaMismatchError(store="rm-search-index", found=-1, expected=3)
+    assert users_file.remediation == "move sync.db aside, or set RMSPEC_SYNC_DB to a new path"
+    assert device_index.remediation is None
+    # The advice is the only thing that differs. Both still carry both versions, and both
+    # are still caught by a bare `except StoreUnavailableError`.
+    assert users_file.message == (
+        "store sync.db is unavailable: schema version 0 on disk, 1 expected"
+    )
+    assert device_index.message.startswith("store rm-search-index is unavailable: ")
+    assert (device_index.found, device_index.expected) == (-1, 3)
+    assert isinstance(device_index, StoreUnavailableError)
+
+
 def test_a_throttle_carries_the_providers_own_delay_when_it_gave_one() -> None:
     told = ModelThrottled(model_id="opus", retry_after_s=2.5)
     silent = ModelThrottled(model_id="opus")
@@ -956,7 +1065,7 @@ def test_a_usage_error_points_at_the_command_line_just_typed() -> None:
 
 def test_every_device_failure_carries_the_transport_that_failed() -> None:
     device_samples = [err for err in SAMPLES if isinstance(err, DeviceError)]
-    assert len(device_samples) == 9
+    assert len(device_samples) == 10
     assert all(isinstance(err.transport, TransportKind) for err in device_samples)
 
 
@@ -998,13 +1107,25 @@ def test_closed_enums_have_no_aliases(enum_cls: type[StrEnum]) -> None:
     assert len({member.value for member in members}) == len(members)
 
 
-def test_the_degradation_vocabulary_is_closed_at_the_reviewed_eight() -> None:
+def test_the_degradation_vocabulary_is_closed_at_the_reviewed_ten() -> None:
     """The count is in the name so that adding a member cannot be a quiet edit.
 
     It went from seven to eight on 2026-08-30, and this test failing is what made that a
     decision rather than a diff: two use cases had independently reached for
     ``CATALOG_ENTRY_SKIPPED`` for an unavailable device index and each said in prose that it
     did not fit.
+
+    Eight to nine on 2026-08-29, for the same reason and against a measurement:
+    ``rmspec.app.transcribe`` had written down, in prose, that a page whose stored bytes were
+    rewritten without its ink changing costs a full re-transcription, and that closing it
+    needed both an ``OcrCache`` member and a member here. Both landed together.
+
+    Nine to ten on 2026-08-30, for the first member that is about a run's *output* rather than
+    its input: ``rmspec.app.reply`` draws a message as ink on a page a human is holding, the
+    engraving face covers 95 printable ASCII characters, and the em dashes and curly quotes
+    model prose is full of become struck boxes. Every other member here says a run did not do
+    something; this one says what landed on the page is not the text that was asked for, and no
+    existing member could say that without stretching over both.
     """
     assert {kind.value for kind in DegradationKind} == {
         "catalog_entry_skipped",
@@ -1015,7 +1136,43 @@ def test_the_degradation_vocabulary_is_closed_at_the_reviewed_eight() -> None:
         "cache_miss_key_changed",
         "audit_not_recorded",
         "device_index_unavailable",
+        "cache_hit_raster_equivalent",
+        "ink_character_substituted",
     }
+
+
+def test_a_substituted_ink_character_is_reported_even_though_it_was_authorised() -> None:
+    """The opt-in authorises the write, not the silence.
+
+    ``CreateDocument``'s opted-in duplicate name records no degradation, and the difference is
+    load-bearing rather than an inconsistency: that reports a fact about the *library* while the
+    bytes uploaded are exactly the caller's. Here the artifact on the page differs from the text
+    that was requested, which is what :attr:`Degradation.substituted` -- "the value used
+    instead" -- exists to say.
+    """
+    boxed = Degradation(
+        kind=DegradationKind.INK_CHARACTER_SUBSTITUTED,
+        subject="9c1e-page",
+        detail="'\\u2014' (U+2014) is not in the engraving face",
+        substituted="a struck box",
+    )
+
+    assert boxed.substituted == "a struck box"
+    assert boxed.kind is not DegradationKind.PAGE_NOT_ANNOTATED
+
+
+def test_a_reused_equivalent_raster_is_not_a_changed_key() -> None:
+    """Near-opposites, and a reader acts on them differently.
+
+    ``CACHE_MISS_KEY_CHANGED`` says a row existed and this run declined it, so it paid again.
+    ``CACHE_HIT_RASTER_EQUIVALENT`` says a row existed under other page bytes and this run
+    served it, so it did not. One member stretched over both would tell a reader the run
+    paid when it did not.
+    """
+    assert (
+        DegradationKind.CACHE_HIT_RASTER_EQUIVALENT is not DegradationKind.CACHE_MISS_KEY_CHANGED
+    )
+    assert DegradationKind.CACHE_HIT_RASTER_EQUIVALENT.value == "cache_hit_raster_equivalent"
 
 
 def test_an_unavailable_device_index_is_its_own_kind_and_not_a_skipped_entry() -> None:

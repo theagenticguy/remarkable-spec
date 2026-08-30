@@ -121,6 +121,35 @@ def test_an_unplaceable_text_block_is_reported_rather_than_drawn(poison: float) 
     assert "1 typed text block" in detail
 
 
+@pytest.mark.parametrize("poison", NON_FINITE, ids=NON_FINITE_IDS)
+def test_an_unplaceable_page_level_block_is_reported_rather_than_drawn(poison: float) -> None:
+    """The page's own typed text is held to the same rule as a layer's.
+
+    It is drawn last and outside every layer group, which is a different code path from the
+    per-layer loop -- so ``x="nan"`` has to be excluded there too, and the loss has to be
+    counted into the same notice rather than dropped in silence.
+    """
+    subject = page(
+        text_blocks=(TextBlock(pos_x=poison, pos_y=10.0, width=800.0, text="lost page words"),)
+    )
+    rendered = render(subject)
+
+    assert rendered.text_block_count == 0
+    assert RenderNoticeCode.TEXT_OMITTED in [notice.code for notice in rendered.notices]
+    assert "<text" not in rendered.svg
+
+
+def test_unplaceable_blocks_from_both_sources_are_counted_into_one_notice() -> None:
+    """The notice counts what was lost across both sources, not per source."""
+    lost = TextBlock(pos_x=float("nan"), pos_y=10.0, width=800.0, text="lost")
+    subject = page(layer(text_blocks=(lost,)), text_blocks=(lost,))
+    rendered = render(subject)
+    detail = next(n.detail for n in rendered.notices if n.code is RenderNoticeCode.TEXT_OMITTED)
+
+    assert rendered.text_block_count == 0
+    assert "2 typed text block" in detail
+
+
 def test_a_placeable_block_beside_an_unplaceable_one_is_still_drawn() -> None:
     """The notice counts what was lost, not what was attempted."""
     subject = page(

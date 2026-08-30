@@ -23,6 +23,7 @@ from hypothesis import strategies as st
 from pydantic import BaseModel, ValidationError
 
 from rmspec.device.addresses import (
+    BOOT_ID,
     CONTENT_SUFFIX,
     DEFAULT_USB_HOST,
     METADATA_SUFFIX,
@@ -84,8 +85,22 @@ def test_the_measured_device_constants_are_spelled_exactly_once_and_correctly():
     assert OS_RELEASE == "/etc/os-release"
     assert SOC_MACHINE == "/sys/devices/soc0/machine"
     assert PROC_MEMINFO == "/proc/meminfo"
+    assert BOOT_ID == "/proc/sys/kernel/random/boot_id"
     assert (METADATA_SUFFIX, CONTENT_SUFFIX, SCENE_SUFFIX) == (".metadata", ".content", ".rm")
     assert SEARCH_INDEX_NAME == "rm-search-index.db"
+
+
+def test_the_boot_identifier_is_a_pseudo_file_and_not_part_of_the_store():
+    """The fence the guarded restart in ``ssh.py`` compares either side of a restart.
+
+    Two properties, and both are why it is here rather than a literal in the adapter: it is
+    under ``/proc``, so it is a kernel value rather than anything the user or xochitl wrote, and
+    it is outside :data:`XOCHITL_ROOT`, so reading it touches nothing in the library. A path
+    that satisfied neither would be a different kind of read wearing this name.
+    """
+    assert BOOT_ID.startswith("/proc/")
+    assert not BOOT_ID.startswith(XOCHITL_ROOT)
+    assert RemotePath.absolute(BOOT_ID).value == BOOT_ID
 
 
 def test_the_firmware_version_source_is_not_the_path_that_does_not_exist():

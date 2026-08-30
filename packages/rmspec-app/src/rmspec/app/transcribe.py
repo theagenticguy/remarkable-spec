@@ -90,44 +90,71 @@ The prompts are hashed rather than versioned, which is
 ``prompt_revision`` field ... hashing the prompt bytes is strictly stronger than a
 version integer someone has to remember to bump".
 
-``page_hash`` versus ``raster_digest``: the key is not bent
------------------------------------------------------------
-Measured: xochitl rewrote one page from 18,813 to 24,534 bytes with the ink unchanged,
-so ``page_hash`` moves while ``raster_digest`` stays equal, and a byte-level rewrite
-costs a full re-transcription of a page nobody edited.
+``page_hash`` versus ``raster_digest``: a rewrite no longer costs a re-transcription
+-----------------------------------------------------------------------------------
+Measured: the tablet rewrote one page from 18,813 to 24,534 bytes with the ink
+unchanged, so ``page_hash`` moves while ``raster_digest`` stays equal, and a byte-level
+rewrite used to cost a full re-transcription of a page nobody edited.
 
-Neither remedy the design floated is available here.
-:meth:`~rmspec.domain.ports.persistence.OcrCache.superseded` cannot express the second
-one: it matches on **equal** ``page_hash`` -- "the page itself did not change and
-something upstream of it did" -- which is precisely the component that moved, and it
-returns a key rather than an artifact, "diagnostic only ... so it can never become a
-fallback". And demoting ``page_hash`` is unavailable by construction:
+Neither remedy the design first floated would work.
+:meth:`~rmspec.domain.ports.persistence.OcrCache.superseded` cannot express it: it
+matches on **equal** ``page_hash`` -- "the page itself did not change and something
+upstream of it did" -- which is precisely the component that moved, and it returns a key
+rather than an artifact, "diagnostic only ... so it can never become a fallback". And
+demoting ``page_hash`` is unavailable by construction:
 :class:`~rmspec.domain.models.OcrCacheKey` is frozen with the field required, so a use
 case could only "demote" it by writing something other than the page's hash into it,
 which is a component that lies -- worse than the miss it avoids.
 
-So this module pays the miss, honestly, and the fix is named as the domain change it
-is: an ``OcrCache`` member that matches every component *except* ``page_hash`` (the
-shape ``remarkable-brain`` gets by hashing the rendered PNG instead of the source), plus
-a ``DegradationKind`` member for "this page's bytes were rewritten and its pixels were
-not, so a row keyed on the older bytes was reused". Until both exist, a rewrite is a
-miss, and :attr:`~rmspec.domain.errors.DegradationKind.CACHE_MISS_KEY_CHANGED` reports
-the misses ``superseded`` *can* see.
+So the domain grew the member instead:
+:meth:`~rmspec.domain.ports.persistence.OcrCache.equivalent_raster` matches every
+component *except* ``page_hash`` -- the set
+:attr:`~rmspec.domain.models.OcrCacheKey.raster_identity` names -- and returns the
+artifact. :meth:`_stored` tries it after :meth:`~rmspec.domain.ports.persistence.OcrCache.get`
+misses and before a single tier is paid for, and reports
+:attr:`~rmspec.domain.errors.DegradationKind.CACHE_HIT_RASTER_EQUIVALENT` when it
+answers, because the row served is not the row the key names. A truncated equivalent row
+is read as a miss on exactly the same rule as a truncated exact one.
 
-Only a merged reading is cached
--------------------------------
-:class:`~rmspec.domain.models.OcrArtifact` stores text, confidence, truncation and a
-timestamp -- and no provenance. So a row cannot say which tier produced it, and a
-reader of a hit has to assume one. Storing a short-circuited reading would make that
+Nothing is written back under the new ``page_hash``. A rewrite therefore reports its
+degradation on every run, which is the honest reading: the pixels have one transcription
+and the bytes have had two names, and a caller that wants the second name to stop
+appearing can prune the first.
+:attr:`~rmspec.domain.errors.DegradationKind.CACHE_MISS_KEY_CHANGED` still reports the
+misses ``superseded`` *can* see, and the two are consulted in that order -- an
+equivalent raster is a hit and ends the lookup, a superseded key is a miss and only
+explains one.
+
+A short-circuited reading is cached too, and says so
+----------------------------------------------------
+It used not to be. :class:`~rmspec.domain.models.OcrArtifact` stored text, confidence,
+truncation and a timestamp and no provenance, so a row could not say which tier produced
+it and a reader of a hit had to assume one. Storing a short-circuited reading made that
 assumption wrong: the row would be served as though the adjudicator named in its key had
-merged it, when tier 0 and tier 1 agreed and no model was called at all. So the write
-happens on the tier-3 path only, and a hit therefore always denotes a merged reading
-whose provenance can be reconstructed truthfully.
+merged it, when tier 0 and tier 1 agreed and no model ran at all. So the write happened
+on the tier-3 path only -- and a page that short-circuits re-paid its recognizers on
+every run, which is the cost tier 0 exists to avoid.
 
-The cost is real and worth stating: a page that short-circuits re-pays its recognizers
-on every run. The domain change that removes it is a provenance component on
-``OcrArtifact`` -- or an ``OcrCache`` over
-:class:`~rmspec.domain.models.PageText`, which already carries one.
+:class:`~rmspec.domain.models.OcrProvenance` removes the assumption. Both terminal paths
+now write, each recording its own
+:attr:`~rmspec.domain.models.OcrProvenance.tier_reached`,
+:attr:`~rmspec.domain.models.OcrProvenance.short_circuited`, the sources that actually
+reached the text, and -- for a short-circuit -- the measured agreement. The key is
+unchanged and still names the adjudicator: it is the identity of the *lookup*, so it has
+to digest the same way whether or not the merge turned out to be needed. The artifact is
+the identity of the *work*. :meth:`_from_row` reads the second, not the first, so a hit
+on a short-circuited row reports no merging model and the contributors that were really
+folded in, and it reaches the caller on
+:attr:`TranscribedPage.cached_provenance`.
+
+One thing this does not fix, and it is stated rather than hidden:
+:attr:`TranscribePagesRequest.agreement_threshold` is a request field and not a cache-key
+component, so a run with a stricter threshold can hit a row that short-circuited under a
+lenient one. Folding the threshold into the key would invalidate every stored row to
+record a value only one of the four tiers reads. So the row carries the measured
+agreement instead and the caller compares -- the same bargain
+:attr:`~rmspec.domain.models.OcrArtifact.truncated` strikes, and for the same reason: no
+key can protect a caller from a flag it declines to read.
 
 Truncation is data on the way in and a refusal to write
 -------------------------------------------------------
@@ -192,7 +219,13 @@ from rmspec.domain.errors import (
     RecognitionFailed,
     StoreUnavailableError,
 )
-from rmspec.domain.models import OcrArtifact, OcrCacheKey, PageText, TextProvenance
+from rmspec.domain.models import (
+    OcrArtifact,
+    OcrCacheKey,
+    OcrProvenance,
+    PageText,
+    TextProvenance,
+)
 from rmspec.domain.ports.ocr import Decoding, RasterImage, ReasoningEffort, VisionRequest
 
 if TYPE_CHECKING:
@@ -383,7 +416,7 @@ def _agreeing(
     /,
     *,
     threshold: float,
-) -> Recognition | None:
+) -> tuple[float, Recognition] | None:
     """Find the tier-1 reading that agrees closely enough with tier 0 to stop here.
 
     Parameters
@@ -400,10 +433,14 @@ def _agreeing(
 
     Returns
     -------
-    Recognition | None
-        The best-agreeing reading, or ``None`` when none reaches the threshold. Ties go
-        to the earliest binding, because :func:`max` returns the first maximal element
-        and the recognizers are held in binding order.
+    tuple[float, Recognition] | None
+        The measured agreement and the reading that achieved it, or ``None`` when none
+        reaches the threshold. Ties go to the earliest binding, because :func:`max`
+        returns the first maximal element and the recognizers are held in binding order.
+        The score travels with the reading because it is written into
+        :attr:`~rmspec.domain.models.OcrProvenance.agreement`: the threshold is not a
+        cache-key component, so the measurement is the only thing a later run can compare
+        its own threshold against.
     """
     if not prior.strip():
         return None
@@ -413,7 +450,7 @@ def _agreeing(
     agreed = [pair for pair in scored if pair[0] >= threshold]
     if not agreed:
         return None
-    return max(agreed, key=itemgetter(0))[1]
+    return max(agreed, key=itemgetter(0))
 
 
 def _has_text(readings: Sequence[Recognition], /) -> bool:
@@ -767,6 +804,18 @@ class TranscribedPage(BaseModel, frozen=True, extra="forbid"):
     know that ``0`` is unreachable on a fresh page.
     """
 
+    cached_provenance: OcrProvenance | None
+    """The served row's own account of which tier produced it, or ``None``.
+
+    ``None`` exactly when :attr:`cached` is ``False``. On a hit this is how a caller learns
+    what :attr:`tier_reached` cannot tell it: that field is ``0`` for every hit, because it
+    describes what *this* run paid, while this describes what the *row* cost when it was
+    made. A row that short-circuited says so, names no merging model, and carries the
+    agreement it was accepted at -- which is what a caller with a stricter
+    :attr:`TranscribePagesRequest.agreement_threshold` compares against, since the threshold
+    is not a cache-key component and no key can make it one cheaply.
+    """
+
     truncated: bool
     """Whether either paid completion stopped at a limit rather than on its own terms.
 
@@ -803,8 +852,9 @@ class TranscribePagesResult(BaseModel, frozen=True, extra="forbid"):
     """
 
     degradations: tuple[Degradation, ...]
-    """Every substitution this run made instead of failing: a torn tier-0 index, and a
-    cache row that exists for this page under different inputs."""
+    """Every substitution this run made instead of failing: a torn tier-0 index, a cache
+    row that exists for this page under different inputs, and a cache row reused because
+    the page's bytes were rewritten while its pixels were not."""
 
 
 class TranscribePages:
@@ -1042,7 +1092,7 @@ class TranscribePages:
             The whole request, for the instant and the threshold.
         key
             The lookup key, whose recognizer tuple is rewritten for the write when an
-            engine failed.
+            engine failed. Both terminal paths write, so both receive it.
         document_uuid
             The owning document.
 
@@ -1051,16 +1101,19 @@ class TranscribePages:
         TranscribedPage
             The page's text and what producing it cost.
         """
-        agreeing = _agreeing(prior.text, readings, threshold=request.agreement_threshold)
-        if agreeing is not None:
+        agreed = _agreeing(prior.text, readings, threshold=request.agreement_threshold)
+        if agreed is not None:
+            agreement, agreeing = agreed
             return self._short_circuit(
                 artifact,
                 raster=raster,
                 prior=prior,
                 agreeing=agreeing,
+                agreement=agreement,
                 readings=readings,
                 failures=failures,
                 now=request.now,
+                key=key,
                 document_uuid=document_uuid,
             )
         return self._merged(
@@ -1083,9 +1136,11 @@ class TranscribePages:
         raster: RasterImage,
         prior: _Prior,
         agreeing: Recognition,
+        agreement: float,
         readings: tuple[Recognition, ...],
         failures: Mapping[str, str],
         now: AwareDatetime,
+        key: OcrCacheKey,
         document_uuid: str,
     ) -> TranscribedPage:
         """Accept tier 0's reading, which agreed with a tier-1 engine, and stop.
@@ -1095,6 +1150,13 @@ class TranscribePages:
         produced after throwing the stroke data away, so when the two agree the reading
         with more information behind it is preferred -- and it is the free one.
         Provenance lists both.
+
+        The row is written, under the same key a merge would have used. That is not a row
+        that lies: the key is the identity of the lookup and names the adjudicator this
+        run was configured with, while
+        :class:`~rmspec.domain.models.OcrProvenance` on the artifact says which tier
+        actually produced the text and how closely the two readings agreed. Without the
+        write, a page that short-circuits re-pays its recognizers on every run.
 
         Parameters
         ----------
@@ -1106,23 +1168,41 @@ class TranscribePages:
             Tier 0's answer, whose text is the answer.
         agreeing
             The tier-1 reading that agreed.
+        agreement
+            How closely it agreed, recorded on the row because the threshold is not a
+            cache-key component.
         readings
-            Every surviving reading, for the confidence average.
+            Every surviving reading, for the confidence average and the write key.
         failures
             Why each failing engine failed.
         now
             The extraction instant.
+        key
+            The lookup key, rewritten here over the surviving engines for the write.
         document_uuid
             The owning document.
 
         Returns
         -------
         TranscribedPage
-            The page, at tier 1, with no row written; see this module's docstring on why
-            only a merged reading is cached.
+            The page, at tier 1, with a row written and its provenance recorded.
         """
         both = (prior.slug, agreeing.provider_id)
         contributors = tuple(slug for slug in both if slug is not None)
+        confidence = _mean_confidence(readings)
+        self._write(
+            key,
+            folded=self._folded(tuple(reading.provider_id for reading in readings), prior=prior),
+            text=prior.text,
+            confidence=confidence,
+            now=now,
+            provenance=OcrProvenance(
+                tier_reached=1,
+                short_circuited=True,
+                contributors=contributors,
+                agreement=agreement,
+            ),
+        )
         return TranscribedPage(
             page=PageText(
                 doc_uuid=document_uuid,
@@ -1140,9 +1220,10 @@ class TranscribePages:
             tier_reached=1,
             short_circuited=True,
             cached=False,
+            cached_provenance=None,
             truncated=False,
             recognizer_failures=failures,
-            mean_confidence=_mean_confidence(readings),
+            mean_confidence=confidence,
         )
 
     def _merged(
@@ -1209,6 +1290,11 @@ class TranscribePages:
                 text=merge.text,
                 confidence=confidence,
                 now=now,
+                provenance=OcrProvenance(
+                    tier_reached=3,
+                    short_circuited=False,
+                    contributors=self._fold_order(prior, readings),
+                ),
             )
         return TranscribedPage(
             page=PageText(
@@ -1227,6 +1313,7 @@ class TranscribePages:
             tier_reached=3,
             short_circuited=False,
             cached=False,
+            cached_provenance=None,
             truncated=truncated,
             recognizer_failures=failures,
             mean_confidence=confidence,
@@ -1254,9 +1341,10 @@ class TranscribePages:
         raster
             Its pixels, for the resolution the provenance records.
         key
-            The key that hit, which is the only record of which sources produced the
-            row -- the artifact carries no provenance, which is why only a merged
-            reading is ever written.
+            The key that hit. It names the sources the *lookup* was built from, which is
+            what a row written before
+            :class:`~rmspec.domain.models.OcrProvenance` existed has instead of a
+            recorded contributor list.
         document_uuid
             The owning document.
 
@@ -1264,8 +1352,19 @@ class TranscribePages:
         -------
         TranscribedPage
             The page, at tier 0, with the row's own creation time as its extraction
-            time rather than this run's instant.
+            time rather than this run's instant, and the row's own provenance on
+            :attr:`TranscribedPage.cached_provenance`.
+
+        Notes
+        -----
+        The merging model is named from the row rather than from this run's binding: a
+        short-circuited row had no merge, so claiming one would be the exact
+        misattribution that used to make such a row unwritable. The contributor list comes
+        from the row when it has one and falls back to the key's sorted tuple when it does
+        not, which is all an older build ever recorded and precisely what this method used
+        to report unconditionally.
         """
+        recorded = stored.provenance
         return TranscribedPage(
             page=PageText(
                 doc_uuid=document_uuid,
@@ -1274,8 +1373,8 @@ class TranscribePages:
                 text=stored.text,
                 provenance=_provenance(
                     text=stored.text,
-                    recognizers=key.recognizers,
-                    fingerprint=self._adjudicator.fingerprint,
+                    recognizers=recorded.contributors or key.recognizers,
+                    fingerprint=None if recorded.short_circuited else key.model_fingerprint,
                     render_dpi=raster.render_dpi,
                     extracted_at=stored.created_at,
                 ),
@@ -1283,6 +1382,7 @@ class TranscribePages:
             tier_reached=0,
             short_circuited=False,
             cached=True,
+            cached_provenance=recorded,
             truncated=False,
             recognizer_failures={},
             mean_confidence=stored.mean_confidence,
@@ -1463,7 +1563,7 @@ class TranscribePages:
         page_ref
             The page, named by a degradation.
         log
-            Where a superseded row is recorded.
+            Where a superseded row and a reused equivalent raster are recorded.
 
         Returns
         -------
@@ -1471,11 +1571,27 @@ class TranscribePages:
             The cached transcription, or ``None`` on a miss. A truncated row is a miss:
             a half-transcribed page is a wrong page, and the port's own instruction is
             that the caller "re-decides from the flag exactly as it decided on the fresh
-            path".
+            path". Both lookups apply that rule, because a truncated row is no more
+            servable when the pixels matched than when the whole key did.
         """
         stored = self._cache.get(key)
         if stored is not None and not stored.truncated:
             return stored
+        equivalent = self._cache.equivalent_raster(key)
+        if equivalent is not None and not equivalent.truncated:
+            log.record(
+                Degradation(
+                    kind=DegradationKind.CACHE_HIT_RASTER_EQUIVALENT,
+                    subject=page_ref,
+                    detail=(
+                        "this page's stored bytes were rewritten and its pixels were not, "
+                        "so the reading cached under the older bytes was reused instead of "
+                        "being recomputed"
+                    ),
+                    substituted=equivalent.created_at.isoformat(),
+                )
+            )
+            return equivalent
         other = self._cache.superseded(key)
         if other is not None:
             log.record(
@@ -1500,8 +1616,9 @@ class TranscribePages:
         text: str,
         confidence: float | None,
         now: AwareDatetime,
+        provenance: OcrProvenance,
     ) -> None:
-        """Store a completed merge under the surviving sources.
+        """Store one terminal reading under the surviving sources, with its provenance.
 
         Parameters
         ----------
@@ -1512,11 +1629,15 @@ class TranscribePages:
             when an engine failed -- so a degraded run's output is stored where a
             healthy run will not find it.
         text
-            The merged transcription.
+            The accepted transcription: tier 0's on a short-circuit, the merge's otherwise.
         confidence
             Mean recognizer confidence, or ``None``.
         now
             The creation instant.
+        provenance
+            Which tier produced ``text`` and out of what. The reason both terminal paths
+            may write at all: without it a short-circuited row would be indistinguishable
+            from a merged one and would be read as adjudicated by a model that never ran.
         """
         self._cache.put(
             OcrCacheKey(
@@ -1532,5 +1653,6 @@ class TranscribePages:
                 mean_confidence=confidence,
                 truncated=False,
                 created_at=now,
+                provenance=provenance,
             ),
         )

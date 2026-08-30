@@ -134,6 +134,7 @@ from rmspec.app.render import (
     RenderPagesRequest,
     RenderPagesResult,
 )
+from rmspec.app.reply import ReplyOnPage, ReplyOnPageRequest, ReplyOnPageResult
 from rmspec.app.resolve import ResolveDocument, ResolveDocumentRequest, ResolveDocumentResult
 from rmspec.app.search import SearchText, SearchTextRequest, SearchTextResult, TextMatch
 from rmspec.app.selection import PageSelection
@@ -174,6 +175,9 @@ __all__ = [
     "RenderPagesRequest",
     "RenderPagesResult",
     "RenderedPageArtifact",
+    "ReplyOnPage",
+    "ReplyOnPageRequest",
+    "ReplyOnPageResult",
     "ReportCapabilities",
     "ReportCapabilitiesRequest",
     "ReportCapabilitiesResult",

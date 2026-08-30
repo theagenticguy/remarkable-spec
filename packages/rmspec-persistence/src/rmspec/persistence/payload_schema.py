@@ -10,9 +10,26 @@ version skew to point at -- which is the defect this package exists to remove,
 reborn in JSON.
 
 So the field shape of every stored model is fingerprinted and pinned here. A
-change to any of them fails :data:`PAYLOAD_FINGERPRINTS`' agreement test, which
-is the prompt to bump ``SCHEMA_VERSION`` and add the migration that rewrites the
-affected payloads.
+change to any of them fails :data:`PAYLOAD_FINGERPRINTS`' agreement test, which is
+the prompt to decide *which kind* of change it is, and there are two:
+
+* A field that **stored rows cannot satisfy** -- a new required field, a narrowed
+  annotation, a field removed while a reader still needs it. Every stored row stops
+  validating, so this needs a ``SCHEMA_VERSION`` bump and the migration that
+  rewrites the affected payloads before the fingerprint is re-pinned.
+* A field that **stored rows already satisfy**: a new optional field with a default.
+  Nothing to rewrite -- the default *is* what an existing row means -- so the
+  fingerprint is re-pinned on its own, and the reviewed record is the field's own
+  docstring saying why its default is the truth about an older row rather than a
+  placeholder. :attr:`~rmspec.domain.models.OcrArtifact.provenance` is the worked
+  example.
+
+Neither kind protects a *downgrade*. Every model here is ``extra="forbid"``, so a
+row written by a newer build fails validation in an older one as
+:class:`~rmspec.domain.errors.StoredRecordUnreadableError` whichever kind of change
+produced it. That is stated on the models that carry it rather than smoothed over
+with ``extra="ignore"``, which would buy downgrade safety by silently discarding a
+component of a paid result.
 
 The fingerprint is computed from ``model_fields`` -- each field's name, its
 annotation, whether it is required -- expanded recursively through nested models,
@@ -142,8 +159,12 @@ PAYLOAD_FINGERPRINTS: Final[Mapping[str, str]] = {
         "644bfc4635009d0701e3d033c2a705ddcf27284e32943ae85a9ebb0082888223"
     ),
     "document.payload": "e1b553d39062bc66d4692eea2453b7f77b2df2ce17a073d14f5ccb4ad9c7f00d",
+    # Re-pinned when `OcrArtifact.provenance` landed. No `SCHEMA_VERSION` bump and no
+    # migration: every field of `OcrProvenance` has a default, so every row written
+    # before it still validates, and the defaults are what those rows mean -- they were
+    # all tier-3 merges, because the merge was the only thing the writer would store.
     "ocr_cache.artifact_payload": (
-        "b3f8a05b2c22649d5aabf44213339cfeffaa9ef690cfc7327cbce5704472d215"
+        "9a607a9a1cb3353094e9b6f513e4a07bf43aeb1ef982d3b0c3ab0fbc7244067d"
     ),
     "ocr_cache.key_payload": "d34538d864efe40a012b627edfc2c000c82e8f44f518944057ee3a93362be15f",
     "page.payload": "8df2af581ca93f4d62bba716799e7f7796191635bd370d50d86c0041bc6b318b",

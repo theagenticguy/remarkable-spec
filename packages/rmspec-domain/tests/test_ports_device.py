@@ -17,6 +17,7 @@ subprocess or the filesystem.
 from __future__ import annotations
 
 import datetime
+import inspect
 from typing import get_protocol_members
 
 import pytest
@@ -24,15 +25,19 @@ from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
+from rmspec.domain._digest import digest_of
 from rmspec.domain.errors import (
     DeviceDocumentNotFound,
     DeviceOperationUnsupported,
+    DeviceStateMismatchError,
     DeviceTransferInterrupted,
     MalformedDeviceMetadata,
     TransportKind,
+    UsageError,
 )
 from rmspec.domain.ports import device as device_port
 from rmspec.domain.ports.device import (
+    _SCENE_FINGERPRINT_TAG,
     DeviceCatalog,
     DeviceDocument,
     DeviceFacts,
@@ -46,9 +51,15 @@ from rmspec.domain.ports.device import (
     DocumentUploader,
     LibraryRefresh,
     RawBundleSource,
+    ScenePrecondition,
+    SceneRead,
+    SceneVisibility,
+    SceneWriter,
+    SceneWriteReceipt,
     SearchIndexSource,
     SkippedEntry,
     SkipReason,
+    UnsupportedField,
     UploadMedia,
     UploadReceipt,
     UploadRequest,
@@ -397,6 +408,137 @@ def test_facts_and_resources_are_separate_types_so_a_cache_cannot_mix_them():
     assert set(DeviceFacts.model_fields) & set(DeviceResources.model_fields) == {"unsupported"}
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         DeviceFacts.model_validate({"available_storage_bytes": 1})
+
+
+# ─────────── unsupported says who could, without becoming a second field ───────────
+
+
+def test_naming_who_could_answer_added_no_field_to_either_model():
+    """Two adapters and three tests derive their own field lists from ``model_fields``.
+
+    Widening what a member of ``unsupported`` may *be* is what left all of them untouched; a
+    parallel ``alternatives`` field would have appeared in both of these sets and made every
+    derived "all fields except unsupported" list wrong.
+    """
+    assert set(DeviceFacts.model_fields) == {"firmware", "model", "serial", "unsupported"}
+    assert set(DeviceResources.model_fields) == {
+        "total_memory_bytes",
+        "available_memory_bytes",
+        "total_storage_bytes",
+        "available_storage_bytes",
+        "unsupported",
+    }
+
+
+@pytest.mark.parametrize(
+    ("model", "reportable"),
+    [
+        (DeviceFacts, ("firmware", "model", "serial")),
+        (
+            DeviceResources,
+            (
+                "total_memory_bytes",
+                "available_memory_bytes",
+                "total_storage_bytes",
+                "available_storage_bytes",
+            ),
+        ),
+    ],
+)
+def test_every_reportable_field_can_still_be_declared_unsupported(
+    model: type[DeviceFacts | DeviceResources],
+    reportable: tuple[str, ...],
+):
+    """The validator's literal dict has to move with the fields, or a new one is undeclarable."""
+    assert set(model.model_fields) - set(reportable) == {"unsupported"}
+    for name in reportable:
+        assert model(unsupported={name}).unsupported_names == frozenset({name})
+
+
+def test_a_bare_name_and_an_annotated_entry_describe_the_same_absence():
+    bare = DeviceFacts(unsupported={"serial"})
+    annotated = DeviceFacts(unsupported={UnsupportedField(name="serial", supported_by=())})
+    assert bare.unsupported_names == annotated.unsupported_names == frozenset({"serial"})
+    # And they differ in exactly the thing a bare name could not say.
+    assert bare.alternatives == ()
+    assert annotated.alternatives == (UnsupportedField(name="serial", supported_by=()),)
+
+
+def test_an_empty_supported_by_says_no_transport_can_and_is_not_a_missing_answer():
+    """The device serial's real state, which used to render as "try another transport"."""
+    facts = DeviceFacts(unsupported={UnsupportedField(name="serial", supported_by=())})
+    (claim,) = facts.alternatives
+    assert claim.supported_by == ()
+    assert claim.supported_by is not None
+
+
+def test_a_non_empty_supported_by_names_the_transport_to_change_to():
+    facts = DeviceFacts(
+        unsupported={
+            UnsupportedField(name="firmware", supported_by=(TransportKind.SSH,)),
+            UnsupportedField(name="serial", supported_by=()),
+        }
+    )
+    assert facts.alternatives == (
+        UnsupportedField(name="firmware", supported_by=(TransportKind.SSH,)),
+        UnsupportedField(name="serial", supported_by=()),
+    )
+
+
+def test_the_alternatives_view_is_ordered_so_two_runs_cannot_disagree():
+    """A frozenset has no order, and a report that reshuffled would look like device drift."""
+    names = ("model", "firmware", "serial")
+    facts = DeviceFacts(
+        unsupported={UnsupportedField(name=name, supported_by=()) for name in names}
+    )
+    assert [entry.name for entry in facts.alternatives] == sorted(names)
+
+
+def test_an_annotated_entry_still_cannot_name_a_non_field_or_an_answered_one():
+    with pytest.raises(ValidationError, match="do not exist: battery"):
+        DeviceFacts(unsupported={UnsupportedField(name="battery", supported_by=())})
+    with pytest.raises(ValidationError, match="carry a value: firmware"):
+        DeviceFacts(
+            firmware="3.27.3.0",
+            unsupported={UnsupportedField(name="firmware", supported_by=())},
+        )
+
+
+def test_one_field_cannot_be_declared_both_ways_at_once():
+    """Two answers to one question, and no rule for choosing between them."""
+    with pytest.raises(ValidationError, match="more than once: serial"):
+        DeviceFacts(unsupported={"serial", UnsupportedField(name="serial", supported_by=())})
+
+
+def test_an_entry_that_claims_nothing_is_refused_because_a_bare_name_already_says_it():
+    with pytest.raises(ValidationError, match="no claim: serial"):
+        DeviceFacts(unsupported={UnsupportedField(name="serial")})
+    with pytest.raises(ValidationError, match="no claim: total_memory_bytes"):
+        DeviceResources(unsupported={UnsupportedField(name="total_memory_bytes")})
+
+
+def test_a_gauge_may_name_the_transport_that_reads_it():
+    reading = DeviceResources(
+        total_storage_bytes=128,
+        available_storage_bytes=64,
+        unsupported={
+            UnsupportedField(name="total_memory_bytes", supported_by=(TransportKind.SSH,)),
+            "available_memory_bytes",
+        },
+    )
+    assert reading.unsupported_names == frozenset({"total_memory_bytes", "available_memory_bytes"})
+    assert [entry.name for entry in reading.alternatives] == ["total_memory_bytes"]
+
+
+def test_who_could_answer_is_not_a_capability_predicate_a_caller_branches_on():
+    """The same rule ``capabilities``/``supports``/``probe`` are absent for.
+
+    A field that names an alternative transport is a sentence a report prints. Neither model
+    grew a method or a boolean a caller could test before attempting something, because
+    reading a fact is not an operation with two outcomes.
+    """
+    for owner in (DeviceFacts, DeviceResources, UnsupportedField):
+        assert not any(hasattr(owner, name) for name in ("capabilities", "supports", "probe"))
 
 
 # ───────────────────────────── documents and folders ─────────────────────────────
@@ -1108,10 +1250,331 @@ def test_the_index_source_publishes_transport_and_nothing_about_reading():
 
 @pytest.mark.parametrize(
     "port",
-    [DeviceCatalog, RawBundleSource, DocumentUploader, DeviceFactsSource, SearchIndexSource],
+    [
+        DeviceCatalog,
+        RawBundleSource,
+        DocumentUploader,
+        DeviceFactsSource,
+        SearchIndexSource,
+        SceneWriter,
+    ],
 )
 def test_the_device_ports_are_not_runtime_checkable(port: type):
     # Nothing needs `isinstance` against them, and a structural check at runtime would only
     # verify member names -- so the type gate, not the interpreter, is what checks conformance.
     with pytest.raises(TypeError, match="runtime_checkable"):
         isinstance(_StubIndexSource(None), port)
+
+
+# ───────────────────────────── the scene write path ─────────────────────────────
+#
+#  The read-modify-write cycle that runs while a human holds a stylus. The value objects here
+#  carry the whole safety argument, so they are tested directly; the Protocol is exercised
+#  through one in-memory writer bound to a `SceneWriter`-annotated name.
+
+SCENE = b"reMarkable .lines file, version=6          \x00\x01"
+"""Stand-in scene bytes. Nothing here decodes them; only their identity is under test."""
+
+
+class _MemoryWriter:
+    """A :class:`SceneWriter` over one page held in memory, with a snapshot per write.
+
+    Three seams and nothing more. ``interference`` replaces the stored bytes just before a
+    write re-checks its precondition, which is the only way to reach "the human drew while you
+    were thinking" without a device. ``journal`` records the order the methods were called in,
+    because the ordering claim -- one read, then one write, and no read in between -- is
+    otherwise unassertable. And the stored scene may be ``None``, which is the blank page of an
+    annotated PDF and the state a caller must refuse rather than create.
+    """
+
+    def __init__(
+        self,
+        scene: bytes | None,
+        *,
+        interference: bytes | None = None,
+        journal: list[str] | None = None,
+    ) -> None:
+        self._scene = scene
+        self._interference = interference
+        self.journal = journal if journal is not None else []
+        self._snapshots: dict[str, bytes] = {}
+
+    def read_scene(self, doc_uuid: str, page_id: str, /) -> SceneRead:
+        """Hand back the page as it stands, with the identity a write must re-check."""
+        self.journal.append("read")
+        return SceneRead(
+            doc_uuid=doc_uuid,
+            page_id=page_id,
+            location=f"/home/root/.local/share/{doc_uuid}/{page_id}.rm",
+            scene=self._scene,
+        )
+
+    def write_scene(self, precondition: ScenePrecondition, scene: bytes, /) -> SceneWriteReceipt:
+        """Replace the page, refusing if it moved since the precondition was captured."""
+        self.journal.append("write")
+        if not scene:
+            raise UsageError(subject="an empty scene", requirement="the page's whole new contents")
+        if self._interference is not None:
+            self._scene = self._interference
+            self._interference = None
+        current = self.read_scene(precondition.doc_uuid, precondition.page_id).precondition
+        self.journal.pop()  # the re-read is internal, not a caller's read
+        if current != precondition:
+            raise DeviceStateMismatchError(
+                transport=TransportKind.SSH,
+                subject=precondition.page_id,
+                expected=str(precondition.fingerprint),
+                observed=str(current.fingerprint),
+                retryable=True,
+            )
+        replaced = current.fingerprint
+        snapshot = None
+        if replaced is not None and self._scene is not None:
+            snapshot = f"/home/root/.rmspec/{precondition.page_id}.{replaced[:8]}.bak"
+            self._snapshots[snapshot] = self._scene
+        self._scene = scene
+        return SceneWriteReceipt(
+            doc_uuid=precondition.doc_uuid,
+            page_id=precondition.page_id,
+            location=f"/home/root/.local/share/{precondition.doc_uuid}/{precondition.page_id}.rm",
+            byte_count=len(scene),
+            fingerprint=digest_of(_SCENE_FINGERPRINT_TAG, scene),
+            replaced=replaced,
+            snapshot=snapshot,
+            visibility=SceneVisibility.REOPEN_REQUIRED,
+        )
+
+    def undo(self, receipt: SceneWriteReceipt, /) -> SceneWriteReceipt:
+        """Put the superseded scene back, under the same precondition rules."""
+        self.journal.append("undo")
+        if receipt.snapshot is None:
+            raise UsageError(
+                subject="a receipt naming no snapshot",
+                requirement="a receipt for a write that superseded a scene",
+            )
+        restored = self._snapshots[receipt.snapshot]
+        return self.write_scene(
+            ScenePrecondition(
+                doc_uuid=receipt.doc_uuid,
+                page_id=receipt.page_id,
+                fingerprint=receipt.fingerprint,
+            ),
+            restored,
+        )
+
+
+def test_a_read_derives_its_own_precondition_so_the_two_cannot_disagree():
+    # The property a field could not give: there is no way to hold these bytes alongside an
+    # identity for some other bytes, because the identity is computed from them on demand.
+    read = SceneRead(doc_uuid="doc-1", page_id="page-1", location="/p.rm", scene=SCENE)
+
+    assert read.precondition == ScenePrecondition(
+        doc_uuid="doc-1",
+        page_id="page-1",
+        fingerprint=digest_of(_SCENE_FINGERPRINT_TAG, SCENE),
+    )
+    assert "precondition" not in SceneRead.model_fields
+
+
+def test_a_page_with_no_scene_asserts_that_it_still_has_none():
+    # `None` is a real assertion rather than a missing one: the write requires the page to be
+    # just as absent as it was.
+    read = SceneRead(doc_uuid="doc-1", page_id="page-1", location="/p.rm", scene=None)
+
+    assert read.precondition.fingerprint is None
+
+
+def test_an_empty_artifact_is_not_the_same_state_as_an_absent_one():
+    # A file that exists and is empty is a page something truncated; a page with no file is the
+    # blank page of an annotated PDF. A caller must be able to tell them apart.
+    absent = SceneRead(doc_uuid="d", page_id="p", location="/p.rm", scene=None)
+    empty = SceneRead(doc_uuid="d", page_id="p", location="/p.rm", scene=b"")
+
+    assert absent.precondition != empty.precondition
+    assert empty.precondition.fingerprint is not None
+
+
+@given(scene=st.binary(max_size=64), other=st.binary(max_size=64))
+def test_two_scenes_share_a_fingerprint_only_when_they_share_their_bytes(
+    scene: bytes,
+    other: bytes,
+):
+    left = SceneRead(doc_uuid="d", page_id="p", location="/p.rm", scene=scene)
+    right = SceneRead(doc_uuid="d", page_id="p", location="/p.rm", scene=other)
+
+    assert (left.precondition == right.precondition) is (scene == other)
+
+
+def test_a_fingerprint_is_an_opaque_token_and_not_a_declared_hash_type():
+    # The vocabulary `page_fingerprint` established for the read side: comparability is the
+    # contract, and an algorithm in a port signature would be an adapter promoted to a contract.
+    assert ScenePrecondition.model_fields["fingerprint"].annotation == str | None
+    assert SceneWriteReceipt.model_fields["fingerprint"].annotation is str
+
+
+def test_a_precondition_cannot_be_built_without_stating_the_identity_it_asserts():
+    # No default. Forgetting to capture one fails safe -- it refuses against any page with ink --
+    # but it fails for a reason nobody can read, so it is a construction error instead.
+    assert ScenePrecondition.model_fields["fingerprint"].is_required()
+    with pytest.raises(ValidationError):
+        ScenePrecondition(doc_uuid="doc-1", page_id="page-1")  # ty: ignore[missing-argument]
+
+
+def test_a_precondition_refuses_a_blank_identifier_or_a_blank_fingerprint():
+    with pytest.raises(ValidationError):
+        ScenePrecondition(doc_uuid="", page_id="p", fingerprint=None)
+    with pytest.raises(ValidationError):
+        ScenePrecondition(doc_uuid="d", page_id="", fingerprint=None)
+    with pytest.raises(ValidationError):
+        ScenePrecondition(doc_uuid="d", page_id="p", fingerprint="")
+
+
+def test_a_receipt_that_superseded_ink_must_name_the_snapshot_holding_it():
+    # One snapshot per write. "Wrote over a page of handwriting and kept no copy" is not a
+    # reportable success.
+    with pytest.raises(ValidationError, match="must name the snapshot"):
+        SceneWriteReceipt(
+            doc_uuid="doc-1",
+            page_id="page-1",
+            location="/p.rm",
+            byte_count=len(SCENE),
+            fingerprint="ff",
+            replaced="ee",
+            snapshot=None,
+            visibility=SceneVisibility.REOPEN_REQUIRED,
+        )
+
+
+def test_a_receipt_that_superseded_nothing_cannot_claim_a_snapshot():
+    with pytest.raises(ValidationError, match="cannot have snapshotted"):
+        SceneWriteReceipt(
+            doc_uuid="doc-1",
+            page_id="page-1",
+            location="/p.rm",
+            byte_count=len(SCENE),
+            fingerprint="ff",
+            replaced=None,
+            snapshot="/p.bak",
+            visibility=SceneVisibility.REOPEN_REQUIRED,
+        )
+
+
+def test_a_receipt_never_reports_a_zero_byte_write():
+    # A scene write writes a whole page. Zero bytes is a page whose ink has been deleted, which
+    # nothing may ask this port for, so it cannot be reported as a success either.
+    with pytest.raises(ValidationError):
+        SceneWriteReceipt(
+            doc_uuid="doc-1",
+            page_id="page-1",
+            location="/p.rm",
+            byte_count=0,
+            fingerprint="ff",
+            replaced=None,
+            snapshot=None,
+            visibility=SceneVisibility.REOPEN_REQUIRED,
+        )
+
+
+def test_visibility_has_no_way_to_say_the_human_can_already_see_the_edit():
+    # One member, and that is the measurement: firmware holds an open document's scene in memory
+    # and the writer deliberately does not restart the UI to force a redraw.
+    assert {member.value for member in SceneVisibility} == {"reopen_required"}
+    assert SceneVisibility("reopen_required") is SceneVisibility.REOPEN_REQUIRED
+    already_visible = {member.value for member in LibraryRefresh}
+    assert "already_visible" in already_visible
+    assert already_visible.isdisjoint({member.value for member in SceneVisibility})
+
+
+def test_the_upload_vocabulary_did_not_gain_a_not_visible_yet_member():
+    # `LibraryRefresh` exists so "uploaded but never made visible" is unrepresentable. A third
+    # member for the edit path would have handed every uploader a way to say exactly that.
+    assert {member.value for member in LibraryRefresh} == {
+        "visibility_forced",
+        "already_visible",
+    }
+
+
+def test_a_write_replaces_the_page_and_reports_what_it_superseded():
+    journal: list[str] = []
+    writer: SceneWriter = _MemoryWriter(SCENE, journal=journal)
+    read = writer.read_scene("doc-1", "page-1")
+    assert read.scene == SCENE
+
+    receipt = writer.write_scene(read.precondition, SCENE + b"more ink")
+
+    assert journal == ["read", "write"]
+    assert receipt.replaced == read.precondition.fingerprint
+    assert receipt.fingerprint == digest_of(_SCENE_FINGERPRINT_TAG, SCENE + b"more ink")
+    assert receipt.byte_count == len(SCENE) + len(b"more ink")
+    assert receipt.snapshot is not None
+    assert receipt.visibility is SceneVisibility.REOPEN_REQUIRED
+
+
+def test_a_write_refuses_rather_than_merges_when_the_human_drew_first():
+    writer: SceneWriter = _MemoryWriter(SCENE, interference=SCENE + b"the human's stroke")
+    read = writer.read_scene("doc-1", "page-1")
+
+    with pytest.raises(DeviceStateMismatchError) as raised:
+        writer.write_scene(read.precondition, SCENE + b"the agent's reply")
+
+    assert raised.value.retryable is True
+    assert raised.value.observed != raised.value.expected
+
+
+def test_a_write_refuses_empty_bytes_before_touching_the_page():
+    writer: SceneWriter = _MemoryWriter(SCENE)
+    read = writer.read_scene("doc-1", "page-1")
+
+    with pytest.raises(UsageError):
+        writer.write_scene(read.precondition, b"")
+
+    assert writer.read_scene("doc-1", "page-1").scene == SCENE
+
+
+def test_an_undo_restores_the_superseded_scene_and_is_itself_reversible():
+    writer: SceneWriter = _MemoryWriter(SCENE)
+    read = writer.read_scene("doc-1", "page-1")
+    written = writer.write_scene(read.precondition, SCENE + b"reply")
+
+    reversal = writer.undo(written)
+
+    assert writer.read_scene("doc-1", "page-1").scene == SCENE
+    assert reversal.replaced == written.fingerprint
+    assert reversal.fingerprint == read.precondition.fingerprint
+
+
+def test_an_undo_of_a_write_that_superseded_nothing_is_refused():
+    # There is no prior state to restore, and removing an artifact is a different operation with
+    # different failure modes.
+    writer: SceneWriter = _MemoryWriter(None)
+    read = writer.read_scene("doc-1", "page-1")
+    written = writer.write_scene(read.precondition, SCENE)
+
+    assert written.snapshot is None
+    with pytest.raises(UsageError):
+        writer.undo(written)
+
+
+def test_the_scene_writer_publishes_three_methods_and_no_standalone_verify():
+    # A caller that checks and then writes has opened a second window after the one it closed.
+    # The only sound re-check is inside `write_scene`, and a listing of backups is something a
+    # command prints rather than something a policy decides from.
+    assert get_protocol_members(SceneWriter) == {"read_scene", "write_scene", "undo"}
+
+
+def test_the_write_takes_its_precondition_positionally_so_it_cannot_be_omitted():
+    parameters = inspect.signature(SceneWriter.write_scene).parameters
+    assert list(parameters)[1:] == ["precondition", "scene"]
+    assert all(
+        parameters[name].kind is inspect.Parameter.POSITIONAL_ONLY for name in list(parameters)[1:]
+    )
+    assert all(parameters[name].default is inspect.Parameter.empty for name in list(parameters))
+
+
+def test_no_location_field_anywhere_here_is_a_filesystem_path_type():
+    # A filesystem location is an adapter's identity for a resource, carried as an opaque string
+    # that is displayed and logged, never reopened. A path type would be a second addressing
+    # scheme, and the first caller to build one by concatenation would have invented a traversal.
+    assert SceneRead.model_fields["location"].annotation is str
+    assert SceneWriteReceipt.model_fields["location"].annotation is str
+    assert SceneWriteReceipt.model_fields["snapshot"].annotation == str | None

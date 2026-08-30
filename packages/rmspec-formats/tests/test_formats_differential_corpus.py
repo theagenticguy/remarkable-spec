@@ -1,9 +1,15 @@
 """The recorded legacy behaviour this relocation is held to, where it can be checked.
 
 ``tests/fixtures/render-differential-manifest.json`` was produced by the legacy tree at
-commit 14f1960 over one device's backup. It is keyed by ``rm_sha256`` and commits no
-bytes -- "the source files are a personal backup outside the repo and are not committed" --
-so two kinds of assertion live here:
+commit 14f1960 over one device's backup. That tree was deleted on 2026-08-30, which changed
+nothing here: this module never imported it. It has always compared the relocated codec against
+the *recording*, never against a running second implementation, so "differential" in the file
+name means a differential against a frozen artifact. The manifest is now the only witness to
+what the legacy reader read, and re-recording it is impossible -- which is the argument for
+never regenerating it to make a failure go away.
+
+It is keyed by ``rm_sha256`` and commits no bytes -- "the source files are a personal backup
+outside the repo and are not committed" -- so two kinds of assertion live here:
 
 1. **Manifest invariants, always checked.** Cheap, and they pin the facts this package was
    built against: that the recording had no failures, and what the 62-of-92 empty-stub

@@ -24,7 +24,7 @@ from render_builders import (
 from render_contract import (
     PageRendererLike,
     assert_page_renderer_contract,
-    visible_text_blocks,
+    drawable_text_blocks,
 )
 
 from rmspec.domain.models import (
@@ -71,7 +71,7 @@ class InkOnlyFakeRenderer:
     ) -> RenderedPage:
         """Return a blank document sized to the screen."""
         del palette, style, background
-        dropped = visible_text_blocks(page)
+        dropped = drawable_text_blocks(page)
         notices = (
             (
                 RenderNotice(
@@ -97,6 +97,9 @@ RENDERER_IDS = ["SvgPageRenderer", "InkOnlyFakeRenderer"]
 
 TEXT = TextBlock(pos_x=10.0, pos_y=20.0, width=600.0, text="typed words")
 
+#: A second block, so a page carrying text from both sources has two distinguishable ones.
+PAGE_TEXT = TextBlock(pos_x=30.0, pos_y=40.0, width=600.0, text="page scoped words")
+
 PAGES = {
     "blank stub": page(),
     "one empty layer": page(layer()),
@@ -106,6 +109,16 @@ PAGES = {
     "hidden ink": page(layer(stroke(point(0.0, 0.0), point(1.0, 1.0)), visible=False)),
     "typed text only": page(layer(text_blocks=(TEXT,))),
     "text and ink": page(layer(stroke(point(0.0, 0.0), point(1.0, 1.0)), text_blocks=(TEXT,))),
+    "page-level text only": page(text_blocks=(TEXT,)),
+    "page-level text over ink": page(
+        layer(stroke(point(0.0, 0.0), point(1.0, 1.0))),
+        text_blocks=(TEXT,),
+    ),
+    "page-level text over hidden layers": page(
+        layer(stroke(point(0.0, 0.0), point(1.0, 1.0)), visible=False),
+        text_blocks=(TEXT,),
+    ),
+    "text from both sources": page(layer(text_blocks=(TEXT,)), text_blocks=(PAGE_TEXT,)),
     "unreadable": unreadable_page(PageDefectCode.CONTENT_UNDECODABLE),
     "every pen": page(
         layer(

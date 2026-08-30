@@ -41,17 +41,18 @@ dev = [
 target-version = "py313"
 line-length = 99
 src = ["packages/*/src", "tests"]
-# The legacy single-distribution tree. It is being emptied into packages/ across
-# steps 2-6 of the restructure and deleted at the end, so linting it would report
-# 626 findings against code with a scheduled deletion date. The new tree under
-# packages/ and tests/ is linted at full strength, and
-# tests/architecture/ asserts that nothing new lands in src/.
+# `src/remarkable_spec` used to be listed here too: the legacy single-distribution
+# tree, excluded because linting code with a scheduled deletion date would have
+# reported 626 findings nobody was going to fix. It was deleted on 2026-08-30, so
+# the exclusion named a path that no longer exists -- a rule that can never fire
+# reads like a live exemption and invites a new file to be dropped under it.
+# Everything the workspace now ships is linted at full strength.
 # ruff 0.16 formats Python code blocks embedded in Markdown. The docs/ tree is a
 # generated artifact whose "Shape: verbatim from path:LOC" blocks are validated by
 # string-equality against those exact source lines -- letting the formatter
 # de-indent them silently breaks the verbatim claim. docs/ has its own gate
 # (the citation validator), so ruff stays out of it entirely.
-extend-exclude = ["src/remarkable_spec", "docs"]
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -143,7 +144,11 @@ testpaths = ["tests", "packages"]
 # documented in prose and enforced in one place.
 #
 # pytest's `-m` is single-valued and `addopts` is prepended, so a command-line `-m hardware`
-# comes later and wins outright -- `mise run test-hardware` still selects exactly the six.
+# comes later and wins outright -- `mise run test-hardware` still selects exactly the
+# hardware-marked set, whatever its size. It was six, then seven when the write precondition
+# gained a read-only proof against the real page, then eight when the xochitl-restart guard
+# gained one; a comment naming a count is a comment that goes stale, so this one names the
+# marker instead.
 # Verified both directions rather than assumed.
 addopts = "--strict-markers --strict-config -ra -m 'not hardware'"
 markers = [

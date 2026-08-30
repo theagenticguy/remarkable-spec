@@ -1,8 +1,15 @@
 """The USB web API transport, its breadth-first walk, its bundle, and its empty facts.
 
-Every request here goes through ``httpx.MockTransport``. Nothing constructs a client
-against a real address: the reference tablet is attached while this is being written, so a
-test that reached the network would silently **pass** instead of failing.
+Every request here goes through ``httpx.MockTransport``. Nothing sends a request to a real
+address: the reference tablet is attached while this is being written, so a test that reached
+the network would silently **pass** instead of failing.
+
+Four tests do construct a real ``httpx.Client``, because ``UsbWebApi.over_usb`` is the
+composition root's factory and a factory nobody calls is a factory nobody has tested. That is
+safe for the same reason it is worth doing: constructing a client opens no socket -- ``httpx``
+connects on the first request -- so those tests read the client's configuration and close it,
+and the closed-client test proves the close by watching ``httpx`` refuse a request *before* it
+reaches a transport.
 
 Every fixture is **synthesised** from the measured shape rather than captured. A real
 ``/documents/`` body carries the user's document titles and a real ``.rmdoc`` carries their
@@ -17,7 +24,14 @@ Four things carry this suite, and the sections below follow them:
   vanished subtree;
 * the bundle -- the three page states, the dropped orphan layer, and all-or-nothing;
 * the write route measured on 2026-08-29 -- the multipart shape, the name semantics, the two
-  refusals, and the one fact that stays an absence: every device fact is ``unsupported``.
+  refusals, the destination pre-flight that pins the write to the root, and the one fact that
+  stays an absence: every device fact is ``unsupported``.
+
+The pre-flight tests are worth naming here because they assert an *order* rather than a value:
+``GET /documents/`` then ``POST /upload``, holding even when the caller walked the library into
+a folder first. There is no way to measure the behaviour they defend against without creating a
+document on a real tablet that no HTTP route can delete, so the sequence assertions are the
+whole of the evidence and a reordering has to fail here or nowhere.
 
 Nothing here sends a real request, which for the write route is not merely hygiene. ``POST
 /upload`` **creates** a document and the firmware's six route families include no delete, so a
@@ -41,6 +55,7 @@ from rmspec.device._archive import RMDOC_ROUTE
 from rmspec.device._wire import COLLECTION_TYPE, DOCUMENT_TYPE, LISTING_ROUTE
 from rmspec.device.addresses import DEFAULT_USB_HOST, Endpoint
 from rmspec.device.usb import (
+    _CLOSE_AFTER_HEAD,
     UPLOAD_CREATED,
     UPLOAD_FIELD,
     UPLOAD_MEDIA_TYPES,
@@ -52,6 +67,7 @@ from rmspec.device.usb import (
     UsbFacts,
     UsbUploader,
     UsbWebApi,
+    _declared,
     _only_children_of,
 )
 from rmspec.domain.errors import (
@@ -68,6 +84,7 @@ from rmspec.domain.ports.device import (
     DeviceFileType,
     LibraryRefresh,
     SkipReason,
+    UnsupportedField,
     UploadMedia,
     UploadRequest,
 )
@@ -356,6 +373,60 @@ def sources(
     )
     catalog = UsbCatalog(api=api)
     return catalog, UsbBundleSource(api=api, catalog=catalog)
+
+
+# ─────────────────────── the client this transport owns ───────────────────────
+
+
+def test_the_factory_needs_nothing_from_the_caller_but_an_address():
+    """``over_usb`` is what lets a composition root reach a tablet without importing httpx.
+
+    The client it builds carries :data:`~rmspec.device.usb.USB_TIMEOUT_SECONDS`, which is the
+    ceiling every read inherits -- ``get`` and ``head`` spell no timeout of their own, and the
+    read arm of that branch is asserted further down against an injected client.
+    """
+    api = UsbWebApi.over_usb(Endpoint())
+    try:
+        assert api._client.timeout == httpx.Timeout(usb.USB_TIMEOUT_SECONDS)
+    finally:
+        api.close()
+
+
+def test_the_factory_takes_a_ceiling_when_the_caller_has_a_reason():
+    api = UsbWebApi.over_usb(Endpoint(), timeout=2.5)
+    try:
+        assert api._client.timeout == httpx.Timeout(2.5)
+    finally:
+        api.close()
+
+
+def test_the_factory_leaves_keep_alive_alone_because_only_head_poisons_a_connection():
+    """The fix for the ``HEAD`` defect is per-verb, and this factory must not generalise it.
+
+    ``head`` sends ``Connection: close`` itself. Setting the same header on the client would
+    make every ``GET`` of a breadth-first walk pay a fresh handshake to work around a defect
+    only one verb has, so the assertion is that the client still declares httpx's own
+    ``keep-alive`` -- the value the request-level test downstream watches a ``GET`` carry.
+    """
+    api = UsbWebApi.over_usb(Endpoint())
+    try:
+        assert api._client.headers["connection"] == "keep-alive"
+    finally:
+        api.close()
+
+
+def test_a_closed_transport_refuses_to_send_and_closing_twice_is_not_an_error():
+    """``close`` is the counterpart the container's finalizer calls, and it is idempotent.
+
+    The refusal comes from ``httpx.Client.send``, which checks its own state before it reaches
+    a transport, so this asserts the close took effect without a socket existing at any point.
+    """
+    api = UsbWebApi.over_usb(Endpoint())
+    api.close()
+    api.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        api.get(LISTING_ROUTE)
 
 
 # ─────────────────────────────── the request seam ───────────────────────────────
@@ -1155,14 +1226,14 @@ def test_read_facts_names_every_fixed_fact_unsupported():
     """The route table is closed at six families and none of them reports device identity."""
     facts = UsbFacts(api=web_api(tablet(tree={"": []}))).read_facts()
 
-    assert facts.unsupported == frozenset({"firmware", "model", "serial"})
+    assert facts.unsupported_names == frozenset({"firmware", "model", "serial"})
     assert (facts.firmware, facts.model, facts.serial) == (None, None, None)
 
 
 def test_read_resources_names_every_gauge_unsupported():
     resources = UsbFacts(api=web_api(tablet(tree={"": []}))).read_resources()
 
-    assert resources.unsupported == frozenset(
+    assert resources.unsupported_names == frozenset(
         {
             "total_memory_bytes",
             "available_memory_bytes",
@@ -1172,6 +1243,76 @@ def test_read_resources_names_every_gauge_unsupported():
     )
     assert resources.total_storage_bytes is None
     assert resources.available_storage_bytes is None
+
+
+def test_every_fixed_fact_but_the_serial_is_answerable_over_ssh():
+    """Change transports is a different sentence from stop asking, and both are printed."""
+    facts = UsbFacts(api=web_api(tablet(tree={"": []}))).read_facts()
+
+    assert facts.alternatives == (
+        UnsupportedField(name="firmware", supported_by=(TransportKind.SSH,)),
+        UnsupportedField(name="model", supported_by=(TransportKind.SSH,)),
+        UnsupportedField(name="serial", supported_by=()),
+    )
+
+
+def test_the_serial_is_answerable_nowhere_rather_than_over_ssh():
+    """The empty tuple is a claim: the value's only sources are ones this project will not read.
+
+    Asserted on its own as well as inside the tuple above, because it is the one entry whose
+    ``supported_by`` differs in kind rather than in content -- and the one an editor adding a
+    transport would be tempted to "fix" by appending ``SSH``.
+    """
+    facts = UsbFacts(api=web_api(tablet(tree={"": []}))).read_facts()
+
+    serial = next(entry for entry in facts.alternatives if entry.name == "serial")
+    assert serial.supported_by == ()
+    assert serial.supported_by is not None
+
+
+def test_every_gauge_is_answerable_over_ssh():
+    """``/proc/meminfo`` and ``df -Pk`` are files, and no route family here serves one."""
+    resources = UsbFacts(api=web_api(tablet(tree={"": []}))).read_resources()
+
+    assert resources.alternatives == tuple(
+        UnsupportedField(name=name, supported_by=(TransportKind.SSH,))
+        for name in (
+            "available_memory_bytes",
+            "available_storage_bytes",
+            "total_memory_bytes",
+            "total_storage_bytes",
+        )
+    )
+
+
+def test_nothing_this_transport_declares_is_left_unclaimed():
+    """Every field of both models is annotated today, so the report never prints ``None``.
+
+    The regression this pins is the one the widening was meant to end: before the adapter opted
+    in, every entry rendered as "not available over this transport" and the report said nothing
+    about who could.
+    """
+    facts = UsbFacts(api=web_api(tablet(tree={"": []})))
+
+    for reading in (facts.read_facts(), facts.read_resources()):
+        bare = {entry for entry in reading.unsupported if isinstance(entry, str)}
+        assert bare == set()
+
+
+def test_a_field_the_port_gains_later_is_still_declared_even_with_no_claim_for_it():
+    """A derived default with named overrides, so a new field is reported rather than dropped.
+
+    The set is derived from the model's own fields and the annotation is an override on top; a
+    hand-written literal list would silently omit a field added to the port, which is the shape
+    this asserts against. The bare name is the honest declaration for a field nobody has
+    measured a second transport against, and the port reads it as "nothing claimed".
+    """
+    added_later = "battery_percent"
+
+    declared = _declared(frozenset({added_later, "serial"}))
+
+    assert added_later in declared
+    assert declared == frozenset({added_later, UnsupportedField(name="serial", supported_by=())})
 
 
 def test_both_readings_probe_the_tablet_with_one_head_of_the_listing_route():
@@ -1223,23 +1364,46 @@ def test_a_probe_the_tablet_refuses_is_a_protocol_error(reading: str):
 def upload_tablet(
     *,
     answer: Callable[[], httpx.Response] | None = None,
+    preflight: Callable[[], httpx.Response] | None = None,
     seen: list[httpx.Request] | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
-    """Build a handler serving only ``POST /upload``, and recording what it was sent.
+    """Build a handler serving the two routes an upload touches, recording what it was sent.
 
-    Narrower than :func:`tablet` on purpose: the uploader is allowed to touch one route, so
-    anything else fails the test rather than being answered.
+    Narrower than :func:`tablet` on purpose: the uploader is allowed exactly
+    ``GET /documents/`` and ``POST /upload``, so a third route fails the test rather than being
+    answered. The listing is the destination pre-flight rather than a read of anything -- the
+    uploader discards the body -- so an empty array is a complete answer to it.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(request)
         path = request.url.raw_path.decode()
+        if request.method == "GET" and path == LISTING_ROUTE:
+            return json_response(b"[]") if preflight is None else preflight()
         if request.method == "POST" and path == UPLOAD_ROUTE:
             return created() if answer is None else answer()
         pytest.fail(f"the fake tablet was asked for {request.method} {path!r}, which it refuses")
 
     return handler
+
+
+def sent(seen: list[httpx.Request]) -> list[str]:
+    """Reduce recorded requests to ``"<METHOD> <raw path>"``, in the order they went out."""
+    return [f"{request.method} {request.url.raw_path.decode()}" for request in seen]
+
+
+def posted(seen: list[httpx.Request]) -> httpx.Request:
+    """Return the one recorded ``POST``, failing if there is not exactly one.
+
+    Every upload now sends a pre-flight first, so ``seen[0]`` is the listing rather than the
+    write. Picking the ``POST`` by verb rather than by index keeps each assertion about the body
+    honest even if the request sequence grows again, and the count check is what stops this
+    helper from hiding a second write.
+    """
+    writes = [request for request in seen if request.method == "POST"]
+    assert len(writes) == 1, f"expected exactly one POST, saw {sent(seen)}"
+    return writes[0]
 
 
 def created() -> httpx.Response:
@@ -1274,7 +1438,7 @@ def test_the_measured_client_shape_is_what_goes_on_the_wire():
 
     uploader.upload(an_upload(name="Design review.pdf"))
 
-    request = seen[0]
+    request = posted(seen)
     body = request.content.decode("latin-1")
     assert (request.method, request.url.raw_path.decode()) == ("POST", UPLOAD_ROUTE)
     assert f'name="{UPLOAD_FIELD}"' in body
@@ -1291,8 +1455,11 @@ def test_every_media_is_sent_under_the_type_that_describes_its_bytes(media: Uplo
 
     receipt = uploader.upload(an_upload(media=media))
 
-    assert UPLOAD_MEDIA_TYPES[media] in seen[0].content.decode("latin-1")
+    assert UPLOAD_MEDIA_TYPES[media] in posted(seen).content.decode("latin-1")
     assert receipt.media is media
+    # And the pre-flight is sent for this media too. The trigger is any prior listing by
+    # anyone, which is not a property of the media, so there is no media that opts out.
+    assert sent(seen) == [f"GET {LISTING_ROUTE}", f"POST {UPLOAD_ROUTE}"]
 
 
 def test_the_name_is_sent_verbatim_and_no_extension_is_invented():
@@ -1307,7 +1474,7 @@ def test_the_name_is_sent_verbatim_and_no_extension_is_invented():
 
     receipt = uploader.upload(an_upload(name="Design review"))
 
-    assert 'filename="Design review"' in seen[0].content.decode("latin-1")
+    assert 'filename="Design review"' in posted(seen).content.decode("latin-1")
     assert ".pdf" not in receipt.name
 
 
@@ -1322,9 +1489,11 @@ def test_the_receipt_reports_no_identifier_because_the_body_carries_none():
     assert receipt.name == request.name
     assert receipt.byte_count == len(request.data)
     assert receipt.library_refresh is LibraryRefresh.ALREADY_VISIBLE
-    # And nothing re-listed /documents/ to guess which new entry was ours: two concurrent
-    # uploads make that answer wrong, so the honest report is that we do not know.
-    assert [entry.url.raw_path.decode() for entry in seen] == [UPLOAD_ROUTE]
+    # And nothing listed /documents/ *after* the write to guess which new entry was ours: two
+    # concurrent uploads make that answer wrong, so the honest report is that we do not know.
+    # The one listing here precedes the POST -- it is the destination pre-flight, sent when no
+    # new entry exists yet -- so asserting the order is what keeps the two apart.
+    assert sent(seen) == [f"GET {LISTING_ROUTE}", f"POST {UPLOAD_ROUTE}"]
 
 
 def test_the_upload_carries_its_own_timeout_rather_than_the_clients():
@@ -1334,11 +1503,19 @@ def test_the_upload_carries_its_own_timeout_rather_than_the_clients():
 
     uploader.upload(an_upload())
 
-    assert seen[0].extensions["timeout"] == {
+    assert posted(seen).extensions["timeout"] == {
         "connect": UPLOAD_TIMEOUT_SECONDS,
         "pool": UPLOAD_TIMEOUT_SECONDS,
         "read": UPLOAD_TIMEOUT_SECONDS,
         "write": UPLOAD_TIMEOUT_SECONDS,
+    }
+    # The pre-flight is a read and keeps the client's ceiling. It would be wrong for a listing
+    # that answers in milliseconds to inherit the 120 seconds an import needs.
+    assert seen[0].extensions["timeout"] == {
+        "connect": 5.0,
+        "pool": 5.0,
+        "read": 5.0,
+        "write": 5.0,
     }
 
 
@@ -1445,16 +1622,156 @@ def test_a_two_hundred_is_not_a_created_document():
 
 
 def test_a_dead_cable_mid_upload_is_unreachable_and_never_a_short_receipt():
-    """HTTP has no partial-acceptance state, so there is no receipt reporting fewer bytes."""
+    """HTTP has no partial-acceptance state, so there is no receipt reporting fewer bytes.
+
+    The pre-flight is answered and only the ``POST`` dies, which is what keeps this test about
+    the write. A handler that failed every request would prove the same exception from the
+    listing instead, and the failure this is named for would stop being exercised.
+    """
     detail = "the link died while the body was going out"
+    seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.WriteError(detail, request=request)
+        seen.append(request)
+        if request.method == "POST":
+            raise httpx.WriteError(detail, request=request)
+        return json_response(b"[]")
 
     uploader = UsbUploader(api=web_api(handler))
 
     with pytest.raises(DeviceUnreachable):
         uploader.upload(an_upload())
+
+    assert sent(seen) == [f"GET {LISTING_ROUTE}", f"POST {UPLOAD_ROUTE}"]
+
+
+# ───────────── the destination pre-flight, against an unverified external claim ─────────────
+
+
+def test_the_root_listing_is_sent_immediately_before_every_write():
+    """``GET /documents/`` then ``POST /upload``, in that order, with nothing in between.
+
+    ``remarkable.guide`` documents this route as uploading to the last folder that was listed.
+    We have not measured that and will not -- the route creates and nothing deletes -- so this
+    is belt-and-braces: if the claim is false the listing is harmless, and if it is true this is
+    the difference between the root and wherever something else last looked.
+    """
+    seen: list[httpx.Request] = []
+    uploader = UsbUploader(api=web_api(upload_tablet(seen=seen)))
+
+    uploader.upload(an_upload())
+
+    assert sent(seen) == [f"GET {LISTING_ROUTE}", f"POST {UPLOAD_ROUTE}"]
+
+
+def test_a_folder_listed_by_the_caller_first_does_not_survive_to_the_write():
+    """The whole point: the guarantee holds no matter what listed before, and something did.
+
+    ``CreateDocument.create`` lists the library and then uploads, and :class:`_Walk` is
+    breadth-first -- so the last listing before the write is a *folder's* children, not the
+    root. Here that walk is performed over the same transport the uploader then uses, which is
+    exactly the ``Scope.REQUEST`` sharing the container produces, and the assertion is that the
+    uploader re-pins the root regardless.
+    """
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.raw_path.decode()
+        if request.method == "POST" and path == UPLOAD_ROUTE:
+            return created()
+        if path == f"{LISTING_ROUTE}{WORK}":
+            return json_response(json.dumps([document_entry(ROOT_DOC, parent=WORK)]).encode())
+        if path == LISTING_ROUTE:
+            return json_response(json.dumps([folder_entry(WORK)]).encode())
+        pytest.fail(f"the fake tablet was asked for {request.method} {path!r}, which it refuses")
+
+    api = web_api(handler)
+    UsbCatalog(api=api).list_documents()
+    listed_last = sent(seen)[-1]
+
+    UsbUploader(api=api).upload(an_upload())
+
+    # The walk ended on a folder, so before this change the write would have inherited it.
+    assert listed_last == f"GET {LISTING_ROUTE}{WORK}"
+    assert sent(seen)[-2:] == [f"GET {LISTING_ROUTE}", f"POST {UPLOAD_ROUTE}"]
+
+
+def test_the_preflight_reuses_the_connection_rather_than_closing_it():
+    """Only ``HEAD`` sends ``Connection: close`` on this firmware, and this is a ``GET``.
+
+    A ``HEAD`` here would poison the keep-alive connection the ``POST`` then goes out on, which
+    is the defect ``_CLOSE_AFTER_HEAD`` exists for -- so the pre-flight must not acquire that
+    header by being mistaken for a probe.
+    """
+    seen: list[httpx.Request] = []
+    uploader = UsbUploader(api=web_api(upload_tablet(seen=seen)))
+
+    uploader.upload(an_upload())
+
+    assert seen[0].method == "GET"
+    # ``keep-alive`` is httpx's own default, which is the point: nothing here overrode it with
+    # the ``close`` that ``head`` sends, so the ``POST`` inherits a usable connection.
+    assert seen[0].headers.get("connection") != "close"
+    assert _CLOSE_AFTER_HEAD["Connection"] == "close"
+
+
+def test_a_preflight_that_cannot_reach_the_tablet_creates_nothing():
+    """The ordering is the guarantee: an unpinned destination means no write at all."""
+    seen: list[httpx.Request] = []
+    detached = httpx.ConnectError("no route to the tablet")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        raise detached
+
+    uploader = UsbUploader(api=web_api(handler))
+
+    with pytest.raises(DeviceUnreachable):
+        uploader.upload(an_upload())
+
+    assert sent(seen) == [f"GET {LISTING_ROUTE}"]
+
+
+def test_a_refused_preflight_is_a_protocol_error_and_still_creates_nothing():
+    """Uploading anyway would be the silent wrong placement this method exists to prevent."""
+    seen: list[httpx.Request] = []
+    uploader = UsbUploader(
+        api=web_api(upload_tablet(preflight=lambda: httpx.Response(500, content=b""), seen=seen))
+    )
+
+    with pytest.raises(DeviceProtocolError):
+        uploader.upload(an_upload())
+
+    assert sent(seen) == [f"GET {LISTING_ROUTE}"]
+
+
+def test_a_short_preflight_body_abandons_the_write_rather_than_hoping():
+    """A truncated listing means the traversal state may not have been set.
+
+    ``DeviceTransferInterrupted`` is unreachable from the ``POST`` -- HTTP has no
+    partial-acceptance state -- but it is reachable from the pre-flight, and it must still never
+    accompany a created document.
+    """
+    seen: list[httpx.Request] = []
+    truncated = httpx.Response(200, content=b"[]", headers={"content-length": "99"})
+    uploader = UsbUploader(api=web_api(upload_tablet(preflight=lambda: truncated, seen=seen)))
+
+    with pytest.raises(DeviceTransferInterrupted):
+        uploader.upload(an_upload())
+
+    assert sent(seen) == [f"GET {LISTING_ROUTE}"]
+
+
+def test_a_refused_destination_is_refused_before_the_preflight_too():
+    """Before the first byte now means before two requests rather than before one."""
+    seen: list[httpx.Request] = []
+    uploader = UsbUploader(api=web_api(upload_tablet(seen=seen)))
+
+    with pytest.raises(DeviceOperationUnsupported):
+        uploader.upload(an_upload(parent_uuid=WORK))
+
+    assert seen == []
 
 
 def test_the_module_exports_exactly_one_usb_uploader():
@@ -1473,6 +1790,7 @@ def test_the_module_exports_exactly_one_usb_uploader():
         "UPLOAD_OPERATION",
         "UPLOAD_ROUTE",
         "UPLOAD_TIMEOUT_SECONDS",
+        "USB_TIMEOUT_SECONDS",
         "UsbBundleSource",
         "UsbCatalog",
         "UsbFacts",
@@ -1484,7 +1802,13 @@ def test_the_module_exports_exactly_one_usb_uploader():
 
 
 def test_the_transport_has_two_read_verbs_and_exactly_one_write_verb():
-    """``== {"get", "head"}`` was retired by the same measurement; the count replaces it."""
+    """``== {"get", "head"}`` was retired by the same measurement; the count replaces it.
+
+    ``over_usb`` and ``close`` are in the set because they are on the class, and they are not
+    verbs: they are the client's lifetime, in the same pair ``ParamikoShell`` spells as
+    ``connect``/``close``. The guard that matters is unchanged -- a second name that sends
+    something still fails here.
+    """
     verbs = {name for name in vars(UsbWebApi) if not name.startswith("_")}
 
-    assert verbs == {"get", "head", "post_file"}
+    assert verbs == {"close", "get", "head", "over_usb", "post_file"}

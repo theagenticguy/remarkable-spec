@@ -67,7 +67,15 @@ LANGUAGE_ARTIFACTS = {"annotations"}
 #: constants are asserted against elsewhere; ``testing`` because the doubles ship. Every one
 #: of them is bound on the package as a side effect of an import somewhere, which is why this
 #: is a permitted set rather than a required one.
-PUBLIC_MODULES = {"addresses", "ssh", "testing", "usb"}
+#:
+#: ``writeback`` is here and **not** in ``__all__``, which is the one entry that needs its
+#: reason spelled out. Every name in ``__all__`` is something a composition root can bind to a
+#: Protocol in ``rmspec.domain.ports.device``, and there is no page-writer Protocol there yet:
+#: ``SshSceneWriter`` replaces bytes in an existing scene artifact, which no port describes.
+#: So it is reachable the way ``Endpoint`` is -- by importing the module that declares it --
+#: and it joins ``__all__`` on the day the port exists. Exporting it earlier would make this
+#: list mean two different things at once.
+PUBLIC_MODULES = {"addresses", "ssh", "testing", "usb", "writeback"}
 
 #: Names the private modules define that must never become part of this surface. Each is a
 #: wire-format or transport-internal value, and the middle three are the reason the modules
@@ -102,10 +110,13 @@ CLAIMED_METHODS = {
     "UsbCatalog": ("get_document", "list_documents"),
     "UsbFacts": ("read_facts", "read_resources"),
     "UsbUploader": ("upload",),
-    # Two reads and exactly one write. `UsbWebApi` claimed only ("get", "head") until
-    # POST /upload was measured on 2026-08-29; the entry is widened rather than loosened, so a
-    # second write verb appearing here still fails this test.
-    "UsbWebApi": ("get", "head", "post_file"),
+    # Two reads and exactly one write, plus the pair that owns the client. `UsbWebApi` claimed
+    # only ("get", "head") until POST /upload was measured on 2026-08-29, and gained
+    # ("close", "over_usb") when the composition root needed a client it may not build itself;
+    # the entry is widened rather than loosened, so a second write verb appearing here still
+    # fails this test. `over_usb`/`close` mirror `ParamikoShell`'s `connect`/`close` above,
+    # which is the whole argument for that shape over a module-level client factory.
+    "UsbWebApi": ("close", "get", "head", "over_usb", "post_file"),
 }
 
 

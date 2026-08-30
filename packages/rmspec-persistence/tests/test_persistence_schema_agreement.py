@@ -176,8 +176,11 @@ def test_every_payload_column_is_declared_with_a_model() -> None:
 @pytest.mark.parametrize("column", sorted(STORED_MODELS))
 def test_a_stored_model_matches_its_pinned_fingerprint(column: str) -> None:
     # The payload's version gate. When this fails, a stored model's field shape
-    # changed: bump SCHEMA_VERSION, add the migration that rewrites the affected
-    # payloads, and re-pin. Do not just update the number.
+    # changed. Decide which kind it is, the way `payload_schema`'s docstring sets out:
+    # a change stored rows cannot satisfy needs a SCHEMA_VERSION bump and the migration
+    # that rewrites the affected payloads before re-pinning; a new optional field with a
+    # default needs only the re-pin, and a docstring saying why that default is what an
+    # older row means. Either way, do not just update the number.
     assert payload_fingerprint(STORED_MODELS[column]) == PAYLOAD_FINGERPRINTS[column]
 
 

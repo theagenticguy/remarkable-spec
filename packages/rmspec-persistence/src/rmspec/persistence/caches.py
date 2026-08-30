@@ -11,7 +11,8 @@ mechanically a miss.
 
 Totality is structural, not incidental
 --------------------------------------
-All three methods on both ports are declared total: none raises. So each body
+Every method on both ports is declared total -- the three they share, plus
+``OcrCache.equivalent_raster``, which only the OCR binding carries: none raises. So each body
 catches ``PersistenceError`` -- both store faults and unreadable payloads -- plus
 the value and type errors a payload can produce, logs at ``WARNING`` through this
 module's logger, and returns ``None`` or drops the write. A miss costs a
@@ -198,7 +199,15 @@ class _SqliteArtifactCache[
 
 
 class SqliteOcrCache(_SqliteArtifactCache[OcrCacheKey, OcrArtifact]):
-    """The ``ocr_cache`` binding of :class:`~rmspec.domain.ports.persistence.OcrCache`."""
+    """The ``ocr_cache`` binding of :class:`~rmspec.domain.ports.persistence.OcrCache`.
+
+    One method more than its diagram sibling, because
+    :class:`~rmspec.domain.models.OcrCacheKey` has one component
+    :class:`~rmspec.domain.models.DiagramCacheKey` lacks; see
+    :meth:`~rmspec.domain.ports.persistence.OcrCache.equivalent_raster`. It cannot
+    live on the shared base for that reason, and it is the only place in this
+    package where a lookup is not an indexed equality on ``digest``.
+    """
 
     def __init__(self, database: SqliteDatabase, /) -> None:
         super().__init__(
@@ -207,6 +216,68 @@ class SqliteOcrCache(_SqliteArtifactCache[OcrCacheKey, OcrArtifact]):
             key_type=OcrCacheKey,
             artifact_type=OcrArtifact,
         )
+
+    def equivalent_raster(self, key: OcrCacheKey, /) -> OcrArtifact | None:
+        """Return a stored artifact for identical pixels under a different page hash.
+
+        Parameters
+        ----------
+        key
+            The key that missed. Matched on
+            :attr:`~rmspec.domain.models.OcrCacheKey.raster_identity`, with
+            ``page_hash`` required to differ.
+
+        Returns
+        -------
+        OcrArtifact | None
+            The artifact stored under the greatest qualifying ``digest``, or
+            ``None`` when none qualifies and on any read fault.
+
+        Notes
+        -----
+        A scan of the rows for other pages rather than an indexed lookup: there is
+        no ``raster_identity`` column to index, and adding one would be a second
+        mirrored copy of a key component -- the exact defect this table's
+        no-per-field-columns shape exists to prevent. ``page_hash`` is indexed, so
+        the scan is over "every row whose page differs", which is bounded by the
+        cache and not by the corpus. The rows are walked in descending ``digest``
+        order and the first qualifying one wins, which is the port's declared rule.
+
+        The only SQL in this module with no interpolation in it, and therefore the
+        only statement needing no ``S608`` suppression: this method belongs to one
+        binding rather than to the base class, so the table is a literal.
+        """
+        try:
+            rows = self._conn.query(
+                "SELECT key_payload, artifact_payload FROM ocr_cache "
+                "WHERE page_hash <> ? ORDER BY digest DESC",
+                (key.page_hash,),
+            )
+            wanted = key.raster_identity
+            for row in rows:
+                stored = loads(
+                    OcrCacheKey,
+                    row[0],
+                    store=self._store,
+                    table=self._table,
+                    key=wanted,
+                )
+                if stored.raster_identity == wanted:
+                    return loads(
+                        OcrArtifact,
+                        row[1],
+                        store=self._store,
+                        table=self._table,
+                        key=stored.digest,
+                    )
+        except (PersistenceError, ValueError, TypeError) as exc:
+            _LOGGER.warning(
+                "%s.%s equivalent-raster lookup failed, treating as a miss: %s",
+                self._store,
+                self._table,
+                exc,
+            )
+        return None
 
 
 class SqliteDiagramCache(_SqliteArtifactCache[DiagramCacheKey, DiagramArtifact]):
@@ -269,6 +340,23 @@ class NullOcrCache:
         -------
         OcrCacheKey | None
             Always ``None``.
+        """
+        _ = key
+        return None
+
+    def equivalent_raster(self, key: OcrCacheKey, /) -> OcrArtifact | None:
+        """Return ``None``: nothing is stored, so no pixels can be equivalent to it.
+
+        Parameters
+        ----------
+        key
+            Ignored.
+
+        Returns
+        -------
+        OcrArtifact | None
+            Always ``None``. ``--no-cache`` means the run pays, and a fallback that
+            fired here would make it mean something else.
         """
         _ = key
         return None

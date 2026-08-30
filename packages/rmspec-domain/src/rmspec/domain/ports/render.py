@@ -1,9 +1,12 @@
-"""Ports for the render slice: one parsed page in, one SVG document out.
+"""Ports for the render slice: a parsed page in, an SVG document or ink strokes out.
 
-The slice has exactly one port, :class:`PageRenderer`, plus the value objects it
-exchanges. Everything else the render lens proposed -- pen-model registries, pen physics
-factories, palette sources, template sources, background sources -- is deliberately absent;
-:ref:`the section below <not-ports>` records each one and why.
+The slice has two ports and they run in opposite directions. :class:`PageRenderer` turns a
+page into markup a human looks at; :class:`TextEngraver` turns a string into strokes a human
+reads *on the tablet*. Both are "make this legible", which is why they share a slice and a
+technology; neither knows where its output goes. Everything else the render lens proposed --
+pen-model registries, pen physics factories, palette sources, template sources, background
+sources -- is deliberately absent; :ref:`the section below <not-ports>` records each one and
+why.
 
 Why a port at all when there is one adapter
 -------------------------------------------
@@ -119,6 +122,37 @@ at all" is not a claim about well-formedness, and refusing it is what keeps ``No
 spelling of "no template" for :meth:`PageBackground.digest`, which folds the field in as
 ``(template_svg or "")``.
 
+Why text becomes ink, and why that is a second port here
+--------------------------------------------------------
+A page-scoped typed-text block written into a real page by a foreign author was **preserved**
+by firmware 3.27.3.0 across the tablet's own re-save -- read back at the exact position set,
+with the foreign author id intact -- and was **never drawn**. Strokes are what the tablet
+renders. So a message a human can read has to be ink, and :class:`TextEngraver` is where a
+string becomes some.
+
+It is a *separate* port from :class:`PageRenderer` for the mechanical reason
+``ports/formats.py`` gives for splitting :class:`~rmspec.domain.ports.formats.SceneAppender`
+off :class:`~rmspec.domain.ports.formats.PageCodec`: ``PageRenderer`` has exactly one method
+so a conforming double is one canned :class:`RenderedPage`, and every double in the workspace
+is annotated against it. A second method there would stop all of them satisfying the port
+they were written against, in order to publish something only the write path calls. The split
+also says something true -- rendering a page is available everywhere and produces an artifact
+nobody's handwriting depends on, while engraving text exists to feed a transport that rewrites
+a page a human is holding.
+
+The font is a **single-stroke engraving** face, and that is not a stylistic preference: a
+traced outline is a closed contour meant to be *filled*, and a stroke cannot fill, so an
+outline font engraved as strokes draws every letter as a hollow double line. The port is named
+for what the technique is, so nobody replaces it with an outline tracer and reports success.
+
+The one deliberate absence is a coverage set. :class:`TextEngraver` publishes no
+"characters I can draw" collection and the domain holds no copy of one, because the answer is
+a property of a font this module has never seen: a domain copy would be a claim nothing here
+can check and a second source of truth that drifts the first time the face is replaced.
+:attr:`InkText.substituted` is the answer instead -- reported per call, about the exact string
+that was asked for -- which is also the only shape a caller can act on before spending a
+write.
+
 Note for whoever writes ``ports/__init__.py``
 ---------------------------------------------
 This module may not import a sibling ports module, so three value objects here are
@@ -135,8 +169,14 @@ copy's PNG check enforced a 24-byte minimum header where the copy here checked o
 now enforces the same minimum, which is a fix that has to be made twice until the hoist
 lands.
 
-Domain models (``Page``, ``ScreenSpec``, ``Palette``) are imported for annotations only, as
-in ``ports/formats.py``: nothing in this module needs them at runtime.
+Domain models split two ways here, and the line is pydantic's rather than a preference.
+``Page``, ``ScreenSpec`` and ``Palette`` appear only in method signatures, so they are
+imported under ``TYPE_CHECKING`` as in ``ports/formats.py``. ``PenColor`` and ``Stroke``
+appear in *field* annotations on :class:`InkTextStyle` and :class:`InkText`, and pydantic
+resolves those when the model class is built -- so they must be imported at run time or the
+models raise ``PydanticUserError: not fully defined``. ``runtime-evaluated-base-classes`` in
+the root ``pyproject.toml`` is what stops ruff demanding the move that breaks them; the same
+note is on :mod:`rmspec.domain.models`.
 """
 
 from __future__ import annotations
@@ -148,12 +188,15 @@ from typing import TYPE_CHECKING, ClassVar, Protocol, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from rmspec.domain._digest import digest_of
+from rmspec.domain.models import PenColor, Stroke
 
 if TYPE_CHECKING:
     from rmspec.domain.models import Page, Palette, ScreenSpec
 
 __all__ = [
     "ImageMedia",
+    "InkText",
+    "InkTextStyle",
     "PageBackground",
     "PageRenderer",
     "PageUnderlay",
@@ -162,6 +205,7 @@ __all__ = [
     "RenderNoticeCode",
     "RenderStyle",
     "RenderedPage",
+    "TextEngraver",
     "TextStyle",
 ]
 
@@ -466,6 +510,123 @@ class TextStyle(BaseModel):
     line_height: float = Field(gt=0)
 
 
+class InkTextStyle(BaseModel):
+    """How a string is set as ink: the four decisions a stroke font cannot make for itself.
+
+    Millimetres, unlike :class:`TextStyle`'s ``size_px``, and the unit follows the caller
+    rather than the format. Typed text is positioned in screen units because
+    ``TextBlock.pos_x`` is, so a size in millimetres there would need converting against the
+    screen before it could be compared with the box it must fit. Ink placed on a page is
+    positioned in millimetres from the page's top-left, because the person choosing where a
+    reply goes is looking at a physical sheet and measuring from its corner -- and because
+    :attr:`InkText.extent_mm` has to be comparable with a page size, which is physical.
+
+    A pen is deliberately absent. :class:`~rmspec.domain.models.Stroke` carries a
+    :class:`~rmspec.domain.models.PenType`, and which one an engraved glyph uses is a property
+    of the technique rather than of the message: a single-stroke face needs a tool whose width
+    does not vary with the pressure and speed a synthesised sample has to invent. Offering the
+    choice here would offer a way to draw a reply with a highlighter, or with an eraser.
+
+    Attributes
+    ----------
+    em_mm
+        Height of one em in millimetres: the size knob, in the unit the placement uses.
+    line_height
+        Baseline-to-baseline distance as a multiple of ``em_mm``.
+    color
+        Ink colour, from the enum the tablet stores per stroke, so a reply is as visible as
+        the human's own ink and can be told from it at a glance.
+    thickness_scale
+        The tablet's thickness-slider value the strokes are minted with, before any per-pen
+        formula. The same calibration decision :attr:`RenderStyle.thickness_scale` is, one
+        layer along: exported weight and on-screen weight differ, and the value that
+        compensates has an owner at composition rather than being a bare constant.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    em_mm: float = Field(gt=0)
+    line_height: float = Field(gt=0)
+    color: PenColor
+    thickness_scale: float = Field(gt=0)
+
+
+class InkText(BaseModel):
+    """One string, engraved: the strokes to draw it and everything a caller checks first.
+
+    Every field answers a question that has to be answerable **before** the strokes reach a
+    page, because that is the only point at which the answer is free. :attr:`substituted` is
+    what stops a caller discovering on the tablet that its prose was drawn as boxes;
+    :attr:`extent_mm` is what stops it discovering that half the reply is below the bottom
+    edge; :attr:`lines` is the reply as it will actually read once wrapped. A value that only
+    described the strokes would leave all three to be found out by looking at the tablet.
+
+    There is no field echoing the input back. A receipt that restates its own request invites
+    a caller to check the request instead of the result -- the rule
+    :class:`~rmspec.domain.ports.formats.SceneEdit` states about itself.
+
+    Attributes
+    ----------
+    strokes
+        The ink, in draw order, with samples already in screen units and x measured from the
+        centre of the page -- what :class:`~rmspec.domain.models.Point` means everywhere else,
+        and what :meth:`~rmspec.domain.ports.formats.SceneAppender.append_strokes` accepts. So
+        the placement millimetres are converted here, once, by the implementation that owns the
+        font metrics; a port that returned normalised coordinates would mean the ink written is
+        not the ink previewed.
+    lines
+        The text as wrapped, one entry per drawn line, in order. Non-empty. Present because
+        wrapping is a decision the implementation makes and the caller did not, and an
+        unreported decision is one nobody can preview or disagree with.
+    substituted
+        The distinct characters the font could not draw, in first-appearance order, each
+        rendered as a struck box. Empty when every character was drawable. Never a raise: an
+        undrawable character is a fact about the string, and the caller is the only layer that
+        knows whether a box on the page is acceptable or whether the words must be changed.
+        Deduplicated because a reader acts per character, not per occurrence.
+    extent_mm
+        The real-world size of the box the strokes actually occupy, so a caller can check that
+        the reply fits on the page before writing it. This is the check that replaces a
+        coordinate-range validator on the scene itself: the reference corpus has 13 of 30 pages
+        with ink outside the declared x range and 17 outside y, so out-of-bounds ink is normal
+        on pages the tablet wrote and refusing it would refuse the tablet's own documents. Ink
+        *this* program is about to place is a different question, and it is answered here.
+    """
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    strokes: tuple[Stroke, ...] = Field(min_length=1)
+    lines: tuple[str, ...] = Field(min_length=1)
+    substituted: tuple[str, ...]
+    extent_mm: PhysicalSize
+
+    @model_validator(mode="after")
+    def _check_substituted_is_distinct_characters(self) -> Self:
+        """Reject a substitution report that is not distinct single characters.
+
+        Returns
+        -------
+        InkText
+            The validated model.
+
+        Raises
+        ------
+        ValueError
+            An entry is not exactly one character, or a character is reported twice. Both
+            would make a caller's "which characters must I change" list wrong -- a multi-
+            character entry is a substring nobody can look up, and a repeat turns "three
+            characters to fix" into "three occurrences of one".
+        """
+        wrong_length = [entry for entry in self.substituted if len(entry) != 1]
+        if wrong_length:
+            msg = f"substituted must hold single characters, not {wrong_length!r}"
+            raise ValueError(msg)
+        if len(set(self.substituted)) != len(self.substituted):
+            msg = f"substituted repeats a character: {self.substituted!r}"
+            raise ValueError(msg)
+        return self
+
+
 class RenderStyle(BaseModel):
     """The render policy chosen at composition, with no field defaulted.
 
@@ -741,5 +902,91 @@ class PageRenderer(Protocol):
             ``<svg>`` root, which :class:`PageBackground` deliberately does not pre-screen, so
             that one bad file produces one error type. The legacy renderer returned silently
             on a parse failure, so a background simply vanished from the output.
+        """
+        ...
+
+
+class TextEngraver(Protocol):
+    """Draw a string as strokes, placed on a page, in the only form the tablet renders.
+
+    Scope: ``APP``. Stateless, deterministic and thread-safe; every per-invocation input
+    arrives as an argument, so there is nothing to open, cache or close. One string per call,
+    because a reply is one message and a batch would have to invent a layout relationship
+    between two of them.
+
+    Not ``runtime_checkable``: nothing needs ``isinstance`` against it, and a structural check
+    that passes on a method name while the semantics differ is worse than none.
+
+    Notes
+    -----
+    **Substitution is data and never a raise.** A character the face cannot draw is reported
+    on :attr:`InkText.substituted` and drawn as a struck box, and an implementation may not
+    drop it, may not silently fold it onto a lookalike, and may not refuse the call over it.
+    Dropping is how a sentence loses a word without anyone noticing. Folding is a silent edit
+    to somebody's words, and the layer that knows what a character *meant* is never this one.
+    Refusing would move a caller's decision into a font.
+
+    **No coverage query.** There is no ``supports``, no ``characters`` set, and no
+    ``can_draw``. A caller cannot usefully branch on one -- it would have to reimplement the
+    implementation's own segmentation to apply it -- and a set published here is a claim about
+    a font file the domain has never opened. The report on the returned value is both cheaper
+    and true of the exact string that was asked about.
+
+    **The placement is millimetres from the page's top-left, and the conversion happens
+    inside.** ``x_shift`` -- the centre-origin correction every renderer applies, half the
+    screen width -- is applied by the implementation, so a caller never adds it and never
+    adds it twice. That the returned strokes are in centre-origin screen units is the whole
+    reason they can be handed straight to
+    :meth:`~rmspec.domain.ports.formats.SceneAppender.append_strokes`.
+    """
+
+    def engrave(
+        self,
+        text: str,
+        /,
+        *,
+        screen: ScreenSpec,
+        style: InkTextStyle,
+        left_mm: float,
+        top_mm: float,
+        width_mm: float,
+    ) -> InkText:
+        """Engrave ``text`` as ink laid out inside a box on the page.
+
+        Parameters
+        ----------
+        text
+            The message to draw, already exactly as the caller wants it read. Must contain at
+            least one non-whitespace character.
+        screen
+            Screen geometry the ink is placed against. Required and never defaulted, for the
+            reason :meth:`PageRenderer.render` gives: a wrong screen silently produces
+            correctly-shaped ink in the wrong place, and here that means a reply the human
+            cannot see.
+        style
+            Em size, line height, colour and thickness.
+        left_mm
+            Left edge of the text box, in millimetres from the page's left edge.
+        top_mm
+            Top edge of the text box, in millimetres from the page's top edge.
+        width_mm
+            Width of the text box, in millimetres. Lines wrap inside it; the box does not
+            grow sideways, and its height is whatever the wrapped text needs -- reported as
+            :attr:`InkText.extent_mm` rather than clipped, so a caller can see that a reply
+            overran and decide, instead of writing ink that falls off the page.
+
+        Returns
+        -------
+        InkText
+            The strokes, the wrapped lines, the characters that became struck boxes, and the
+            extent the ink occupies.
+
+        Raises
+        ------
+        UsageError
+            ``text`` holds nothing but whitespace, so there is no message to draw; or
+            ``width_mm`` is too narrow to fit one character at ``style.em_mm``, so no wrap can
+            succeed. Both are refusals about the request rather than about the string's
+            contents, which is why an undrawable character is not among them.
         """
         ...

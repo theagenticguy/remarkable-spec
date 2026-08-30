@@ -75,6 +75,7 @@ from typing import Final, Self
 from pydantic import BaseModel, Field, field_validator
 
 __all__ = [
+    "BOOT_ID",
     "CONTENT_SUFFIX",
     "DEFAULT_USB_HOST",
     "METADATA_SUFFIX",
@@ -121,6 +122,24 @@ SOC_MACHINE: Final = "/sys/devices/soc0/machine"
 #: The kernel's memory report, whose ``MemTotal`` and ``MemAvailable`` lines are in units
 #: of 1024 bytes.
 PROC_MEMINFO: Final = "/proc/meminfo"
+
+#: A random identifier the kernel mints once per boot and never changes while it is up. It
+#: is the only cheap, monotonic evidence available over this transport that the device the
+#: second half of an operation is talking to is the same *running system* as the first half:
+#: a different value means the tablet rebooted in between.
+#:
+#: Read with ``cat`` over the exec channel rather than over SFTP -- like :data:`SOC_MACHINE`
+#: and :data:`PROC_MEMINFO`, and unlike every path in the xochitl store. Two reasons, and the
+#: second is the load-bearing one: a pseudo-file's ``st_size`` is zero while its content is
+#: not, so nothing about it is a normal file read; and ``RemoteShell.read_file`` reports a
+#: per-path failure as the package-private ``PathUnreadableError``, which every reader must
+#: convert, while a command that exits non-zero is already a domain error. Reading this one
+#: through a command is what lets the guarded restart in ``rmspec.device.ssh`` speak one
+#: failure vocabulary from end to end.
+#:
+#: Not a credential. It is regenerated on every boot, it identifies no user and no device
+#: across boots, and it is exactly what ``journalctl --list-boots`` prints.
+BOOT_ID: Final = "/proc/sys/kernel/random/boot_id"
 
 #: Suffix of the sidecar whose presence makes an identifier a document in the store.
 METADATA_SUFFIX: Final = ".metadata"

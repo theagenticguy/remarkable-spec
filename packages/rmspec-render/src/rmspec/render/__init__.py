@@ -24,10 +24,23 @@ changes attribute order, float formatting, indentation or the serialisation enve
 regression even when the picture is identical -- :mod:`rmspec.render._svg` documents each of
 those four traps.
 
+Reading a page is half of it; writing one is the other half
+-----------------------------------------------------------
+:func:`~rmspec.render.text_to_ink` runs the other direction: a string in, domain strokes out. It
+is here rather than in ``rmspec-formats`` because turning letters into geometry is rendering, and
+because ``formats`` may import ``domain`` only -- so the composition root is what joins ink to an
+encoder. It exists at all because of one measurement, recorded at the top of
+:mod:`rmspec.render._ink_text`: xochitl *preserves but never displays* a foreign author's
+``RootTextBlock``, so text a human is meant to read off the glass has to be strokes.
+
+It changes no existing page's output and therefore does not bump ``SVG_RENDERER_REVISION``: it
+adds a capability nothing in ``PageRenderer.render`` calls, and a render of any page that
+existed before it serialises byte for byte as it did.
+
 The declared surface is the real surface
 ---------------------------------------
-``__all__`` below is four names, and ``tests/test_render_public_surface.py`` asserts that
-``dir(rmspec.render)`` holds no fifth public one. The unit constants are therefore imported
+``__all__`` below is eight names, and ``tests/test_render_public_surface.py`` asserts that
+``dir(rmspec.render)`` holds no ninth public one. The unit constants are therefore imported
 under private aliases: they were public here by accident, absent from ``__all__``, and the
 mm-to-point boundary belongs to one module. An export-slice caller that needs it should import
 :mod:`rmspec.render._units` deliberately, or be given a public re-export deliberately -- not
@@ -44,23 +57,55 @@ every caller that omitted an argument.
 
 from __future__ import annotations
 
+from rmspec.render._ink_text import (
+    INK_TEXT_CHARACTERS,
+    InkText,
+    InkTextStyle,
+    text_to_ink,
+)
 from rmspec.render._renderer import SvgPageRenderer
 from rmspec.render._units import MM_PER_INCH as _MM_PER_INCH
 from rmspec.render._units import POINTS_PER_INCH as _POINTS_PER_INCH
 
 __all__ = [
+    "INK_TEXT_CHARACTERS",
     "LEGACY_MIN_PADDING_MM",
     "LEGACY_THICKNESS_SCALE",
     "SVG_RENDERER_REVISION",
+    "InkText",
+    "InkTextStyle",
     "SvgPageRenderer",
+    "text_to_ink",
 ]
 
-SVG_RENDERER_REVISION = "svg-v1"
+SVG_RENDERER_REVISION = "svg-v3"
 """Opaque revision of the rendering rules, for ``RenderStyle.renderer_revision``.
 
 Bump it whenever a pen formula, the geometry, or the emitted element and attribute structure
 changes. That is what makes a formula change *miss* the OCR cache instead of returning a row
 computed under the old physics.
+
+``svg-v1`` -> ``svg-v2``: a stroke's own colour, when it carries one, now wins over the
+palette entry for its colour index. Every highlighter stroke on a Paper Pro carries one, so
+every page holding a non-yellow highlight renders different bytes than it did -- and a cached
+raster or OCR row keyed on ``svg-v1`` was produced from a page where all four highlighter
+colours came out yellow. Nothing about the geometry or the emitted structure moved, so a page
+with no highlighter stroke serialises byte for byte as before; the bump is for the pages that
+do, which the cache cannot tell apart from the ones that do not.
+
+``svg-v2`` -> ``svg-v3``: ``PageContent.text_blocks`` is now drawn, last and above every
+layer. That is where a page's real typed text lives -- one page-scoped block naming no layer
+-- so before this, a page a human had typed on rendered with every typed word missing, and any
+raster or OCR row cached under ``svg-v2`` for such a page was computed from markup that did not
+contain them. Serving that row again would keep returning a transcription of text the file has
+and the picture did not, which is the exact failure a revision exists to stop.
+
+Same shape as the bump above, and bumped for the same reason: the emitted structure did not
+move for a page with no page-level text, and all thirty recorded SVG hashes reproduce
+byte for byte -- verified, not assumed, because none of the 92 files in the reference corpus
+carries a page-level block or a scene text item. The corpus fact is why no hash moved; it is
+not evidence the change is inert, because the cache cannot tell a page that carries typed text
+from one that does not, and the only pages this alters are the ones it does alter.
 """
 
 LEGACY_MIN_PADDING_MM = 30.0 * _MM_PER_INCH / _POINTS_PER_INCH

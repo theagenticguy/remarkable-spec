@@ -1,4 +1,4 @@
-"""The export half of the SVG differential oracle: bytes in, identical bytes on disk.
+"""The export half of the recorded SVG oracle: bytes in, identical bytes on disk.
 
 What this package owns of the oracle, and what it does not
 --------------------------------------------------------
@@ -7,7 +7,7 @@ sha256 and byte length of the SVG the legacy code produced. Those bytes are prod
 *render* slice; this package's entire contribution is the last step, and it is one sentence:
 ``sha256`` of the committed file equals ``sha256`` of the payload handed to the sink.
 
-So this module runs the oracle end to end and reports the two halves separately. A payload
+So this module runs the pipeline end to end and reports the two halves separately. A payload
 whose hash already differs from the manifest is a render regression; a payload that matches and
 a file that does not is an export regression. Reporting one number for both is what would make
 a failure read as a renderer bug when the sink appended a byte, and the byte shape makes that
@@ -16,67 +16,105 @@ quotes followed by one newline, no BOM, and **no** trailing newline. A sink that
 would shift every entry by exactly one byte, and ``svg_bytes`` is asserted before ``svg_sha256``
 so the report says "+1 byte" rather than "hash mismatch".
 
-Why it may skip, and why that is stated loudly rather than relaxed
-----------------------------------------------------------------
-The 30 source files are a personal backup outside the repository (``~/remarkable``), and the
-rendered SVGs are not committed either -- the manifest is keyed by content hash for exactly that
-reason. The producer of the SVG string is resolved at run time: the new
-:mod:`rmspec.render` slice when it exposes one, otherwise the legacy ``src/remarkable_spec``
-tree while it still exists. When neither is available the test skips with the reason spelled
-out. It is never weakened into an ``xfail`` and the comparison is never loosened, because a
-precise skip is worth more than a green test that compares something weaker.
+Recorded oracle, not a differential
+-----------------------------------
+Until 2026-08-30 the SVG string came from one of two producers resolved at run time: the new
+render slice if it ever exposed one, otherwise the legacy ``src/remarkable_spec`` tree. That
+tree has been deleted, so no second implementation stands behind the 30 hashes any more. They
+are unchanged and still compared byte for byte, but a green run here is a **regression pin** on
+``rmspec.formats`` plus ``rmspec.render``, not evidence that an independent implementation
+agrees. The agreement was verified on 2026-08-30, with the legacy tree still present: all 30
+entries reproduced byte-identically through the legacy parse and render, and then again with
+the parse and render re-pointed at the new slices. See
+``packages/rmspec-render/tests/test_render_differential.py`` for the fuller account.
+
+The upside of the deletion is that this module stopped being able to skip for lack of a
+producer. ``_render_producer`` is now implemented rather than returning ``None``, so the only
+remaining reason to skip is a machine without the corpus -- the 30 source files are a personal
+backup outside the repository (``~/remarkable``) and the rendered SVGs are not committed either,
+which is why the manifest is keyed by content hash. That skip is never weakened into an
+``xfail`` and the comparison is never loosened, because a precise skip is worth more than a
+green test that compares something weaker.
 """
 
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
-import logging
 import pathlib
-import sys
-import tempfile
 from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID
 
 import pytest
 from export_support import artifact_name
 
+from rmspec.domain.models import (
+    EXPORT_PALETTE,
+    PAPER_PRO_SCREEN,
+    RM2_SCREEN,
+    Page,
+    PageId,
+    ScreenSpec,
+)
 from rmspec.domain.ports.export import ArtifactMedia
+from rmspec.domain.ports.render import RenderStyle, TextStyle
 from rmspec.export.sink import FilesystemArtifactSink
+from rmspec.formats import SceneCodec, fingerprint_bytes
+from rmspec.render import (
+    LEGACY_MIN_PADDING_MM,
+    LEGACY_THICKNESS_SCALE,
+    SVG_RENDERER_REVISION,
+    SvgPageRenderer,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
 MANIFEST = REPO / "tests" / "fixtures" / "render-differential-manifest.json"
-LEGACY_SOURCE = REPO / "src"
 
 CORPUS = pathlib.Path.home() / "remarkable"
 
-LEGACY_PARSER_LOGGER = "rmscene"
-"""The logger the legacy reader raises to ERROR at import time, process-wide.
+#: Render parameters the manifest records under ``render_params``. Changing any of them
+#: invalidates every hash, so ``test_the_render_policy_still_matches_the_recorded_parameters``
+#: asserts these against the recording itself rather than trusting the comment.
+THICKNESS = LEGACY_THICKNESS_SCALE
+PAGE_UUID = str(UUID(int=0))
 
-Named rather than inlined so the two differential suites that pull in the legacy tree
--- this one and ``packages/rmspec-render/tests/test_render_differential.py`` -- spell it
-the same way, and so a grep for it finds every site that has to put it back.
-"""
+#: The screen each entry was rendered at. The legacy code called ``detect_screen(layers)``; the
+#: domain deliberately ships no such function -- geometry is not a fact of the scene bytes -- so
+#: the recorded answer is replayed per entry instead of re-derived.
+SCREENS: dict[str, ScreenSpec] = {
+    "1620x2160": PAPER_PRO_SCREEN,
+    "1404x1872": RM2_SCREEN,
+}
 
-#: Render parameters the manifest records. Changing any of them invalidates every hash.
-THICKNESS = 1.5
-PAGE_UUID = UUID(int=0)
+#: Text policy. The corpus carries no visible typed text -- asserted over all 30 entries in
+#: ``packages/rmspec-render/tests/test_render_differential.py`` -- so nothing here depends on
+#: these values; ``RenderStyle`` requires them and offers no default to drift.
+TEXT_STYLE = TextStyle(family="sans-serif", size_px=32.0, line_height=1.2)
+
+#: Exactly the parameter set the manifest records.
+LEGACY_STYLE = RenderStyle(
+    thickness_scale=THICKNESS,
+    min_padding_mm=LEGACY_MIN_PADDING_MM,
+    text=TEXT_STYLE,
+    renderer_revision=SVG_RENDERER_REVISION,
+)
 
 
 class SvgProducer(Protocol):
     """Renders one ``.rm`` file to the SVG string the manifest hashed."""
 
-    def __call__(self, path: pathlib.Path) -> str:
+    def __call__(self, path: pathlib.Path, *, screen: ScreenSpec) -> str:
         """Render the file.
 
         Parameters
         ----------
         path
             Location of a non-empty ``.rm`` file.
+        screen
+            The geometry the manifest recorded for these bytes.
 
         Returns
         -------
@@ -86,91 +124,45 @@ class SvgProducer(Protocol):
         ...
 
 
-def _legacy_producer() -> SvgProducer | None:
-    """Build a producer from the legacy tree, while it still exists.
+def _render_producer() -> SvgProducer:
+    """Build the producer: decode with ``rmspec.formats``, render with ``rmspec.render``.
+
+    This function used to return ``None`` on purpose, and the argument for that is worth
+    recording because it no longer holds. Going from a ``.rm`` file to the domain page
+    :class:`rmspec.render.SvgPageRenderer` renders needs the *formats* slice's parser, and the
+    dependency table gives this package ``rmspec-domain`` and ``rmspec-render`` only -- so the
+    module reached for the legacy tree instead, and skipped once that tree was gone. The
+    composition was left to hold transitively: ``rmspec-render``'s oracle asserted new bytes
+    equal legacy bytes, and this module asserted the committed file equals the payload it was
+    handed.
+
+    Deleting the legacy tree took the first half of that composition away. The choice became a
+    permanently-skipping test or a cross-slice import in a *test*, and the second is both
+    honest and already the workspace's practice: the edge that is enforced is the one
+    ``tests/architecture/test_dependency_direction.py`` checks, it scans ``src`` only, and
+    ``rmspec-cli``'s suite composes seven slices the same way. Nothing under
+    ``packages/rmspec-export/src`` imports ``rmspec.formats``, and nothing may.
 
     Returns
     -------
-    SvgProducer | None
-        The producer, or ``None`` when the legacy tree has been deleted.
+    SvgProducer
+        A producer that decodes and renders one entry at the manifest's parameters.
     """
-    if not (LEGACY_SOURCE / "remarkable_spec" / "render" / "engine.py").is_file():
-        return None
-    if str(LEGACY_SOURCE) not in sys.path:
-        sys.path.insert(0, str(LEGACY_SOURCE))
-    # src/remarkable_spec/formats/rm_file.py:31 runs
-    # `logging.getLogger("rmscene").setLevel(logging.ERROR)` as an import side effect, so
-    # importing it here mutates the level for the rest of the process. Two tests in
-    # packages/rmspec-formats/tests/test_formats_scene_codec.py assert that level is still
-    # NOTSET -- rmspec.formats.scene_codec exists partly to argue that a library which
-    # reconfigures its host's logging is broken -- and both failed whenever this module ran
-    # first in the same process. It went unseen because every mise task passes `-n auto` and
-    # xdist put the two packages in different workers; only a single-process run shows it.
-    # The sibling at packages/rmspec-render/tests/test_render_differential.py already
-    # restores the level and this file was the one that did not. The legacy tree is excluded
-    # from lint and is deleted in step 7, so the fix belongs at the call site rather than in
-    # a file with a deletion date.
-    parser_logger = logging.getLogger(LEGACY_PARSER_LOGGER)
-    restore = parser_logger.level
-    try:
-        rm_file = importlib.import_module("remarkable_spec.formats.rm_file")
-        page_module = importlib.import_module("remarkable_spec.models.page")
-        screen_module = importlib.import_module("remarkable_spec.models.screen")
-        engine = importlib.import_module("remarkable_spec.render.engine")
-        palette_module = importlib.import_module("remarkable_spec.render.palette")
-    except ImportError:
-        return None
-    finally:
-        parser_logger.setLevel(restore)
-    parse_rm_file = rm_file.parse_rm_file
-    page_type = page_module.Page
-    detect_screen = screen_module.detect_screen
-    renderer_type = engine.SVGRenderer
-    export_palette = palette_module.EXPORT_PALETTE
+    codec = SceneCodec()
+    renderer = SvgPageRenderer()
 
-    def render(path: pathlib.Path) -> str:
-        layers = parse_rm_file(path)
-        with tempfile.TemporaryDirectory() as raw:
-            output = pathlib.Path(raw) / "page.svg"
-            renderer_type().render_page(
-                page=page_type(uuid=PAGE_UUID, layers=layers),
-                output=output,
-                palette=export_palette,
-                screen=detect_screen(layers),
-                thickness=THICKNESS,
-            )
-            return output.read_bytes().decode("utf-8")
+    def render(path: pathlib.Path, *, screen: ScreenSpec) -> str:
+        content = codec.decode_page(path.read_bytes(), path.name)
+        page = Page(page_id=PageId(uuid=PAGE_UUID), index=0, content=content)
+        rendered = renderer.render(
+            page,
+            screen=screen,
+            palette=EXPORT_PALETTE,
+            style=LEGACY_STYLE,
+        )
+        return rendered.svg
 
     return render
-
-
-def _render_producer() -> SvgProducer | None:
-    """Build a producer from the new render slice, if this package could reach one.
-
-    It cannot, and that is a dependency fact rather than unfinished work. Going from a ``.rm``
-    file to the domain page :class:`rmspec.render.SvgPageRenderer` renders needs the *formats*
-    slice's parser, and the dependency table gives this package ``rmspec-domain`` and
-    ``rmspec-render`` only. Wiring it here -- even lazily, even in a test -- would be this
-    package importing ``rmspec.formats``.
-
-    Nothing is lost, because the two halves compose. ``rmspec-render``'s own oracle asserts
-    ``new render bytes == legacy bytes`` for all 30 entries, and this module asserts
-    ``committed file == the payload it was handed``, with the payload's hash checked against the
-    manifest first. Transitively the committed file equals the new renderer's bytes, and each
-    half fails with the diagnosis that belongs to it instead of one hash mismatch that could be
-    either. The hook stays because a producer this package *may* reach -- a domain-typed page
-    fixture, or the app slice's bridge once it exists -- would plug in here.
-
-    Returns
-    -------
-    SvgProducer | None
-        Always ``None``.
-    """
-    return None
-
-
-def _producer() -> SvgProducer | None:
-    return _render_producer() or _legacy_producer()
 
 
 def _manifest() -> dict[str, dict[str, object]]:
@@ -181,7 +173,7 @@ def _manifest() -> dict[str, dict[str, object]]:
 def _corpus_files() -> Iterator[tuple[str, pathlib.Path, bytes]]:
     for path in sorted(CORPUS.rglob("*.rm")):
         raw = path.read_bytes()
-        yield hashlib.sha256(raw).hexdigest(), path, raw
+        yield fingerprint_bytes(raw), path, raw
 
 
 pytestmark = pytest.mark.slow
@@ -190,6 +182,12 @@ pytestmark = pytest.mark.slow
 @pytest.fixture(scope="module")
 def oracle() -> tuple[SvgProducer, dict[str, dict[str, object]]]:
     """Resolve the producer and the manifest, or skip with the reason spelled out.
+
+    The producer is always available now that it is built from the workspace's own slices, so
+    the only reasons left to skip are a missing manifest and a machine without the corpus.
+    There used to be a third -- "no SVG producer is available" -- which the legacy tree's
+    deletion turned into a condition that could never be false while also being the one thing
+    that would silence the comparison. It is gone rather than left standing.
 
     Returns
     -------
@@ -203,15 +201,7 @@ def oracle() -> tuple[SvgProducer, dict[str, dict[str, object]]]:
             f"the reference corpus is not on this machine ({CORPUS}); it is a personal backup "
             "and is deliberately not committed, so the oracle cannot run here"
         )
-    producer = _producer()
-    if producer is None:
-        pytest.skip(
-            "no SVG producer is available: rmspec.render exposes none yet and the legacy "
-            "src/remarkable_spec tree is gone. Point _render_producer() at the render slice's "
-            "renderer -- until then the SVG half of the oracle is unverified, which is a gap "
-            "and not a pass"
-        )
-    return producer, _manifest()
+    return _render_producer(), _manifest()
 
 
 def test_the_corpus_is_two_thirds_empty_stubs() -> None:
@@ -224,6 +214,23 @@ def test_the_corpus_is_two_thirds_empty_stubs() -> None:
         "the corpus is expected to be mostly zero-byte stubs -- the unannotated pages of a "
         "PDF-backed document. If that changed, the empty-stub findings need re-measuring"
     )
+
+
+def test_the_render_policy_still_matches_the_recorded_parameters() -> None:
+    """The parameters the 30 hashes encode, checked against the recording, corpus or not.
+
+    Cheap, and it runs on a machine with no backup -- which matters more than it did. While the
+    legacy tree existed, a drifted thickness or page identity would have been caught by the
+    comparison itself, because the reference bytes were regenerated from the same parameters.
+    Now the manifest is the only witness, so the parameters are asserted against it directly
+    instead of living in a comment that a reader has to take on trust.
+    """
+    recorded = cast("dict[str, object]", json.loads(MANIFEST.read_text(encoding="utf-8")))
+    params = cast("dict[str, object]", recorded["render_params"])
+
+    assert params["thickness"] == LEGACY_STYLE.thickness_scale
+    assert params["page_uuid"] == "UUID(int=0)"
+    assert set(SCREENS) == {"1620x2160", "1404x1872"}
 
 
 def test_every_manifest_entry_reproduces_byte_for_byte(
@@ -240,7 +247,7 @@ def test_every_manifest_entry_reproduces_byte_for_byte(
         if entry is None or len(raw) == 0:
             continue
         checked += 1
-        payload = producer(path).encode("utf-8")
+        payload = producer(path, screen=SCREENS[cast("str", entry["screen"])]).encode("utf-8")
         expected_bytes = cast("int", entry["svg_bytes"])
         expected_hash = cast("str", entry["svg_sha256"])
         payload_hash = hashlib.sha256(payload).hexdigest()

@@ -2,55 +2,127 @@
 
 ## Project
 
-Python library + CLI for reMarkable Paper Pro tablets. Parses v6 `.rm` binary files, renders handwritten pages, runs OCR via Apple Vision + Textract + Opus 4.6, extracts Mermaid diagrams, and syncs over USB/SSH.
+Python library + CLI for reMarkable Paper Pro tablets. Parses v6 `.rm` binary files, renders
+handwritten pages, runs OCR, extracts Mermaid diagrams, and reads and writes documents over
+USB and SSH.
+
+**North star: humans and agents working on the same tablet while it is powered on, over USB.**
+That sentence decides arguments. It is why USB is the default read path, why every command has
+a `--json` envelope and a `--dense` mode, and why a write refuses rather than merges.
 
 ## Running
 
-```bash
-uv sync --all-extras          # install all optional dependencies
-uv run rmspec --help           # CLI entry point
-export RMSPEC_XOCHITL=/tmp/remarkable-data/xochitl  # local data dir
-```
-
-For OCR/diagram features, also need `boto3`:
-```bash
-uv add boto3    # not in extras — optional AWS dep
-```
-
-## Project Structure
-
-```
-src/remarkable_spec/
-├── models/         # Pydantic v2: stroke, page, document, color, pen, screen
-├── formats/        # Parsers: rm_file.py (rmscene), metadata, content, pagedata
-├── render/         # SVG renderer: engine.py (core), pens.py (10 pen formulas), palette.py
-├── ocr/            # pipeline.py, vision.py (Apple), textract.py (AWS), postprocess.py (LLM merge), diagram.py (Mermaid)
-├── device/         # connection.py (SSH), web_api.py (HTTP), sync.py, push.py, paths.py
-├── sync/           # db.py (SQLite), models.py, hasher.py, migrations.py
-├── export/         # svg.py, png.py, pdf.py
-└── cli/            # cyclopts commands, _util.py (settings), _resolve.py (doc lookup)
-```
-
-## Key Architecture Decisions
-
-- **v6 .rm format**: CRDT-based, parsed by `rmscene` (v0.7.0). X origin is at center of page (not top-left). SVG renderer applies `x_shift = vw / 2` to compensate.
-- **Pen physics**: 10 pen types with pressure/tilt/speed/direction formulas ported from rmc. Thickness multiplier (default 1.5) compensates for on-screen vs export weight difference.
-- **Paper Pro screen**: 1620x2160 @ 229 DPI, 14 pen colors (PenColor enum 0-13).
-- **OCR pipeline**: Render → parallel Vision + Textract → both texts + image → Opus 4.6 via Bedrock `invoke_model` (not `converse`). Model: `global.anthropic.claude-opus-4-6-v1`.
-- **Sync DB**: SQLite at `~/.remarkable-spec/sync.db`. SHA-256 of .rm files (`rm_hash`) is the cache invalidation key for OCR and diagram results.
-- **Document resolution**: Shared `cli/_resolve.py` — supports name substring, UUID, UUID prefix. On duplicates, picks by page count desc then lastModified desc.
-- **DYLD auto-config**: `cli/_util.py` auto-sets `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` on macOS if not already set.
-- **rmscene warnings suppressed**: `formats/rm_file.py` sets rmscene logger to ERROR level.
-
-## Dependencies
-
-Core: pydantic, rmscene, cyclopts, rich, pydantic-settings
-Optional extras: `[render]` cairocffi/cairosvg/pillow, `[device]` paramiko/httpx, `[ocr]` pyobjc, `[push]` weasyprint/markdown, `[aws]` boto3
-
-## Linting
+`mise.toml` is the **only** file in this repository that contains a command string. `lefthook.yml`
+and CI both call `mise run <task>` and never spell one out — that is the mechanism that keeps the
+three from drifting.
 
 ```bash
-uvx ruff check src/ --fix && uvx ruff format src/
+mise run install        # uv sync --all-packages --all-extras
+uv run rmspec --help    # 14 invocations
+uv run rmspec manifest --json   # the authoritative surface, machine-readable
+mise run build          # the one wheel a user installs, out of all nine packages
 ```
 
-Config: ruff line-length 99, python 3.12, select E/F/I/UP.
+Tasks: `install lint lint-check format format-check typecheck arch test-fast test test-cov
+test-hardware agents-md agents-md-check bundle build check versions`.
+
+`mise run check` is the definition of done: `lint-check`, `format-check`, `typecheck`, `arch`,
+`agents-md-check`, `test-cov`.
+
+## Project structure
+
+Nine distributions in a uv workspace. The legacy single-package `src/remarkable_spec/` tree was
+**deleted on 2026-08-30** — 10,321 lines, fully replaced. If you find a reference to it, it is
+stale.
+
+```
+packages/
+├── rmspec-domain/       models, ports (Protocols), the error tree, exit codes. Imports nothing.
+├── rmspec-app/          use cases. May import rmspec.domain and NOTHING else.
+├── rmspec-formats/      v6 .rm codec (rmscene), xochitl layout, page index
+├── rmspec-render/       SVG renderer, ten pen-physics models, palette
+├── rmspec-export/       raster + PDF composition (cairo, pymupdf, PIL)
+├── rmspec-device/       USB web API (httpx) and SSH (paramiko), writeback
+├── rmspec-persistence/  SQLite sync store, OCR/diagram caches, the device search index
+├── rmspec-ocr/          recognizers and vision-language models
+└── rmspec-cli/          cyclopts commands + the dishka composition root
+```
+
+Direction is machine-checked by `tests/architecture/test_dependency_direction.py`, which also
+holds `OWNED_THIRD_PARTY`: each third-party module has exactly one package allowed to import it
+(`rmscene`→formats, `sqlite3`→persistence, `boto3`/`Vision`→ocr, `httpx`/`paramiko`→device,
+`cairocffi`/`PIL`/`fitz`→export, `cyclopts`/`rich`/`dishka`/`markdown`/`weasyprint`→cli).
+Everything else goes through a port.
+
+`packages/rmspec-cli/src/rmspec/cli/_container.py` is **the only module in the workspace that
+names an adapter**, and a test asserts it stays that way. Every other `cli/*.py` reaches it
+through `importlib.import_module`, because an AST scan forbids a static adapter import there —
+including under `if TYPE_CHECKING`.
+
+## Key architecture decisions
+
+- **Nine distributions develop, one ships.** `rmspec-cli`'s wheel requires eight `rmspec-*`
+  distributions that exist on no index, so it installs nowhere but this workspace.
+  `mise run build` stages a tenth distribution, `rmspec`, out of `rmspec.cli._bundle`: all nine
+  subpackages under one PEP 420 namespace, the **union** of their third-party requirements, the
+  `rmspec` script. Staged into gitignored `build/` and derived from the nine manifests every
+  time, so there is no second dependency list to go stale — and two members asking for one
+  requirement with different specifiers is an error, not a silent choice. `rmspec --version`
+  asks about `rmspec` then `rmspec-cli`, because only one of the two is ever installed.
+- **USB is the default read path.** `GET /download/{id}/rmdoc` is served *by* xochitl, so it is
+  a consistent snapshot by construction; reading `.rm` off disk over SSH is a torn read. But
+  `SearchIndexSource` has **no USB binding and never will** — the firmware's route table is
+  closed at six families and none serves a file from the xochitl tree — so a USB run still opens
+  SSH for the search index and for tier-0 OCR.
+- **`POST /upload` is create-only, root-only, and irreversible.** The import re-keys both
+  document and page uuids, and no HTTP route deletes. `UsbUploader` sends `GET /documents/`
+  immediately before the POST, because the route targets the last-listed folder.
+- **v6 `.rm`**: CRDT-based, parsed by `rmscene` 0.7.0. X origin is the page centre, so the SVG
+  renderer applies `x_shift = vw / 2`. Tombstones are normal (`item.value is None`), and
+  `parent_id` is **not stable** across a xochitl re-save.
+- **Highlighter colour lives in a field rmscene does not read.** Tag index 8, `Byte4`, a
+  little-endian uint32 read as ARGB, on `SceneLineItem`. The header is a **two-byte varuint** —
+  `(8<<4)|4 == 0x84` has its continuation bit set, so a one-byte header is impossible.
+  `PenColor` collapses every highlighter to id 9, so without this the colour is always yellow.
+  Measured: `#FFED75` and `#BEEAFE` on one real page.
+- **rmscene's unread-data warning is scoped, not silenced.** `scene_codec.py` uses a
+  reference-counted context manager that restores the prior level, so it cannot leak across a
+  parallel randomised test run. Bytes nothing understands are recorded as
+  `PageDefectCode.BLOCK_BYTES_UNREAD`; bytes we *do* decode are not, because calling them unread
+  would be false.
+- **OCR is tiered and all-OpenAI.** Tier 0 is the tablet's own handwriting index (free), tier 1
+  Textract and optionally Apple Vision, tier 2 `global.openai.gpt-5.6-luna` reading the raster,
+  tier 3 `global.openai.gpt-5.6-terra` adjudicating. Tier 0 and tier 1 agreeing above
+  `RMSPEC_AGREEMENT_THRESHOLD` short-circuits tiers 2 and 3, and tier 0's text wins because it
+  read the strokes rather than pixels.
+- **Cache key**: SHA-256 of the `.rm` bytes, plus render and raster digests, recognizers, model
+  fingerprint and request digest. `OcrCache.equivalent_raster` exists because xochitl rewrites a
+  page's bytes without changing the ink.
+- **Writes refuse rather than merge.** `SshSceneWriter` captures the artifact's digest at read
+  time, re-checks immediately before writing, and refuses on mismatch; writes go to a temp path
+  and arrive by `mv -f` (SFTP's `SSH_FXP_RENAME` fails when the destination exists). A window of
+  two round trips remains and the docstring says so.
+- **Never restart xochitl casually.** Four starts per ten minutes routes to `emergency.target`,
+  whose handler reboots the tablet. The one restart path checks `is-active`, arms a boot-id
+  fence, runs `reset-failed` immediately before `restart`, and never retries.
+- **stdout is the machine's, stderr is the human's.** `--json` emits
+  `{api_version, type, data, degradations, next}`; `--dense` emits TSV; the default renders to
+  stderr. `--pages` is **0-based**, matching `page_index` in every payload.
+
+## Testing and gates
+
+- Coverage floor is 90%; every package is at 100% *statement* coverage
+  (`export/_cairo.py` has one partial branch, hence 99.99% overall). CI additionally requires
+  **100% on changed lines** via `diff-cover`.
+- `select = ["ALL"]` with eleven ignores, line length 99, numpydoc docstrings.
+  **No `noqa`, no `type: ignore`, no threshold change** — never fix a gate by lowering it.
+- `ty check --error-on-warning`: every diagnostic is an error.
+- pytest runs with `filterwarnings = ["error"]`, `-n auto` and `pytest-randomly`.
+- `mise run test-hardware` needs the tablet attached and never runs in CI.
+- **No billable calls in tests.** Nothing may construct a `bedrock-runtime` or `textract`
+  client, and **nothing may issue `POST /upload`** — it creates a document no route can delete.
+- **Never open the device config file.** `tests/architecture/test_secret_containment.py` fails
+  the build if any file under `packages/` so much as names it or its credential keys, and it does
+  not skip comments or docstrings.
+- Do not run two coverage runs at once; they share the repo-root `.coverage` and corrupt each
+  other. See the note in `mise.toml`.

@@ -74,6 +74,7 @@ from rmspec.device import (
 from rmspec.device._archive import RMDOC_ROUTE
 from rmspec.device._wire import COLLECTION_TYPE, DOCUMENT_TYPE, LISTING_ROUTE
 from rmspec.device.addresses import (
+    BOOT_ID,
     CONTENT_SUFFIX,
     METADATA_SUFFIX,
     OS_RELEASE,
@@ -86,13 +87,19 @@ from rmspec.device.addresses import (
     RemotePath,
 )
 from rmspec.device.ssh import (
+    ACTIVE_STATE,
+    BOOT_ID_TEMPLATE,
     FIRMWARE_TEMPLATE,
     MAKE_DIR_TEMPLATE,
     MEMINFO_TEMPLATE,
     MODEL_TEMPLATE,
-    REFRESH_TEMPLATE,
+    NO_SERIAL_SOURCE,
+    RESET_FAILED_TEMPLATE,
+    RESTART_TEMPLATE,
     SERIAL_FIELD,
+    SERVICE_STATE_TEMPLATE,
     STORAGE_TEMPLATE,
+    UI_SERVICE,
     UNPLACEABLE_MEDIA,
     UNPLACEABLE_OPERATION,
 )
@@ -198,7 +205,12 @@ IN_MEMORY_FACTS = DeviceFacts(
     unsupported=frozenset({SERIAL_FIELD}),
 )
 """What the doubles report as fixed facts. Both causes of ``None`` in one value would need
-two fields; this one exercises the *named* cause, and ``IN_MEMORY_RESOURCES`` the other."""
+two fields; this one exercises the *named* cause, and ``IN_MEMORY_RESOURCES`` the other.
+
+Deliberately a **bare name** where the two real adapters now pass an
+``UnsupportedField``. That is the shape a fake seeds and the shape every adapter used before
+the port could carry a claim, so keeping it here is what exercises the other arm of the
+union: the contract suite runs over a source that annotates nothing and two that do."""
 
 IN_MEMORY_RESOURCES = DeviceResources(
     total_memory_bytes=2009400 * _BYTES_PER_KIB,
@@ -601,11 +613,14 @@ def _upload_tablet(
     *,
     recorder: list[httpx.Request] | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
-    """Build a handler that accepts one upload and routes nothing else.
+    """Build a handler that accepts one upload, answers its pre-flight, and routes nothing else.
 
-    Deliberately narrower than :func:`tablet`: this fake serves exactly the one route the
-    uploader is allowed to touch, so a request to any other path fails the test rather than
-    being answered by a listing.
+    Deliberately narrower than :func:`tablet`: this fake serves exactly the two routes the
+    uploader is allowed to touch -- the root listing it sends to pin the destination, and the
+    write -- so a request to any other path fails the test rather than being answered.
+
+    ``placed`` counts only the write, so the pre-flight cannot inflate the placement counter the
+    contract asserts on.
 
     Parameters
     ----------
@@ -625,6 +640,8 @@ def _upload_tablet(
         if recorder is not None:
             recorder.append(request)
         path = request.url.raw_path.decode()
+        if request.method == "GET" and path == LISTING_ROUTE:
+            return json_response(b"[]")
         if request.method == "POST" and path == UPLOAD_ROUTE:
             placed.append(path)
             return created()
@@ -792,11 +809,24 @@ HEALTHY_FACTS = {
 }
 """The four commands ``SshFacts`` sends, each with the output measured 2026-08-29."""
 
+RESTART_COMMAND = RemoteCommand.of(RESTART_TEMPLATE, UI_SERVICE).text
+FENCE_COMMAND = RemoteCommand.of(BOOT_ID_TEMPLATE, RemotePath.absolute(BOOT_ID)).text
+
+#: A synthetic per-boot identifier, answered identically to both fence reads so the guarded
+#: restart concludes -- correctly -- that the tablet did not reboot.
+BOOT_ID_VALUE = "2f7c1e04-9a3b-4d58-8e21-6b5c0d4a7f93"
+
 UPLOAD_COMMANDS = {
     RemoteCommand.of(MAKE_DIR_TEMPLATE, ROOT.child(MINTED_UUID)).text: "",
-    RemoteCommand.of(REFRESH_TEMPLATE).text: "",
+    RemoteCommand.of(SERVICE_STATE_TEMPLATE, UI_SERVICE).text: f"{ACTIVE_STATE}\n",
+    FENCE_COMMAND: f"{BOOT_ID_VALUE}\n",
+    RemoteCommand.of(RESET_FAILED_TEMPLATE, UI_SERVICE).text: "",
+    RESTART_COMMAND: "",
 }
-"""The two commands ``SshUploader`` sends around its three writes."""
+"""The six commands ``SshUploader`` sends around its three writes: the ``mkdir`` before them,
+and the five of the guarded restart after -- read the UI's state, arm the reboot fence, clear
+the start-limit counter, restart, verify the fence. ``test_device_ssh.py`` owns the assertions
+about each one; this map exists so the contract suite drives a healthy device."""
 
 
 # ───────────────────────────── the USB bindings ─────────────────────────────
@@ -994,14 +1024,30 @@ class TestUsbFacts(DeviceFactsSourceContract):
         # The route table is closed at six families and none reports firmware, model,
         # serial, memory or storage -- so this transport names all of them rather than
         # reporting an unnamed None, which would read as "asked and got nothing back".
-        assert source.read_facts().unsupported == frozenset({"firmware", "model", "serial"})
-        assert source.read_resources().unsupported == frozenset(
+        assert source.read_facts().unsupported_names == frozenset({"firmware", "model", "serial"})
+        assert source.read_resources().unsupported_names == frozenset(
             {
                 "total_memory_bytes",
                 "available_memory_bytes",
                 "total_storage_bytes",
                 "available_storage_bytes",
             }
+        )
+
+    def test_every_declaration_says_who_could_answer_it(self, source: DeviceFactsSource) -> None:
+        """Every declaration says who could answer it."""
+        # The route table is the constraint, so the answer is the same for six of the seven
+        # fields -- SSH, which has a shell and reads all six from files. `serial` is the
+        # exception and the empty tuple is the point of it: no transport answers that one, so a
+        # report has nothing to advise rather than a transport to name.
+        facts = source.read_facts()
+        resources = source.read_resources()
+        declared = (*facts.alternatives, *resources.alternatives)
+        claims = {entry.name: entry.supported_by for entry in declared}
+        assert claims.keys() == facts.unsupported_names | resources.unsupported_names
+        assert claims["serial"] == ()
+        assert all(
+            claim == (TransportKind.SSH,) for name, claim in claims.items() if name != "serial"
         )
 
 
@@ -1043,9 +1089,13 @@ class TestUsbUploader(DocumentUploaderContract):
 
         uploader.upload(an_upload(name="Design review.pdf"))
 
-        body = sent[0].content.decode("latin-1")
-        assert sent[0].method == "POST"
-        assert sent[0].url.raw_path.decode() == UPLOAD_ROUTE
+        # `sent[0]` is the destination pre-flight -- `GET /documents/`, sent immediately before
+        # every write so the created entry lands at the root whatever listed last. The write is
+        # the second request, and picking it by verb keeps this assertion about the body.
+        write = next(request for request in sent if request.method == "POST")
+        body = write.content.decode("latin-1")
+        assert [request.method for request in sent] == ["GET", "POST"]
+        assert write.url.raw_path.decode() == UPLOAD_ROUTE
         assert f'name="{UPLOAD_FIELD}"' in body
         assert 'filename="Design review.pdf"' in body
         assert UPLOAD_MEDIA_TYPES[UploadMedia.PDF] in body
@@ -1250,7 +1300,12 @@ class TestSshFacts(DeviceFactsSourceContract):
         facts = source.read_facts()
         assert facts.firmware == FIRMWARE
         assert facts.model == MODEL
-        assert facts.unsupported == frozenset({SERIAL_FIELD})
+        assert facts.unsupported == frozenset({NO_SERIAL_SOURCE})
+        # And the annotation is the empty tuple rather than `USB_WEB_API`: the sources are a
+        # file this workspace may not name and a redacted journal, neither of which the other
+        # transport reaches either, so there is nowhere to send a user.
+        assert facts.alternatives == (NO_SERIAL_SOURCE,)
+        assert facts.alternatives[0].supported_by == ()
 
 
 class TestSshUploader(DocumentUploaderContract):
@@ -1303,7 +1358,9 @@ class TestSshUploader(DocumentUploaderContract):
     def test_the_metadata_sidecar_is_written_last_and_the_refresh_after_it(self) -> None:
         """The metadata sidecar is written last and the refresh after it."""
         # `.metadata` is what makes an identifier a document in the store, so a failure
-        # before it leaves orphans no listing reports as a document.
+        # before it leaves orphans no listing reports as a document. The refresh is five
+        # commands rather than one -- see `SshUploader._refresh` -- so the claim here is that
+        # the commit is the last *write* and that everything after it is one of those five.
         shell = FakeRemoteShell(outputs=UPLOAD_COMMANDS)
         uploader = SshUploader(
             shell=shell,
@@ -1313,7 +1370,10 @@ class TestSshUploader(DocumentUploaderContract):
         )
         uploader.upload(an_upload())
         commit = ROOT.child(MINTED_UUID).with_suffix(METADATA_SUFFIX).value
-        assert shell.log[-2:] == [f"write {commit}", f"run {REFRESH_TEMPLATE}"]
+        assert shell.writes[-1][0] == commit, "the commit point is the last write"
+        after = shell.log[shell.log.index(f"write {commit}") + 1 :]
+        assert all(entry.startswith("run ") for entry in after), "nothing is written after it"
+        assert f"run {RESTART_COMMAND}" in after
 
 
 class TestSshSearchIndexSource(SearchIndexSourceContract):
@@ -1688,6 +1748,7 @@ def test_exactly_one_usb_name_can_write_to_the_device() -> None:
         "UPLOAD_OPERATION",
         "UPLOAD_ROUTE",
         "UPLOAD_TIMEOUT_SECONDS",
+        "USB_TIMEOUT_SECONDS",
         "UsbBundleSource",
         "UsbCatalog",
         "UsbFacts",
@@ -1793,9 +1854,12 @@ def test_the_usb_transport_has_two_read_verbs_and_exactly_one_write_verb() -> No
     # This asserted `== {"get", "head"}` under the heading "exactly two read-only verbs", whose
     # premise was that the write route was unprobed. Retired by measurement; the replacement is
     # stronger, because it pins the *count* of write verbs rather than their absence -- a
-    # second one would still fail here.
+    # second one would still fail here. `over_usb` and `close` joined the set when the
+    # composition root needed a client it is not allowed to build: they carry the client's
+    # lifetime, not a request, and they are the same pair `ParamikoShell` spells as
+    # `connect`/`close`.
     verbs = {name for name in vars(UsbWebApi) if not name.startswith("_")}
-    assert verbs == {"get", "head", "post_file"}
+    assert verbs == {"close", "get", "head", "over_usb", "post_file"}
 
 
 def test_the_reference_instant_survives_both_wire_spellings() -> None:

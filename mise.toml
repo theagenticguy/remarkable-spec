@@ -56,6 +56,16 @@ run = "uv run pytest -n auto -m 'not hardware' --cov=packages/rmspec-app/src/rms
 # is a PEP 420 namespace package with no single __file__ for coverage to walk.
 # That hole let 6,269 lines of untested source report as 100% covered.
 # tests/architecture/test_coverage_config.py asserts a flag exists per package.
+#
+# NOTE on running two coverage runs at once: don't. Both `test` and `test-cov` write the
+# repo-root `.coverage`, and coverage's combine step consumes the fragments `-n auto` wrote --
+# including the other run's. Measured while several agents worked in this tree: two concurrent
+# runs produced `sqlite3.OperationalError: no such table: file` as a pytest INTERNALERROR, and
+# separately a phantom 96.78% reading that would have failed the 90% floor's sibling checks for
+# a reason that did not exist. Both cleared on a re-run with nothing else running. CI is
+# unaffected because it runs one job; this is a local hazard, and the tell is a coverage number
+# that moved without the code moving. Set COVERAGE_FILE to something unique if you must
+# overlap.
 [tasks.test-cov]
 description = "Full suite with the >=90% gate. The definition of done."
 run = "uv run pytest -n auto -m 'not hardware' --cov=packages/rmspec-app/src/rmspec/app --cov=packages/rmspec-cli/src/rmspec/cli --cov=packages/rmspec-device/src/rmspec/device --cov=packages/rmspec-domain/src/rmspec/domain --cov=packages/rmspec-export/src/rmspec/export --cov=packages/rmspec-formats/src/rmspec/formats --cov=packages/rmspec-ocr/src/rmspec/ocr --cov=packages/rmspec-persistence/src/rmspec/persistence --cov=packages/rmspec-render/src/rmspec/render --cov-report=xml --cov-report=term-missing --cov-fail-under=90"
@@ -73,9 +83,43 @@ run = "uv run pytest -m hardware -q"
 # 125 evidence-carrying claims in specs/device/3.27.3.0/ is worth building; until it
 # exists, nothing here pretends it has been.
 
+# AGENTS.md is generated from `rmspec manifest`, never hand-written, so a committed
+# agent-facing document cannot contradict the command surface. `agents-md-check`
+# regenerates into memory and diffs against the committed file, which is what makes a
+# surface change that shipped without regenerating fail here instead of misleading a
+# caller. The output path is an argument because the generator lives inside an installed
+# package and has no business guessing where the repository root is -- and because this
+# file is the one place a path or a command string belongs.
+[tasks.agents-md]
+description = "Regenerate AGENTS.md from the CLI's own manifest"
+run = "uv run python -m rmspec.cli._agents AGENTS.md"
+
+[tasks.agents-md-check]
+description = "Fail if the committed AGENTS.md has drifted from the manifest -- the CI form"
+run = "uv run python -m rmspec.cli._agents AGENTS.md --check"
+
+# The nine member wheels are not installable outside this workspace: `rmspec-cli`'s metadata
+# requires eight `rmspec-*` distributions that exist on no index. So the artifact a user
+# installs is a tenth one, `rmspec`, carrying every member's subpackage and the union of their
+# third-party requirements. It is split across two tasks on purpose. `rmspec.cli._bundle` writes
+# the tree and runs nothing -- a Python file in this repository invoking `uv build` through
+# `subprocess` would be a second place a command string lives, and this file is the only place
+# one may. So the staging is Python and the building is here.
+#
+# `build/` is gitignored, so nothing generated is committed and there is no `--check` twin to
+# write: unlike AGENTS.md there is no second copy that could go stale.
+[tasks.bundle]
+description = "Stage the single-distribution build tree from the nine members"
+run = "uv run python -m rmspec.cli._bundle . build/bundle"
+
+[tasks.build]
+description = "Build the one wheel plus sdist that carry the whole CLI"
+depends = ["bundle"]
+run = "uv build build/bundle --out-dir dist"
+
 [tasks.check]
 description = "Everything that must pass before a push"
-depends = ["lint-check", "format-check", "typecheck", "arch", "test-cov"]
+depends = ["lint-check", "format-check", "typecheck", "arch", "agents-md-check", "test-cov"]
 
 [tasks.versions]
 description = "Print resolved tool versions -- used to prove local and CI agree"

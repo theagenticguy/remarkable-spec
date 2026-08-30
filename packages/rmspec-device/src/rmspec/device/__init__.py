@@ -16,6 +16,18 @@ seams, one per transport plus one for the write route), ``_wire`` (listing-entry
 ``_shell``'s own ``RemoteShell`` Protocol, which is a seam for this package's tests rather
 than a port.
 
+Nothing here hands out a transport *client*, and that is why this ``__all__`` did not grow when
+the composition root needed one. ``httpx`` and ``paramiko`` are this package's dependencies and
+no other package in the workspace declares either, so a caller cannot legally build the client
+:class:`~rmspec.device.usb.UsbWebApi` takes -- yet the constructor asks for one, because a test
+passes an ``httpx.MockTransport`` through it. Both facts survive by putting the factory on the
+class that uses the client: :meth:`~rmspec.device.usb.UsbWebApi.over_usb` takes an ``Endpoint``
+and owns the client it builds, exactly as :meth:`~rmspec.device._shell.ParamikoShell.connect`
+owns its transport, and :meth:`~rmspec.device.usb.UsbWebApi.close` matches
+:meth:`~rmspec.device._shell.ParamikoShell.close`. A module-level ``usb_client`` factory would
+have been a name in this list that is not something bindable to a port, which is the one thing
+this list means.
+
 :mod:`rmspec.device.addresses` stays a public *module* and is deliberately not re-exported
 here: a composition root reaches for ``Endpoint`` and ``RemotePath`` by importing that
 module, and keeping them out of this ``__all__`` means every name here is something that can
@@ -47,7 +59,9 @@ something. :class:`~rmspec.device.usb.UsbUploader` raises ``DeviceOperationUnsup
 non-``None`` ``parent_uuid``, because no folder parameter exists anywhere in that route, and
 reports ``LibraryRefresh.ALREADY_VISIBLE``, because xochitl performs the import itself.
 :class:`~rmspec.device.ssh.SshUploader` honours a destination and reports
-``VISIBILITY_FORCED`` -- it restarts the tablet UI -- and refuses
+``VISIBILITY_FORCED`` -- it restarts the tablet UI, which the firmware allows four times per ten
+minutes before it answers with ``emergency.target``, so that one command is wrapped in four
+guards and :meth:`~rmspec.device.ssh.SshUploader._refresh` is where they live -- and refuses
 ``UploadMedia.RMDOC``, because placing an archive means unpacking it and writing the sidecars
 by hand rather than converting a media. Neither degrades: ``ports/device.py`` forbids
 returning a receipt that reports success for something the caller did not ask for.

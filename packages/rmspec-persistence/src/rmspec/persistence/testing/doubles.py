@@ -463,7 +463,45 @@ class _InMemoryArtifactCache[
 
 
 class InMemoryOcrCache(_InMemoryArtifactCache[OcrCacheKey, OcrArtifact]):
-    """In-memory :class:`~rmspec.domain.ports.persistence.OcrCache`."""
+    """In-memory :class:`~rmspec.domain.ports.persistence.OcrCache`.
+
+    Four methods where its diagram sibling has three. The fourth cannot live on the
+    shared base because its matched set names ``recognizers``, which
+    :class:`~rmspec.domain.models.DiagramCacheKey` does not have.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.equivalent_raster_calls = 0
+        """How many times :meth:`equivalent_raster` was entered, faults included."""
+
+    def equivalent_raster(self, key: OcrCacheKey, /) -> OcrArtifact | None:
+        """Return a stored artifact for identical pixels under a different page hash.
+
+        Parameters
+        ----------
+        key
+            The key that missed.
+
+        Returns
+        -------
+        OcrArtifact | None
+            The artifact under the greatest qualifying ``digest`` -- same
+            ``raster_identity``, different ``page_hash`` -- or ``None`` when none
+            qualifies and on a seeded read fault.
+        """
+        self.equivalent_raster_calls += 1
+        if self.fail_reads:
+            return None
+        wanted = key.raster_identity
+        qualifying = {
+            digest: artifact
+            for digest, (stored, artifact) in self._entries.items()
+            if stored.page_hash != key.page_hash and stored.raster_identity == wanted
+        }
+        if not qualifying:
+            return None
+        return qualifying[max(qualifying)]
 
 
 class InMemoryDiagramCache(_InMemoryArtifactCache[DiagramCacheKey, DiagramArtifact]):

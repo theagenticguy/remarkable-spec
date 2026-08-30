@@ -3,13 +3,21 @@
 Every adapter here takes a :class:`~rmspec.device._shell.RemoteShell` and nothing else that
 touches a wire, so all five are exercised against an in-memory double. What they add on top
 of the shell is knowledge of the xochitl store's layout, of the ``.metadata``/``.content``
-sidecar pair, and of the seven BusyBox commands this package is allowed to send.
+sidecar pair, and of the ten commands this module is allowed to send -- the nine templates
+below plus the ``ls -A`` the shell itself builds. It was seven until the restart in
+:class:`SshUploader` grew the four guards that keep it from rebooting the tablet.
 
 SSH is the documented-hazard fallback, not the default
 ------------------------------------------------------
-reMarkable's own documentation states that *"Xochitl must not run when manually accessing
-document files"*, and nothing in this module stops it. So every read here is a read of a
-store its owner is still writing. The default read path in this project is therefore the USB
+reMarkable's own documentation, at <https://developer.remarkable.com/documentation/xochitl>,
+says of the store directory that *"It is possible to copy this directory, but note that Xochitl
+should not be running when accessing and/or changing the stored documents."* Nothing in this
+module stops it, so every read here is a read of a store its owner is still writing. Reading
+that sentence as "these reads are hazardous" is **our inference**, and it is worth marking as
+one: the source says *should not*, not *must not*, and says nothing about a torn read. What
+makes the inference safe to act on is measured separately -- see
+:class:`SshSearchIndexSource`, where a truncated database image deserialised cleanly and
+answered with the wrong rows. The default read path in this project is therefore the USB
 web API: ``GET /download/{id}/rmdoc`` is served by xochitl itself, which makes its answer a
 consistent snapshot by construction rather than by timing. Three of the five adapters here --
 :class:`SshCatalog`, :class:`SshBundleSource` and, since ``POST /upload`` was measured on
@@ -80,7 +88,10 @@ divergences, each forced by something measured or by ``ports/device.py``.
    one fact wearing another's name, so the field is named in
    :attr:`~rmspec.domain.ports.device.DeviceFacts.unsupported`. That is the port's
    "structurally cannot ask", and it is the correct encoding because it stays true on the
-   next run.
+   next run. It is named there with an **empty** ``supported_by`` -- see
+   :data:`NO_SERIAL_SOURCE` -- because the USB transport cannot answer it either: "cannot ask"
+   here is a property of the value's only sources, not of this wire, so there is no transport
+   to send a user to.
 
 7. **The uploaded ``.metadata`` carries ``createdTime`` and a real ``lastModified``.**
    ``push_pdf`` wrote ``"lastModified": ""`` and no ``createdTime`` at all;
@@ -162,6 +173,7 @@ from pydantic import ValidationError
 from rmspec.device._pages import decode_page_order
 from rmspec.device._shell import PathUnreadableError
 from rmspec.device.addresses import (
+    BOOT_ID,
     CONTENT_SUFFIX,
     METADATA_SUFFIX,
     OS_RELEASE,
@@ -197,6 +209,7 @@ from rmspec.domain.ports.device import (
     LibraryRefresh,
     SkippedEntry,
     SkipReason,
+    UnsupportedField,
     UploadMedia,
     UploadReceipt,
 )
@@ -210,22 +223,36 @@ if TYPE_CHECKING:
     from rmspec.domain.ports.device import UploadRequest
 
 __all__ = [
+    "ACTIVE_STATE",
     "AFTER_COMMIT_NOTE",
     "AT_COMMIT_NOTE",
     "BEFORE_COMMIT_NOTE",
+    "BOOT_ID_TEMPLATE",
     "CONTENT_FORMAT_VERSION",
     "DF_AVAILABLE_FIELD",
     "DF_DATA_LINE",
     "DF_TOTAL_FIELD",
     "DOCUMENT_TYPE",
+    "FENCE_WANTED",
     "FIRMWARE_TEMPLATE",
+    "INACTIVE_NOTE",
     "JSON_INDENT",
     "MAKE_DIR_TEMPLATE",
     "MEMINFO_TEMPLATE",
     "MODEL_TEMPLATE",
-    "REFRESH_TEMPLATE",
+    "NO_FENCE_NOTE",
+    "NO_SERIAL_SOURCE",
+    "REBOOTED_NOTE",
+    "RESET_FAILED_TEMPLATE",
+    "RESTART_TEMPLATE",
     "SERIAL_FIELD",
+    "SERVICE_STATE_TEMPLATE",
+    "START_LIMIT_MARKERS",
+    "START_LIMIT_NOTE",
     "STORAGE_TEMPLATE",
+    "UI_SERVICE",
+    "UNFENCED_RESTART_NOTE",
+    "UNKNOWN_STATE",
     "UNPLACEABLE_MEDIA",
     "UNPLACEABLE_OPERATION",
     "SshBundleSource",
@@ -241,6 +268,10 @@ __all__ = [
 #  Neither `file`, `sqlite3` nor `python3` is installed, so nothing here can lean on them.
 #  Every template is a literal spelled in this module; only its arguments come from data,
 #  and `RemoteCommand.of` quotes those.
+#
+#  `systemctl` is the one exception to the heading: it is systemd 255's own binary and not a
+#  BusyBox applet, which is why the four commands that use it are grouped separately below --
+#  they are the ones with a blast radius rather than an output to parse.
 
 #: Read the first three lines of ``/proc/meminfo``, which is where ``MemTotal``,
 #: ``MemFree`` and ``MemAvailable`` are. Three rather than two: ``MemFree`` sits between the
@@ -262,9 +293,74 @@ MODEL_TEMPLATE: Final = "cat {}"
 #: Create a document's page directory, and its parents if somehow absent.
 MAKE_DIR_TEMPLATE: Final = "mkdir -p {}"
 
-#: Restart the tablet's UI process so it re-indexes the store. See
-#: :meth:`SshUploader.upload` for the blast radius.
-REFRESH_TEMPLATE: Final = "systemctl restart xochitl"
+
+# ─────────────────── the guarded restart, and what each guard is for ───────────────────
+#
+#  Five commands, in the order `SshUploader._refresh` sends them. The hazard they exist to
+#  contain is measured, not feared: `specs/device/3.27.3.0/systemd.json` claim
+#  `unit:xochitl.service` records `StartLimitIntervalUSec=10min` with `StartLimitBurst=4`, and
+#  claim `unit:failure-path` records what happens on the fifth start -- systemd isolates
+#  `emergency.target`, which on this firmware is a reMarkable override requiring
+#  `rm-emergency.service`, whose `ExecStart` is `/usr/sbin/rm-emergency.sh`. The tablet goes
+#  away from its user mid-session, with whatever was unsaved on it.
+
+#: The systemd unit that is the tablet's UI process, the store's other writer, and the
+#: firmware's HTTP server, all three at once -- claim ``edges:xochitl-client-facing`` measured
+#: exactly one process behind all of them. Named once and interpolated into the four commands
+#: below, so the unit whose state is read, whose counter is cleared and which is restarted
+#: cannot drift apart.
+UI_SERVICE: Final = "xochitl"
+
+#: What ``systemctl is-active`` prints for a running unit, and the only answer that permits a
+#: restart.
+ACTIVE_STATE: Final = "active"
+
+#: Ask what the UI process is doing, and never fail asking.
+#:
+#: ``|| true`` is in the template deliberately, and it is not laziness about exit statuses.
+#: ``is-active`` prints the state to *stdout* and exits 3 for every state that is not
+#: :data:`ACTIVE_STATE`, while :meth:`~rmspec.device._shell.RemoteShell.run` turns a non-zero
+#: exit into a failure carrying the status and discarding the output -- so the honest answer
+#: ``failed`` or ``activating`` would reach a user as ``exit status 3``. Swallowing the status
+#: keeps the state as data.
+#:
+#: It also makes every other way this probe can go wrong -- no such unit, no ``systemctl``, an
+#: empty answer -- arrive as "not :data:`ACTIVE_STATE`", which is the reading that **refuses**
+#: rather than the one that restarts. The unsafe direction is unreachable from here.
+SERVICE_STATE_TEMPLATE: Final = "systemctl is-active {} || true"
+
+#: Clear the unit's start-limit counter, immediately before the restart.
+#:
+#: ``reset-failed`` resets a unit's failed state *and* its start-rate counters, which is the
+#: whole mechanism: without it, a restart inherits however many starts a crash loop already
+#: spent inside the ten-minute interval, and the one this module asks for is the one that
+#: crosses the burst.
+#:
+#: On its own it would be **worse than nothing**, because clearing the counter also disarms
+#: the firmware's own protection against a crash-looping UI. What makes it safe is that it is
+#: only ever sent after :data:`SERVICE_STATE_TEMPLATE` has answered :data:`ACTIVE_STATE`: a
+#: crash-looping unit is ``activating`` or ``failed``, never ``active``, so the counter this
+#: clears is never one that was protecting anything.
+RESET_FAILED_TEMPLATE: Final = "systemctl reset-failed {}"
+
+#: Restart the tablet's UI process so it re-indexes the store. The one command in this package
+#: that takes the user's tablet away from them for a few seconds, and the reason the four
+#: around it exist. See :meth:`SshUploader.upload` for the blast radius.
+RESTART_TEMPLATE: Final = "systemctl restart {}"
+
+#: Read the kernel's per-boot identifier -- the fence. Sent once before the restart and once
+#: after, and a difference between the two answers means the device rebooted. ``cat`` over the
+#: exec channel rather than an SFTP read, for the reasons :data:`~rmspec.device.addresses.BOOT_ID`
+#: gives.
+BOOT_ID_TEMPLATE: Final = "cat {}"
+
+#: Substrings that mean systemd refused a start because the unit has been started too often,
+#: matched case-insensitively against the whole report of a failed restart. Three spellings
+#: because systemd has changed the wording across versions and this package is measured against
+#: exactly one of them: ``start-limit-hit`` is the ``Result=`` value, and the other two are the
+#: sentences ``systemctl`` prints. Matching all three is cheaper than being wrong about which
+#: one this firmware's systemd 255 emits at the moment it matters.
+START_LIMIT_MARKERS: Final = ("start-limit-hit", "start request repeated", "attempted too often")
 
 
 # ─────────────────────────── what the sidecars say ───────────────────────────
@@ -283,6 +379,23 @@ JSON_INDENT: Final = 4
 #: The one :class:`~rmspec.domain.ports.device.DeviceFacts` field this transport
 #: structurally cannot answer. See divergence 6.
 SERIAL_FIELD: Final = "serial"
+
+#: :data:`SERIAL_FIELD` with the one thing worth adding: **no** transport answers it.
+#:
+#: An empty ``supported_by`` is a claim, not a blank -- the same convention
+#: ``OperationLimit`` already uses. It is the right one here because the alternative sentences
+#: are both false: this is not "retry over USB", and it is not the silence a bare name means.
+#: The RM02A-form serial the tablet UI shows is recorded only in the tablet's own
+#: credential-bearing config file, which no source in this workspace may name, and in journal
+#: lines ``GET /log.txt`` redacts; the 16-character id in ``/sys/devices/soc0/serial_number``
+#: is the i.MX8MM SoC unique id, a different fact. So a user told to change transports would
+#: find the value absent there too, and the honest report is "stop asking".
+#:
+#: Measured 2026-08-29; see ``specs/device/3.27.3.0/filesystem.json``, claim
+#: ``identity:no-device-serial-source``, whose recorded consequence is that the field belongs
+#: in ``unsupported`` for **both** transports. ``rmspec.device.usb`` spells the same empty
+#: tuple for this field, which is what makes the two adapters agree.
+NO_SERIAL_SOURCE: Final = UnsupportedField(name=SERIAL_FIELD, supported_by=())
 
 #: The one :class:`~rmspec.domain.ports.device.UploadMedia` member :class:`SshUploader`
 #: refuses. See its docstring: an archive is a container of a whole document, so placing one
@@ -360,6 +473,70 @@ AT_COMMIT_NOTE: Final = (
 #: correct; it is simply not in the running UI process's index yet.
 AFTER_COMMIT_NOTE: Final = (
     "{} is completely written and will appear the next time the tablet UI starts"
+)
+
+
+# ─────────────────────── what a refused or unproven refresh says ───────────────────────
+#
+#  Five sentences, each attached to one observation, and each ending in the one instruction
+#  that observation licenses. They are constants rather than inline strings because the
+#  difference between "you may try again" and "do not repeat this" is the whole safety
+#  property, and a test pins which failure carries which.
+
+#: How a refusal spells "the command answered nothing at all", for both the service state and
+#: the fence. A sentence rather than an empty string, because a report reading ``got ''`` is
+#: indistinguishable from a formatting bug.
+UNKNOWN_STATE: Final = "no answer at all"
+
+#: What the fence reads, for the ``expected`` of a refusal that could not read it.
+FENCE_WANTED: Final = "the kernel's per-boot identifier"
+
+#: Why a restart is refused when the UI process is not already running.
+#:
+#: This is the guard that matters most, and it is counter-intuitive: the state where a restart
+#: looks *most* useful -- the UI is down, so nothing is showing the user their library -- is
+#: exactly the state where sending one is most likely to be the fifth start in ten minutes and
+#: hand the tablet to ``emergency.target``. A stopped or crash-looping UI is not this package's
+#: to fix, and starting one is not part of placing a document.
+INACTIVE_NOTE: Final = (
+    "the tablet UI process is not running, so no restart was sent and no start was spent; "
+    "starting a stopped or crash-looping UI is not part of placing a document, and it is the "
+    "way its four-starts-per-ten-minutes limit gets reached. Look at the tablet"
+)
+
+#: Why a restart is refused when the fence could not be armed. No fence, no restart: the whole
+#: point of the identifier is to be able to say afterwards whether the device rebooted, and a
+#: restart nobody can check is the one this module must not send.
+NO_FENCE_NOTE: Final = (
+    "the reboot fence could not be armed, so no restart was sent and no start was spent: "
+    "without a boot identifier to compare against, nothing afterwards could tell a completed "
+    "restart from a rebooted tablet"
+)
+
+#: What a start-limit refusal means. The loudest sentence in this module, and the only one that
+#: forbids the obvious next action outright.
+START_LIMIT_NOTE: Final = (
+    "systemd refused the start because this unit has been started too often, which is the "
+    "condition whose next step is emergency.target: the firmware may reboot the tablet. "
+    "DO NOT repeat this upload and DO NOT retry the refresh -- wait ten minutes for the "
+    "start-limit interval to pass, and look at the tablet"
+)
+
+#: What a changed boot identifier means, and why a retry is the wrong reflex.
+REBOOTED_NOTE: Final = (
+    "the boot identifier changed, so the tablet rebooted during this upload; nothing here can "
+    "say whether the restart completed first. DO NOT retry: the device needs waking and "
+    "unlocking, and its library needs looking at, before anything writes to it again"
+)
+
+#: What an unreadable fence *after* the restart means. Weaker than :data:`REBOOTED_NOTE` -- it
+#: is the absence of evidence rather than evidence -- and it carries the same instruction, for
+#: the reason that makes this whole guard necessary: a replayed restart is how one reboot
+#: becomes a loop.
+UNFENCED_RESTART_NOTE: Final = (
+    "the restart was sent and the boot identifier could not be read back, so nothing here can "
+    "say whether the tablet is still on the same boot. DO NOT repeat the restart: an "
+    "unverifiable one must not be replayed"
 )
 
 
@@ -915,13 +1092,35 @@ class SshUploader:
     2. write ``<root>/<uuid>.<pdf|epub>``
     3. write ``<root>/<uuid>.content``
     4. write ``<root>/<uuid>.metadata``  -- the commit point
-    5. ``systemctl restart xochitl``
+    5. the guarded restart -- five commands, :meth:`_refresh`
 
     A failure before step 4 leaves files that no listing reports as a document. **Nothing is
     cleaned up.** Deleting is itself destructive, and this package will not remove files
     from a user's device on a path it cannot fully reason about -- a failed ``mkdir`` may
     mean the directory already held something. The orphan is named in the raised error
     instead, so a user can decide.
+
+    Step 5 can reboot the tablet, so it is five commands and not one
+    ---------------------------------------------------------------
+    Restarting the UI process is what makes this adapter's
+    :attr:`~rmspec.domain.ports.device.LibraryRefresh.VISIBILITY_FORCED` true -- an SSH write
+    lands in the store after the running process has already read its index -- so the restart
+    cannot be dropped. What it can be is fenced. ``systemctl restart`` **spends one of four
+    starts per ten minutes**, and the fifth hands the tablet to ``emergency.target``: see
+    :data:`RESTART_TEMPLATE` and the four commands around it, and :meth:`_refresh` for the
+    order and for what each failure forbids.
+
+    The cost of that limit is real and this class does not hide it: **five uploads over SSH
+    inside ten minutes is one too many.** Amortising the restart across a batch is not
+    available here, and the reason is in the port rather than in this adapter --
+    :class:`~rmspec.domain.ports.device.LibraryRefresh` says in as many words that "a use case
+    that wants one refresh for a batch is asking for a different port than this one", and its
+    two members can spell "I restarted" and "nothing was needed" but not "I deferred". A
+    ``defer_restart`` flag here would have to return one of those two on an upload that did
+    neither, which is the one thing :class:`~rmspec.domain.ports.device.UploadReceipt` exists
+    to make unrepresentable. The honest fix is a library-refresh port plus a third
+    ``LibraryRefresh`` member, and this package may not add either. Until then a caller with a
+    batch should use the USB uploader, whose route needs no restart at all.
 
     Parameters
     ----------
@@ -961,6 +1160,14 @@ class SshUploader:
         endpoint drop. :class:`~rmspec.domain.ports.device.LibraryRefresh` exists to report
         exactly this, and visibility is per upload: N documents force N refreshes.
 
+        Because that restart is rate-limited by the firmware to four per ten minutes, and
+        because the fifth is answered by ``emergency.target``, step 5 is five commands and
+        :meth:`_refresh` owns all of them. Three things follow for a caller: an upload can fail
+        *after* the document is completely written, in which case the error says so; some of
+        those failures forbid a retry in as many words; and the restart is refused outright when
+        the UI process is not already running, because starting a stopped one is how the limit
+        gets reached.
+
         The receipt promises what the transport observed and no more. The device's
         synchronizer writes a ``.failure`` sidecar asynchronously, after validation, so
         nothing observable here says the document will sync. That gap is real and belongs to
@@ -989,7 +1196,11 @@ class SshUploader:
         DeviceAuthFailed
             The device refused the credentials.
         DeviceProtocolError
-            A command exited non-zero, or the session misbehaved.
+            A command exited non-zero, the session misbehaved, or the guarded restart refused
+            to proceed. The five refusals :meth:`_refresh` raises all arrive as this class and
+            are told apart by their text: each ends in the one instruction its observation
+            licenses, and two of the five forbid a retry outright. See :meth:`_refresh` for
+            the list and for the domain gap this one class is standing in for.
         """
         if request.media is UNPLACEABLE_MEDIA:
             raise DeviceOperationUnsupported(
@@ -1020,7 +1231,7 @@ class SshUploader:
             note = AT_COMMIT_NOTE.format(paths.metadata.value)
             raise _annotated(failure, note=note) from failure
         try:
-            self._shell.run(RemoteCommand.of(REFRESH_TEMPLATE))
+            self._refresh()
         except DeviceError as failure:
             raise _annotated(failure, note=AFTER_COMMIT_NOTE.format(doc_uuid)) from failure
         return UploadReceipt(
@@ -1031,6 +1242,102 @@ class SshUploader:
             library_refresh=LibraryRefresh.VISIBILITY_FORCED,
         )
 
+    def _refresh(self) -> None:
+        """Restart the UI process so it re-indexes the store, or refuse to.
+
+        Five commands, and the order is the safety property:
+
+        1. ``systemctl is-active xochitl`` -- and unless it answers exactly
+           :data:`ACTIVE_STATE`, **stop**. Nothing here starts a service that is down.
+        2. ``cat /proc/sys/kernel/random/boot_id`` -- arm the fence. Unless it answers,
+           **stop**: a restart nobody can afterwards distinguish from a reboot must not be
+           sent.
+        3. ``systemctl reset-failed xochitl``.
+        4. ``systemctl restart xochitl`` -- **immediately after 3, with nothing in between.**
+           The adjacency is the point rather than the presence: a command inserted between
+           them re-opens the window in which the restart inherits a start-limit counter, and
+           ``test_device_ssh.py`` asserts the two are neighbours in the command log for exactly
+           that reason.
+        5. ``cat /proc/sys/kernel/random/boot_id`` again, and compare.
+
+        Nothing is retried, here or anywhere else in this module. Two of the five refusals
+        happen before step 4 and say so, because their subject provably never started; the
+        three that can happen at or after it forbid a repeat, because a replayed restart is how
+        one reboot becomes a loop. That distinction is carried in the text of each error and is
+        the only place a caller can read it from -- which is the domain gap below.
+
+        Raises
+        ------
+        DeviceProtocolError
+            One of five conditions, each with its own sentence: the UI process is not running
+            (:data:`INACTIVE_NOTE`); the fence could not be armed (:data:`NO_FENCE_NOTE`);
+            systemd refused the start because the unit has been started too often
+            (:data:`START_LIMIT_NOTE`); the boot identifier changed, so the tablet rebooted
+            (:data:`REBOOTED_NOTE`); or it could not be read back, so nothing can say whether
+            it did (:data:`UNFENCED_RESTART_NOTE`). Plus the ordinary case of a command exiting
+            non-zero, which is what ``reset-failed`` failing arrives as.
+
+            **This is the closest error in ``rmspec.domain.errors`` and it is not an exact fit
+            for any of the five**, which is recorded here rather than worked around -- the same
+            gap :meth:`~rmspec.device.writeback.SshSceneWriter.write_scene` records for a
+            stale-precondition refusal, reached from a different direction. Its docstring says
+            it means "the device answered but broke its own contract", and a tablet whose UI is
+            legitimately stopped, or a firmware enforcing its own documented start limit, breaks
+            no contract at all: it is behaving exactly as measured. What the domain wants is a
+            sibling carrying the subject, whether the hazardous command was sent, and a
+            machine-readable "may this be retried" -- and a ``remediation``, which
+            ``DeviceProtocolError`` does not accept, so the advice a human needs is smuggled
+            into ``got``. Until that error exists, ``route`` names the command and ``got``
+            carries the whole story.
+        DeviceUnreachable
+            The tablet did not answer, or a step stalled. Reachable *at* step 4 and meaning the
+            worst version of it: the restart may have been sent and the session may have died
+            because the device went down. It is annotated by :meth:`upload` with the note saying
+            the document is completely written, and it is never retried here.
+        DeviceAuthFailed
+            The device refused the credentials.
+        """
+        probe = RemoteCommand.of(SERVICE_STATE_TEMPLATE, UI_SERVICE)
+        state = _first_line(self._shell.run(probe))
+        if state != ACTIVE_STATE:
+            raise DeviceProtocolError(
+                transport=TransportKind.SSH,
+                route=probe.text,
+                expected=ACTIVE_STATE,
+                got=f"{state or UNKNOWN_STATE}; {INACTIVE_NOTE}",
+            )
+        fence = RemoteCommand.of(BOOT_ID_TEMPLATE, RemotePath.absolute(BOOT_ID))
+        before = _first_line(self._shell.run(fence))
+        if before is None:
+            raise DeviceProtocolError(
+                transport=TransportKind.SSH,
+                route=fence.text,
+                expected=FENCE_WANTED,
+                got=f"{UNKNOWN_STATE}; {NO_FENCE_NOTE}",
+            )
+        self._shell.run(RemoteCommand.of(RESET_FAILED_TEMPLATE, UI_SERVICE))
+        try:
+            self._shell.run(RemoteCommand.of(RESTART_TEMPLATE, UI_SERVICE))
+        except DeviceProtocolError as refused:
+            if not _start_limited(refused.got):
+                raise
+            raise _annotated(refused, note=START_LIMIT_NOTE) from refused
+        after = _first_line(self._shell.run(fence))
+        if after is None:
+            raise DeviceProtocolError(
+                transport=TransportKind.SSH,
+                route=fence.text,
+                expected=before,
+                got=f"{UNKNOWN_STATE}; {UNFENCED_RESTART_NOTE}",
+            )
+        if after != before:
+            raise DeviceProtocolError(
+                transport=TransportKind.SSH,
+                route=fence.text,
+                expected=before,
+                got=f"{after}; {REBOOTED_NOTE}",
+            )
+
 
 class SshFacts:
     """The tablet's fixed facts and its two gauges, read with four BusyBox commands.
@@ -1039,9 +1346,14 @@ class SshFacts:
     for an unparseable reading: the port draws a distinction between a field this transport
     *structurally cannot ask* -- named in ``unsupported`` -- and a field it asked for and
     did not get an answer to, which is an unnamed ``None``. Both occur here.
-    :attr:`SERIAL_FIELD` is the first; a firmware line that does not match, or a ``df``
+    :data:`SERIAL_FIELD` is the first; a firmware line that does not match, or a ``df``
     line that is not the expected shape, is the second. One bad reading never fails the
     whole command.
+
+    The serial is declared through :data:`NO_SERIAL_SOURCE` rather than as a bare name, which
+    adds the one thing a bare name cannot say: **no** transport answers it, so a report has
+    nothing to advise. Every other absence here is the unnamed kind, so this is the only
+    annotated entry either method produces -- ``read_resources`` names nothing at all.
 
     Parameters
     ----------
@@ -1064,8 +1376,10 @@ class SshFacts:
             ``firmware`` from the ``IMG_VERSION`` line of
             :data:`~rmspec.device.addresses.OS_RELEASE` (``3.27.3.0``), ``model`` from
             :data:`~rmspec.device.addresses.SOC_MACHINE` (``reMarkable Ferrari``), and
-            ``serial`` ``None`` with :data:`SERIAL_FIELD` named in ``unsupported``. Either
-            answered field is ``None`` when its command produced nothing readable.
+            ``serial`` ``None`` with :data:`NO_SERIAL_SOURCE` in ``unsupported`` -- the field
+            named, and annotated with the empty tuple, which says no transport answers it
+            rather than "try the other one". Either answered field is ``None`` when its
+            command produced nothing readable.
 
         Raises
         ------
@@ -1086,7 +1400,7 @@ class SshFacts:
             firmware=firmware,
             model=model,
             serial=None,
-            unsupported=frozenset({SERIAL_FIELD}),
+            unsupported=frozenset({NO_SERIAL_SOURCE}),
         )
 
     def read_resources(self) -> DeviceResources:
@@ -1150,11 +1464,18 @@ class SshSearchIndexSource:
 
     The bytes may be a torn snapshot, and the reader must check
     ----------------------------------------------------------
-    reMarkable's own documentation states that *"Xochitl must not run when manually accessing
-    document files"*, and this file is xochitl's **live** search index. So this adapter reads
-    a database that may be mid-write, and it is deliberately **not** its job to detect that:
-    it moves bytes, and a per-page integrity opinion formed by a transport would be a second
-    opinion the reader could disagree with.
+    reMarkable's own documentation, at <https://developer.remarkable.com/documentation/xochitl>,
+    says of the store directory that *"It is possible to copy this directory, but note that
+    Xochitl should not be running when accessing and/or changing the stored documents."* This
+    file is xochitl's **live** search index. So this adapter reads a database that may be
+    mid-write, and it is deliberately **not** its job to detect that: it moves bytes, and a
+    per-page integrity opinion formed by a transport would be a second opinion the reader could
+    disagree with.
+
+    The quotation is the *provenance* of the concern and not the evidence for it. Their sentence
+    is a *should not*, is about the documents directory rather than this file, and says nothing
+    about what a partial read looks like -- every step from there to "these bytes may be torn" is
+    ours. The evidence is below, and it is measured rather than quoted.
 
     Saying so here is the load-bearing part, because the failure is silent. Measured locally
     against CPython 3.13 and SQLite 3.50.4: an image truncated to ~99% of its length
@@ -1502,6 +1823,31 @@ def _annotated(failure: DeviceError, /, *, note: str) -> DeviceError:
             )
         case _:
             return failure
+
+
+def _start_limited(report: str, /) -> bool:
+    """Report whether a failed restart is systemd's start-limit refusal.
+
+    Matched on text because there is nothing else to match on: ``systemctl`` exits 1 for a
+    start-limit refusal exactly as it does for a unit that failed to start once, so the
+    sentence is the only thing that distinguishes the condition that reboots the tablet from
+    the condition that merely did not work. That is a weak signal treated as one -- a miss
+    reports the plain failure and forbids nothing, so the cost of the words changing under
+    this function is a message that says less, never a restart that should not have happened.
+
+    Parameters
+    ----------
+    report
+        The failed command's whole report, as ``DeviceProtocolError.got`` carries it: the exit
+        status, the endpoint, and the first line of stderr.
+
+    Returns
+    -------
+    bool
+        Whether any of :data:`START_LIMIT_MARKERS` appears in it, case-insensitively.
+    """
+    lowered = report.casefold()
+    return any(marker in lowered for marker in START_LIMIT_MARKERS)
 
 
 def _first_line(stdout: str, /) -> str | None:

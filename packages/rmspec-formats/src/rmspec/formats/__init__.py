@@ -9,10 +9,15 @@ workspace reaches a parsed page through
 
 Composition surface
 -------------------
-Three names, because that is what a container needs to build:
+Four names, because that is what a container needs to build:
 
 :class:`SceneCodec`
     The ``PageCodec`` adapter. Takes no arguments.
+:class:`AppendOnlySceneWriter`
+    The ``SceneAppender`` adapter: ink onto a page that already exists. Takes no arguments.
+    Named for its design decision -- it never re-encodes the bytes it was handed, so the
+    original is a literal prefix of what it returns. A container that only reads pages does
+    not resolve it.
 :class:`XochitlDocumentRepository`
     The ``DocumentRepository`` adapter over a local xochitl root. Takes ``root`` and a
     ``PageCodec``, both keyword-only.
@@ -37,6 +42,11 @@ from __future__ import annotations
 
 from rmspec.formats.fingerprint import fingerprint_bytes
 from rmspec.formats.repository import XochitlDocumentRepository
-from rmspec.formats.scene_codec import SceneCodec
+from rmspec.formats.scene_codec import AppendOnlySceneWriter, SceneCodec
 
-__all__ = ["SceneCodec", "XochitlDocumentRepository", "fingerprint_bytes"]
+__all__ = [
+    "AppendOnlySceneWriter",
+    "SceneCodec",
+    "XochitlDocumentRepository",
+    "fingerprint_bytes",
+]

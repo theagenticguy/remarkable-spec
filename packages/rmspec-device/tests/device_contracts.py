@@ -597,8 +597,10 @@ class DeviceFactsSourceContract:
     ) -> None:
         """Unsupported never names a field that does not exist."""
         reading = self._read(source)
-        assert reading.facts.unsupported <= FACT_FIELDS
-        assert reading.resources.unsupported <= RESOURCE_FIELDS
+        # Through `unsupported_names`, because a member of `unsupported` may be a bare name or
+        # an `UnsupportedField` that also says which transports can answer it.
+        assert reading.facts.unsupported_names <= FACT_FIELDS
+        assert reading.resources.unsupported_names <= RESOURCE_FIELDS
 
     def test_unsupported_never_names_a_field_that_carries_a_value(
         self,
@@ -609,9 +611,9 @@ class DeviceFactsSourceContract:
         # validator: a transport that learned to answer a field and forgot to stop naming it
         # is the drift this catches, and the validator only fires if the pair is constructed.
         reading = self._read(source)
-        for name in reading.facts.unsupported:
+        for name in reading.facts.unsupported_names:
             assert getattr(reading.facts, name) is None
-        for name in reading.resources.unsupported:
+        for name in reading.resources.unsupported_names:
             assert getattr(reading.resources, name) is None
 
     def test_the_port_refuses_the_pair_the_adapter_avoids(self) -> None:

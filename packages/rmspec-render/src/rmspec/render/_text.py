@@ -5,6 +5,12 @@ block rendered as a perfectly valid, blank-looking ``<svg>`` -- ``stroke_count``
 ``notices`` empty -- and the words were simply gone from the PNG, the PDF and both OCR paths.
 ``ports/render.py`` closes that with three members, and this module is the half that draws.
 
+Nothing here knows which of a page's two text sources a block came from. ``parent`` is whatever
+element the caller wants the lines under -- a layer's group for ``Layer.text_blocks``, the root
+``<svg>`` for ``PageContent.text_blocks``, which is drawn last and belongs to no layer. Keeping
+that distinction entirely in :mod:`rmspec.render._renderer` is why there is one drawing path and
+not two that could drift.
+
 Wrapping is an estimate, and says so
 ------------------------------------
 ``TextBlock`` carries a corner, a wrap width and a string; SVG has no auto-wrap and a pure

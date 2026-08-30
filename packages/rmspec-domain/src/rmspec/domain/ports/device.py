@@ -68,14 +68,25 @@ Every port is one view over a single ``Scope.REQUEST`` transport resource provid
 dishka generator, so a command that lists and then pulls performs one handshake and
 closes it in the finalizer.
 
+Writing *into* an existing document is a fourth shape, and it is this module's most
+dangerous one. :class:`DocumentUploader` creates; :class:`SceneWriter` rewrites one page of
+something a human made by hand, over a transport reMarkable's own documentation warns
+against using while its reader is running. So the read-modify-write cycle is not left to a
+caller to sequence safely: :class:`ScenePrecondition` makes the artifact's read-time
+identity a required argument of the write, and the write refuses rather than merges. The
+closest neighbouring project performs the same cycle with no precondition at all and
+destroys strokes the human added between its read and its write, silently. That is the
+failure this port exists to make impossible to write.
+
 Errors named in the "Raises" sections below live in :mod:`rmspec.domain.errors`:
 ``DeviceUnreachable``, ``DeviceAuthFailed``, ``DeviceProtocolError``,
 ``DeviceDocumentNotFound`` (a sibling of ``DeviceProtocolError``, never a subclass -- a
 missing document is not a contract violation), ``MalformedDeviceMetadata``,
-``DeviceTransferInterrupted``, ``DeviceUploadRejected`` and
-``DeviceOperationUnsupported``. Adapters derive them from the device's uniform
-``{"error": "<msg>"}`` body rather than its status code, because that firmware answers
-an unknown id with 500 "Unknown file" and ignores the HTTP method entirely.
+``DeviceTransferInterrupted``, ``DeviceUploadRejected``,
+``DeviceOperationUnsupported``, ``DeviceStateMismatchError`` and ``UsageError``. Adapters
+derive them from the device's uniform ``{"error": "<msg>"}`` body rather than its status
+code, because that firmware answers an unknown id with 500 "Unknown file" and ignores the
+HTTP method entirely.
 """
 
 from __future__ import annotations
@@ -85,6 +96,9 @@ from enum import StrEnum
 from typing import Annotated, Protocol, Self
 
 from pydantic import AfterValidator, BaseModel, Field, model_validator
+
+from rmspec.domain._digest import digest_of
+from rmspec.domain.errors import TransportKind
 
 __all__ = [
     "DeviceCatalog",
@@ -100,13 +114,27 @@ __all__ = [
     "DocumentUploader",
     "LibraryRefresh",
     "RawBundleSource",
+    "ScenePrecondition",
+    "SceneRead",
+    "SceneVisibility",
+    "SceneWriteReceipt",
+    "SceneWriter",
     "SearchIndexSource",
     "SkipReason",
     "SkippedEntry",
+    "UnsupportedField",
     "UploadMedia",
     "UploadReceipt",
     "UploadRequest",
 ]
+
+_SCENE_FINGERPRINT_TAG = b"rmspec.device.scene.v1"
+"""Domain-and-version label folded into every scene fingerprint.
+
+A tag rather than a bare ``sha256`` so that a change to *how* a scene is fingerprinted is a
+mechanical mismatch -- every precondition captured under the old scheme refuses instead of
+being reinterpreted -- which is the one direction this value may fail in.
+"""
 
 
 def _to_utc_milliseconds(value: datetime.datetime) -> datetime.datetime:
@@ -142,6 +170,124 @@ def _to_utc_milliseconds(value: datetime.datetime) -> datetime.datetime:
 
 _UtcInstant = Annotated[datetime.datetime, AfterValidator(_to_utc_milliseconds)]
 """A timezone-aware instant, normalized to UTC at millisecond precision."""
+
+
+class UnsupportedField(BaseModel, frozen=True, extra="forbid"):
+    """One field a transport cannot answer, and which transports can.
+
+    A set of bare names cannot tell two different absences apart, and the difference is
+    load-bearing. "*This* transport cannot answer ``firmware``, SSH can" tells a user to
+    change transports. "*No* transport can answer ``serial``, because the value exists only
+    inside a file this project may never open" tells them to stop asking. Both used to render
+    as the one sentence "not available over this transport", and only the first was true.
+
+    A member of :attr:`DeviceFacts.unsupported` and :attr:`DeviceResources.unsupported`
+    alongside plain ``str`` rather than living in a field of its own, and that choice is the
+    reason nothing outside this module had to change. Those sets are the only place a
+    transport declares an absence, so widening what a member may *be* leaves every reading
+    that passes bare names valid, keeps both models' ``model_fields`` exactly as they were --
+    which two adapters and three tests derive their own field lists from -- and gives an
+    adapter with more to say somewhere to say it.
+
+    Deliberately the same shape :class:`~rmspec.app.capabilities.OperationLimit` already
+    uses, down to the empty tuple meaning "nothing serves this", because it is the same
+    question asked about a field instead of an operation. It is *not* the ``capabilities``
+    or ``supports`` predicate these ports deliberately do not offer: a caller cannot branch
+    on this to decide whether to attempt something, because reading a fact is not an
+    operation that can be attempted differently. It is a sentence a report prints, in the
+    same category as the name it annotates.
+    """
+
+    name: str = Field(min_length=1)
+    """The port field this is about, such as ``serial``. Never a display label.
+
+    Spelled ``name`` rather than ``field`` to match :class:`~rmspec.app.facts.ReportedFact`
+    and :class:`~rmspec.app.facts.ReportedGauge`, so a report can walk answered and
+    unavailable entries with one accessor.
+    """
+
+    supported_by: tuple[TransportKind, ...] | None = None
+    """Transports that can answer :attr:`name`, which may be empty, or ``None``.
+
+    Three states, and they are three different sentences:
+
+    * A non-empty tuple -- *this* transport cannot, and these can. Change transports.
+    * ``()`` -- **no** transport can. Empty is a real answer rather than a missing one,
+      exactly as it is on ``OperationLimit.supported_by``, and it is what the device serial
+      needs: the value is not readable by any means this project permits itself.
+    * ``None`` -- nothing is claimed either way.
+
+    ``None`` is rejected inside :attr:`DeviceFacts.unsupported` and
+    :attr:`DeviceResources.unsupported`, because a bare ``str`` in that set already says it
+    and says it in the shape every adapter has always used. It is what
+    :attr:`~rmspec.app.facts.ReportDeviceFactsResult.unsupported` fills in for those bare
+    names, so a renderer reads one attribute and gets three sentences instead of narrowing a
+    union.
+    """
+
+
+def _unsupported_names(unsupported: frozenset[str | UnsupportedField]) -> list[str]:
+    """Reduce a mixed unsupported set to the field names it declares, with duplicates kept.
+
+    Parameters
+    ----------
+    unsupported
+        Bare names and annotated entries, mixed freely.
+
+    Returns
+    -------
+    list[str]
+        One name per member, in arbitrary order -- a ``list`` rather than a set so that the
+        caller can still see a field declared twice.
+    """
+    return [entry if isinstance(entry, str) else entry.name for entry in unsupported]
+
+
+def _check_claims_are_not_empty(alternatives: tuple[UnsupportedField, ...]) -> None:
+    """Reject an annotated entry that claims nothing, which a bare name already says.
+
+    Parameters
+    ----------
+    alternatives
+        The annotated members of an unsupported set.
+
+    Raises
+    ------
+    ValueError
+        An entry's ``supported_by`` is ``None``, which carries no more than the field's name
+        does on its own.
+    """
+    silent = sorted(entry.name for entry in alternatives if entry.supported_by is None)
+    if silent:
+        msg = (
+            f"unsupported annotates these fields with no claim: {', '.join(silent)}; "
+            f"name them as plain strings instead, which already means the same thing"
+        )
+        raise ValueError(msg)
+
+
+def _check_one_claim_per_field(names: list[str]) -> None:
+    """Reject a set that declares one field twice, which is two claims about one absence.
+
+    Parameters
+    ----------
+    names
+        The declared field names, duplicates included.
+
+    Raises
+    ------
+    ValueError
+        A field is declared more than once, which happens when a bare name and an annotated
+        entry for it are both in the set.
+    """
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        msg = (
+            f"unsupported declares these fields more than once: {', '.join(repeated)}; "
+            f"a bare name and an UnsupportedField for one field are two answers to one "
+            f"question"
+        )
+        raise ValueError(msg)
 
 
 def _check_unsupported(unsupported: frozenset[str], answerable: dict[str, object]) -> None:
@@ -265,6 +411,32 @@ class LibraryRefresh(StrEnum):
 
     ALREADY_VISIBLE = "already_visible"
     """The document was already visible when the transport acknowledged the write."""
+
+
+class SceneVisibility(StrEnum):
+    """What the human holding the tablet can see once one page's scene has been rewritten.
+
+    A sibling of :class:`LibraryRefresh` rather than a third member of it, and that enum's
+    own invariant is the reason: it exists so "uploaded but never made visible" is
+    unrepresentable, and a member meaning "not visible yet" would hand every
+    :class:`DocumentUploader` a way to report precisely that. The create path and the edit
+    path have different guarantees, so they get different vocabularies.
+
+    One member, which is a measurement rather than an unfinished set. Firmware 3.27.3.0
+    holds an open document's scene in memory, so a page rewritten underneath it is not drawn
+    until the document is reopened -- and :class:`SceneWriter` deliberately does not force
+    the issue, because stock Paper Pro firmware limits its UI process to four starts per ten
+    minutes and maps start-limit failure onto a target whose handler **reboots the tablet**.
+    A scene write therefore has exactly one honest thing to say about visibility, and a
+    closed member is how it says it: a ``bool`` would let an adapter claim the human can
+    already see the reply, which is the single claim this type exists to make
+    unconstructible. A writer that one day does force a refresh adds the second member, and
+    only then is there something for a caller to branch on.
+    """
+
+    REOPEN_REQUIRED = "reopen_required"
+    """The bytes are on the device, and the tablet will not draw them until the document is
+    reopened. Never a promise that anyone has seen them."""
 
 
 class DeviceFolder(BaseModel, frozen=True, extra="forbid"):
@@ -527,6 +699,207 @@ class UploadReceipt(BaseModel, frozen=True, extra="forbid"):
     """What was needed to make the document visible in the tablet UI."""
 
 
+class ScenePrecondition(BaseModel, frozen=True, extra="forbid"):
+    """The identity one page's scene had when it was read, to be re-checked before writing.
+
+    This is the whole answer to "the human drew while you were thinking". A read-modify-write
+    of a page file races a person holding a stylus, and the closest neighbouring project runs
+    that cycle with no precondition of any kind: strokes added between its read and its write
+    are destroyed, silently, and its truncating write leaves a half-written page behind if the
+    link drops. Making this a *required* argument of :meth:`SceneWriter.write_scene` is what
+    turns that race into a typed refusal a caller can act on.
+
+    Built from :attr:`SceneRead.precondition` and not assembled by hand. Assembling one is
+    how a write ends up checking a fingerprint of some other page's bytes, and the property
+    that makes this port safe is that the identity checked and the bytes amended came from
+    one read.
+
+    Two round trips remain between the read and the write, and this type does not pretend
+    otherwise. It closes the window at the far end -- the writer re-checks immediately before
+    the rename -- rather than eliminating it, which is the honest guarantee an unlocked
+    filesystem allows.
+    """
+
+    doc_uuid: str = Field(min_length=1)
+    """The document whose page this is, as the device identifies it."""
+
+    page_id: str = Field(min_length=1)
+    """The page, as the device identifies it."""
+
+    fingerprint: str | None = Field(min_length=1)
+    """The scene's identity at read time, or ``None`` when the device stored no scene at all.
+
+    Spelled ``fingerprint`` and typed as an opaque ``str`` rather than as a hash, because
+    :meth:`~rmspec.domain.ports.formats.DocumentRepository.page_fingerprint` already settled
+    this vocabulary for the read side: "an opaque, non-empty token over the page's stored
+    bytes as read", which a caller never parses and never assumes the length of. The domain
+    gains nothing from a second word, or from a type asserting an algorithm -- a hash type in
+    a port signature is an adapter's implementation promoted to a contract, and the contract
+    a caller actually needs is *comparability*, which equality over an opaque token gives.
+
+    Derived by :attr:`SceneRead.precondition` from the bytes themselves, so the value is a
+    domain fact rather than an adapter-authored one and two implementations cannot disagree
+    about what "unchanged" means. ``None`` is a real assertion and not a missing one: it
+    means the write requires the page to *still* have no scene, which is distinguishable from
+    the fingerprint of an existing but zero-byte artifact.
+
+    No default. A precondition that defaults to ``None`` is one a caller can forget to
+    capture, and while forgetting fails safe -- the write refuses against any page with ink
+    -- it fails for a reason nobody can read. Non-empty when present, so ``""`` cannot become
+    a third spelling of "no scene" that compares unequal to the real one.
+    """
+
+
+class SceneRead(BaseModel, frozen=True, extra="forbid"):
+    """One page's scene as the device holds it, with the identity those bytes carried.
+
+    :attr:`precondition` is a property rather than a field, and that is deliberate: a caller
+    cannot hold these bytes without also holding a consistent identity for them, and there is
+    no way to construct a read whose precondition names another page or other bytes. As a
+    field it would be one more thing an adapter fills in, and the entire safety of the write
+    path rests on the two agreeing.
+
+    Bytes rather than a handle, like every other byte-carrying port here, so no fake needs a
+    filesystem and nothing above this boundary can hold an open remote file across a request.
+    """
+
+    doc_uuid: str = Field(min_length=1)
+    """The document these bytes belong to, as the device identifies it."""
+
+    page_id: str = Field(min_length=1)
+    """The page, as the device identifies it."""
+
+    location: str = Field(min_length=1)
+    """Where the transport found the scene, as an opaque display string.
+
+    A ``str`` and not a path type, and never a value a caller may join, split, or reopen.
+    :mod:`rmspec.domain.errors` already states the rule this follows -- "a filesystem
+    location is an adapter's identity for a resource, so it is carried as an opaque ``str``
+    that is displayed and logged, never reopened" -- and this module's own "no port touches
+    the filesystem" is the other half of it. A domain path type would be a second addressing
+    scheme for a resource only the adapter that produced it can open, and the first caller to
+    build one by concatenation would have invented a traversal.
+
+    It is here because it is what a person reads in a receipt, a log line, or a
+    ``DeviceStateMismatchError``, and because the snapshot on
+    :attr:`SceneWriteReceipt.snapshot` is the same kind of value and has to be comparable
+    with it by eye.
+    """
+
+    scene: bytes | None
+    """The page's v6 scene bytes, or ``None`` when the device stores no scene for this page.
+
+    ``None`` is the routine state of a blank page of an annotated PDF, and it is *not* the
+    same as ``b""``: an artifact that exists and is empty is a page the device wrote and
+    something truncated. The two get different fingerprints, so a precondition can tell them
+    apart, and a caller that must append ink can refuse both for the right reason.
+    """
+
+    @property
+    def precondition(self) -> ScenePrecondition:
+        """Return the identity these bytes must still have for a write to be safe.
+
+        Returns
+        -------
+        ScenePrecondition
+            The document, the page, and a fingerprint over :attr:`scene` -- ``None`` when
+            there was no scene. Computing it here rather than accepting it from an adapter is
+            what makes "unchanged" one definition instead of one per transport: a writer
+            re-reads and compares two values this property produced.
+        """
+        return ScenePrecondition(
+            doc_uuid=self.doc_uuid,
+            page_id=self.page_id,
+            fingerprint=(
+                None if self.scene is None else digest_of(_SCENE_FINGERPRINT_TAG, self.scene)
+            ),
+        )
+
+
+class SceneWriteReceipt(BaseModel, frozen=True, extra="forbid"):
+    """What the transport knows once one page's scene has been replaced, and how to undo it.
+
+    Also the undo token. :meth:`SceneWriter.undo` takes this value whole rather than the four
+    fields it needs, because a caller that has to reassemble a receipt in order to reverse a
+    write is a caller who can transpose two of them and restore the wrong snapshot over the
+    wrong page. A result model that carries this therefore carries it entire.
+
+    No field has a default. A receipt is the record of something that has already happened to
+    a page of somebody's handwriting, and every one of these is knowable by the transport
+    that did it.
+    """
+
+    doc_uuid: str = Field(min_length=1)
+    """The document whose page was written, as the device identifies it."""
+
+    page_id: str = Field(min_length=1)
+    """The page that was written, as the device identifies it."""
+
+    location: str = Field(min_length=1)
+    """Where the new scene now lives, as an opaque display string. See
+    :attr:`SceneRead.location`."""
+
+    byte_count: int = Field(gt=0)
+    """Bytes now in the scene. Positive: a scene write always writes a whole page, and a
+    short or empty write is ``DeviceTransferInterrupted``, never a receipt."""
+
+    fingerprint: str = Field(min_length=1)
+    """Identity of the bytes now on the device, in the vocabulary
+    :attr:`ScenePrecondition.fingerprint` defines.
+
+    Equal to what :attr:`SceneRead.precondition` would report for the same bytes, so a caller
+    that reads the page back can tell "still mine" from "the human has drawn since" without
+    holding the bytes it wrote.
+    """
+
+    replaced: str | None
+    """Identity of the scene this write superseded, or ``None`` when there was none.
+
+    The receipt's account of what was on the page a moment ago, and the field that makes
+    :attr:`snapshot` checkable: superseding ink without keeping a copy of it is
+    unconstructible, rather than merely discouraged.
+    """
+
+    snapshot: str | None
+    """Where the superseded scene was kept, as an opaque display string.
+
+    One snapshot **per write**, never one per page. A single backup that only ever holds the
+    *first* pre-write state is worse than none, because it looks like a safety net while the
+    second write to a page has nothing behind it -- which is exactly what the neighbouring
+    project ships.
+
+    ``None`` if and only if :attr:`replaced` is ``None``: there was no artifact, so there was
+    nothing to copy. Any other combination is refused by this model, so "wrote over a page of
+    handwriting and kept no copy" cannot be reported as a success.
+    """
+
+    visibility: SceneVisibility
+    """What the human can see, from the closed set that has no way to say "already visible"."""
+
+    @model_validator(mode="after")
+    def _check_superseded_ink_was_snapshotted(self) -> Self:
+        """Reject a receipt whose snapshot and superseded scene disagree about existing.
+
+        Returns
+        -------
+        Self
+            The validated receipt.
+
+        Raises
+        ------
+        ValueError
+            A scene was superseded and no snapshot holds it, or a snapshot is named for a
+            write that superseded nothing.
+        """
+        if self.replaced is not None and self.snapshot is None:
+            msg = "a write that superseded a scene must name the snapshot holding it"
+            raise ValueError(msg)
+        if self.replaced is None and self.snapshot is not None:
+            msg = "a write that superseded nothing cannot have snapshotted anything"
+            raise ValueError(msg)
+        return self
+
+
 class DeviceFacts(BaseModel, frozen=True, extra="forbid"):
     """Fixed facts about the attached tablet: what it is, not what it currently has.
 
@@ -540,11 +913,20 @@ class DeviceFacts(BaseModel, frozen=True, extra="forbid"):
 
     Every field is optional, and ``None`` has two distinct causes a device-information
     command must be able to tell apart. A field named in ``unsupported`` is one this
-    transport structurally cannot ask -- the USB web API has no route that reports a
-    serial number -- and is displayed as "not available over this transport". A field
+    transport structurally cannot ask -- the USB web API has no route that reports the
+    firmware version -- and is displayed as "not available over this transport". A field
     that is ``None`` and unnamed is one the device was asked for and did not answer, or
     answered unintelligibly; an adapter reports that as ``None`` rather than raising
     ``DeviceProtocolError``, so one unparseable reading never fails the whole command.
+
+    A name alone cannot say *who could*, and that is a third fact rather than a nicety.
+    "This transport cannot, SSH can" and "no transport can, because the value lives only in a
+    file this project may never open" are different sentences to print, and the device serial
+    is the second kind while most of what the USB web API declines is the first. So a member
+    of ``unsupported`` may be a bare name, meaning what it always meant, or an
+    :class:`UnsupportedField`, which adds who can. Widening the member type rather than adding
+    a field is what lets every adapter that passes a name set keep working unchanged -- and
+    keeps its silence read as silence rather than as "nobody can".
     """
 
     firmware: str | None = None
@@ -556,8 +938,48 @@ class DeviceFacts(BaseModel, frozen=True, extra="forbid"):
     serial: str | None = None
     """Device serial number."""
 
-    unsupported: frozenset[str] = frozenset()
-    """Names of the fields above this transport structurally cannot answer."""
+    unsupported: frozenset[str | UnsupportedField] = frozenset()
+    """The fields above this transport structurally cannot answer.
+
+    A bare ``str`` names a field and claims nothing about other transports -- what every
+    adapter written before :class:`UnsupportedField` existed said, and all it knew. An
+    :class:`UnsupportedField` names one and adds which transports can answer it, empty
+    meaning none can. One field may appear once, either way: a bare name and an annotated
+    entry for the same field are two answers to one question and are rejected.
+
+    Read it through :attr:`unsupported_names` and :attr:`alternatives` rather than by
+    narrowing the union at each call site.
+    """
+
+    @property
+    def unsupported_names(self) -> frozenset[str]:
+        """Return every field name this transport declared it cannot answer.
+
+        Returns
+        -------
+        frozenset[str]
+            The names, however each was declared. This is the set the old
+            ``frozenset[str]`` field was, so a caller that only wants membership is unchanged.
+        """
+        return frozenset(_unsupported_names(self.unsupported))
+
+    @property
+    def alternatives(self) -> tuple[UnsupportedField, ...]:
+        """Return only the declarations that say something about other transports.
+
+        Returns
+        -------
+        tuple[UnsupportedField, ...]
+            The annotated members, ordered by :attr:`UnsupportedField.name`. Sorted because
+            the underlying set has no order and a report that listed them differently on two
+            runs would look like the device had changed.
+        """
+        return tuple(
+            sorted(
+                (entry for entry in self.unsupported if not isinstance(entry, str)),
+                key=lambda entry: entry.name,
+            )
+        )
 
     @model_validator(mode="after")
     def _check_unsupported_names(self) -> Self:
@@ -571,10 +993,16 @@ class DeviceFacts(BaseModel, frozen=True, extra="forbid"):
         Raises
         ------
         ValueError
-            A name is not a fact field, or names a field that carries a value.
+            A name is not a fact field, names a field that carries a value, is declared
+            twice, or is annotated with no claim where a bare name would have said the same.
         """
+        declared = _unsupported_names(self.unsupported)
+        _check_one_claim_per_field(declared)
+        _check_claims_are_not_empty(self.alternatives)
+        # This dict is the list of fact fields, and it has to move with them: a field added
+        # above and forgotten here could never be declared unsupported.
         _check_unsupported(
-            self.unsupported,
+            frozenset(declared),
             {"firmware": self.firmware, "model": self.model, "serial": self.serial},
         )
         return self
@@ -590,8 +1018,16 @@ class DeviceResources(BaseModel, frozen=True, extra="forbid"):
 
     Totals are reported alongside the free values rather than with the fixed facts,
     because a transport reads a pair from one command and this way the pair is internally
-    consistent. ``unsupported`` and the two causes of ``None`` mean exactly what they
-    mean on :class:`DeviceFacts`.
+    consistent. ``unsupported`` and the two causes of ``None`` mean exactly what they mean on
+    :class:`DeviceFacts`, :class:`UnsupportedField` included.
+
+    That last part is a decision rather than symmetry for its own sake. The gauges are exactly
+    as asymmetric as the facts -- reading free memory and free disk needs a shell, which one
+    transport has and the other does not -- and
+    :attr:`~rmspec.app.facts.ReportDeviceFactsResult.unsupported` mixes both models' names
+    into one tuple, so a shape only one of them could carry would make that tuple mean two
+    different things depending on which model a name came from. The sentence above already
+    promises the two sets mean the same thing; letting them diverge here would make it false.
     """
 
     total_memory_bytes: int | None = Field(default=None, ge=0)
@@ -606,8 +1042,40 @@ class DeviceResources(BaseModel, frozen=True, extra="forbid"):
     available_storage_bytes: int | None = Field(default=None, ge=0)
     """Free space on that partition at the moment of the reading."""
 
-    unsupported: frozenset[str] = frozenset()
-    """Names of the fields above this transport structurally cannot answer."""
+    unsupported: frozenset[str | UnsupportedField] = frozenset()
+    """The gauges above this transport structurally cannot read.
+
+    A bare name or an :class:`UnsupportedField`, under exactly the rules
+    :attr:`DeviceFacts.unsupported` states; read it through :attr:`unsupported_names` and
+    :attr:`alternatives`.
+    """
+
+    @property
+    def unsupported_names(self) -> frozenset[str]:
+        """Return every gauge name this transport declared it cannot read.
+
+        Returns
+        -------
+        frozenset[str]
+            The names, however each was declared.
+        """
+        return frozenset(_unsupported_names(self.unsupported))
+
+    @property
+    def alternatives(self) -> tuple[UnsupportedField, ...]:
+        """Return only the declarations that say something about other transports.
+
+        Returns
+        -------
+        tuple[UnsupportedField, ...]
+            The annotated members, ordered by :attr:`UnsupportedField.name`.
+        """
+        return tuple(
+            sorted(
+                (entry for entry in self.unsupported if not isinstance(entry, str)),
+                key=lambda entry: entry.name,
+            )
+        )
 
     @model_validator(mode="after")
     def _check_readings(self) -> Self:
@@ -624,11 +1092,16 @@ class DeviceResources(BaseModel, frozen=True, extra="forbid"):
         Raises
         ------
         ValueError
-            A free value exceeds its total, or ``unsupported`` names a non-field or a
-            field that carries a value.
+            A free value exceeds its total, or ``unsupported`` names a non-field, a field
+            that carries a value, one field twice, or one annotated with no claim.
         """
+        declared = _unsupported_names(self.unsupported)
+        _check_one_claim_per_field(declared)
+        _check_claims_are_not_empty(self.alternatives)
+        # This dict is the list of gauge fields, and it has to move with them: a gauge added
+        # above and forgotten here could never be declared unsupported.
         _check_unsupported(
-            self.unsupported,
+            frozenset(declared),
             {
                 "total_memory_bytes": self.total_memory_bytes,
                 "available_memory_bytes": self.available_memory_bytes,
@@ -831,6 +1304,191 @@ class DocumentUploader(Protocol):
             The device refused the document. Carries the device's own message.
         DeviceTransferInterrupted
             The transfer ended early, so no document was created.
+        DeviceUnreachable
+            The tablet did not answer at the configured address.
+        DeviceAuthFailed
+            The tablet refused the supplied credentials.
+        DeviceProtocolError
+            The tablet answered with something this transport cannot interpret.
+        """
+        ...
+
+
+class SceneWriter(Protocol):
+    """Replace one page's scene on a powered-on tablet, safely, and be able to take it back.
+
+    The edit half of the write story, and the one reMarkable warns against: its own guidance
+    is that its reader "must not run when manually accessing document files", and this port
+    runs while it does. Every guarantee below exists because that warning is being
+    deliberately overridden, and the only honest way to override it is to make each hazard a
+    checked precondition rather than an assumption.
+
+    Scope: ``REQUEST``. One transport, one handshake, closed by one finalizer, so a command
+    that reads a page and then writes it does not open two sessions.
+
+    Notes
+    -----
+    **Three methods, and the two that are missing are the interesting ones.** A shipped
+    adapter also offers a standalone verify and a snapshot listing, and neither is declared
+    here.
+
+    A standalone verify is absent because a caller that checks and *then* writes has opened a
+    second window after the one it just closed -- the check-then-act shape this port exists to
+    delete. :meth:`write_scene` performs the only re-check that can be sound, immediately
+    before the replacement lands, inside the operation it guards. Publishing an earlier one
+    would make the unsafe sequence the obvious one.
+
+    A snapshot listing is absent because no policy decides anything from a list of backups. A
+    caller undoing a write already holds the receipt naming the one snapshot that matters, and
+    a method whose only consumer is a human reading output belongs to whichever command prints
+    it rather than to the seam a use case is written against.
+
+    **Nothing may key on a scene id, an author id or a layer index across a call.** The tablet
+    renumbers them: a measured page's layer moved from author 0 / sequence 11 to author 1 /
+    sequence 334 across xochitl's own re-save. Everything a write needs is read out of the
+    bytes handed to it, on the call that uses them.
+
+    **Restarting the tablet's UI process is no part of any method here.** Visibility is
+    reported and never forced: stock firmware limits that process to four starts per ten
+    minutes and maps start-limit failure onto a target whose handler reboots the tablet.
+    """
+
+    def read_scene(self, doc_uuid: str, page_id: str, /) -> SceneRead:
+        """Read one page's scene, together with the identity a later write must re-check.
+
+        The only way to obtain a :class:`ScenePrecondition`, and therefore the only way to
+        begin a safe edit. A caller amends the bytes this returns and hands back the
+        precondition they came with; amending a copy read earlier is meaningless, because the
+        precondition would then describe bytes that are not the ones being changed.
+
+        Parameters
+        ----------
+        doc_uuid
+            The document's identifier on the device.
+        page_id
+            The page's identifier on the device, as the document's own page order lists it.
+
+        Returns
+        -------
+        SceneRead
+            The scene bytes -- ``None`` when the device stores none for this page -- the
+            opaque location they were found at, and, through
+            :attr:`SceneRead.precondition`, their identity.
+
+        Raises
+        ------
+        DeviceDocumentNotFound
+            No document on the device has that identifier, or the identifier names a folder.
+        MalformedDeviceMetadata
+            The document exists and its page order could not be decoded, so the page cannot be
+            resolved to an artifact and "claims no such page" cannot be decided.
+        DeviceTransferInterrupted
+            The read ended early. No partial scene is returned, because a truncated page would
+            be appended to and written back as though it had been whole.
+        DeviceUnreachable
+            The tablet did not answer at the configured address.
+        DeviceAuthFailed
+            The tablet refused the supplied credentials.
+        DeviceProtocolError
+            The tablet answered with something this transport cannot interpret.
+        """
+        ...
+
+    def write_scene(self, precondition: ScenePrecondition, scene: bytes, /) -> SceneWriteReceipt:
+        """Replace the page's whole scene, refusing if the page moved since it was read.
+
+        Four obligations, every one of them a measured requirement rather than good practice:
+
+        1. **Re-check, then refuse.** The precondition is verified immediately before the
+           replacement lands. If the page moved, this raises and changes nothing: it never
+           merges the two versions and never wins by writing last. Merging CRDT scenes from
+           two authors is not something this project has measured, and guessing at it would
+           risk the only copy of something a human made by hand.
+        2. **Replace atomically.** The new bytes arrive by a rename within the same directory,
+           so a dropped link leaves either the old page or the new one and never a truncated
+           file. A byte-count check on the transfer is necessary and not sufficient.
+        3. **Snapshot this write.** The superseded scene is copied somewhere the receipt names,
+           once per write and never once per page.
+        4. **Do not force visibility.** The receipt reports
+           :attr:`SceneVisibility.REOPEN_REQUIRED`, and nothing here restarts anything.
+
+        Parameters
+        ----------
+        precondition
+            The identity captured by :meth:`read_scene`, unmodified.
+        scene
+            The page's entire new contents, as
+            :attr:`~rmspec.domain.ports.formats.SceneEdit.scene` supplies them. Never a patch,
+            a diff or a tail, and never empty: a zero-byte page is a page whose ink has been
+            deleted, which nothing may ask this port for.
+
+        Returns
+        -------
+        SceneWriteReceipt
+            What landed, what it superseded, where the copy of that is, and what the human can
+            see -- which is not yet the new ink.
+
+        Raises
+        ------
+        UsageError
+            ``scene`` is empty. Nothing is written.
+        DeviceStateMismatchError
+            The page is not the page the precondition describes: the human drew, or another
+            writer landed first. It carries both identities and ``retryable=True``, because
+            the refusal happens before the replacement and provably changed nothing -- re-read,
+            re-compose against the new bytes, and decide again.
+        DeviceTransferInterrupted
+            The transfer ended early. The page is as it was, because an incomplete copy was
+            never renamed into place.
+        DeviceUnreachable
+            The tablet did not answer at the configured address.
+        DeviceAuthFailed
+            The tablet refused the supplied credentials.
+        DeviceProtocolError
+            The tablet answered with something this transport cannot interpret.
+        """
+        ...
+
+    def undo(self, receipt: SceneWriteReceipt, /) -> SceneWriteReceipt:
+        """Restore the scene a write superseded, under the same guarantees as the write.
+
+        This is why a scene write is *reversible* rather than merely regrettable, and why a
+        caller weighing "should I write this" is not weighing an upload -- that firmware's
+        route table is closed at six families and none of them deletes, so a created document
+        cannot be taken back at all, while a page edit can.
+
+        Not a weaker operation than :meth:`write_scene`. It is atomic, it snapshots what *it*
+        replaces, and it re-checks that the page still holds the bytes the receipt reported
+        landing, so an undo cannot silently discard whatever the human drew after the write it
+        reverses.
+
+        Parameters
+        ----------
+        receipt
+            The receipt :meth:`write_scene` returned, whole. Its ``fingerprint`` is the
+            precondition and its ``snapshot`` is the source.
+
+        Returns
+        -------
+        SceneWriteReceipt
+            A receipt for the restoring write, whose ``replaced`` is the reversed write's
+            ``fingerprint``. Reversing an undo therefore needs no second method.
+
+        Raises
+        ------
+        UsageError
+            The receipt names no snapshot, which is only true of a write that superseded
+            nothing. There is no prior state to restore, and removing an artifact is a
+            different operation with different failure modes -- the same distinction the SSH
+            uploader draws when it refuses to unpack an archive as a media conversion.
+        DeviceStateMismatchError
+            The page no longer holds the bytes the receipt reported, so the human has drawn
+            since. ``retryable=False``: what a repeat would discard is that drawing, and
+            reading the page again is the only correct next step.
+        DeviceDocumentNotFound
+            The document, or the snapshot the receipt names, is no longer on the device.
+        DeviceTransferInterrupted
+            The transfer ended early, so the page is as the write left it.
         DeviceUnreachable
             The tablet did not answer at the configured address.
         DeviceAuthFailed

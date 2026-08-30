@@ -20,10 +20,13 @@ The fixture's Protocol annotation is also a static conformance check. No port is
 ``runtime_checkable`` and nothing calls ``isinstance``, so returning a concrete
 adapter from a function annotated with the Protocol is what makes ``ty`` the gate.
 The two cache contracts are stated against :class:`ArtifactCache`, a local
-structural view of the identical method set the two cache ports declare, because
-one contract body cannot be typed against a union of two ports without lying about
-which key type it holds; conformance to the *named* ports is asserted separately in
-``test_persistence_port_conformance.py``.
+structural view of the three methods both cache ports declare, because one contract
+body cannot be typed against a union of two ports without lying about which key type
+it holds; conformance to the *named* ports is asserted separately in
+``test_persistence_port_conformance.py``. ``OcrCache``'s fourth method,
+``equivalent_raster``, is not expressible over a ``DiagramCacheKey``, so it gets its
+own one-method extension of that view, :class:`OcrArtifactCache`, and its assertions
+live in :class:`OcrCacheCases`.
 
 Three seams are declared abstract because they are the same *behaviour* reached by
 different means: a corrupt payload is raw SQL in one implementation and a seeded
@@ -128,6 +131,33 @@ class ArtifactCache[K, A](Protocol):
         -------
         K | None
             A stored key for the same page with a different digest, or ``None``.
+        """
+        ...
+
+
+class OcrArtifactCache(ArtifactCache[OcrCacheKey, OcrArtifact], Protocol):
+    """The three shared methods plus the fourth only ``OcrCache`` declares.
+
+    A second local Protocol rather than a fourth method on :class:`ArtifactCache`,
+    because the two ports no longer share an identical method set:
+    ``equivalent_raster``'s matched set names ``recognizers``, which a
+    ``DiagramCacheKey`` does not have. Both OCR bindings' ``cache`` fixtures are
+    annotated with this, so ``ty`` is what proves each of them implements the fourth
+    method -- the same trick the shared view already plays for the other three.
+    """
+
+    def equivalent_raster(self, key: OcrCacheKey, /) -> OcrArtifact | None:
+        """Return a stored artifact for identical pixels under a different page hash.
+
+        Parameters
+        ----------
+        key
+            The key that missed.
+
+        Returns
+        -------
+        OcrArtifact | None
+            A stored artifact whose key differs only in ``page_hash``, or ``None``.
         """
         ...
 
@@ -520,9 +550,11 @@ class DocumentSyncStoreContract:
 class ArtifactCacheContract[K, A]:
     """Every assertion ``OcrCache`` and ``DiagramCache`` share.
 
-    Both ports declare the identical three methods, all total. A subclass supplies
-    the key and artifact builders for its pair, and the two binding files supply
-    the subject and the fault seams.
+    The two ports share three methods, all total, and this holds every assertion
+    about those three. ``OcrCache`` declares a fourth, ``equivalent_raster``, which
+    is asserted in :class:`OcrCacheCases` alone because it is not expressible over a
+    ``DiagramCacheKey``. A subclass supplies the key and artifact builders for its
+    pair, and the two binding files supply the subject and the fault seams.
     """
 
     # ── seams a binding must provide ────────────────────────────────────────
@@ -799,6 +831,76 @@ class OcrCacheCases(ArtifactCacheContract[OcrCacheKey, OcrArtifact]):
         cache.put(key, artifact)
         assert cache.get(key) == artifact
         assert cache.get(self.a_key("page-hash-never-stored")) is None
+
+    # ── the fourth method: identical pixels under other page bytes ──────────
+
+    def test_equivalent_raster_serves_a_row_stored_under_other_page_bytes(
+        self,
+        cache: OcrArtifactCache,
+    ) -> None:
+        """The measured case: the bytes were rewritten and the pixels were not."""
+        paid = an_ocr_artifact(text="the reading the pixels already have")
+        cache.put(self.a_key("page-hash-before"), paid)
+        rewritten = self.a_key("page-hash-after")
+        assert cache.get(rewritten) is None
+        assert cache.equivalent_raster(rewritten) == paid
+
+    def test_equivalent_raster_still_misses_when_an_input_above_the_page_moved(
+        self,
+        cache: OcrArtifactCache,
+    ) -> None:
+        """A fallback on one component, not a blanket one."""
+        cache.put(self.a_key("page-hash-before", variant="v1"), an_ocr_artifact())
+        assert cache.equivalent_raster(self.a_key("page-hash-after", variant="v2")) is None
+
+    def test_equivalent_raster_ignores_a_row_for_the_very_same_page(
+        self,
+        cache: OcrArtifactCache,
+    ) -> None:
+        """``page_hash`` must differ; this page's own rows belong to the other two methods."""
+        cache.put(self.a_key("page-hash-a", variant="v1"), an_ocr_artifact())
+        assert cache.equivalent_raster(self.a_key("page-hash-a", variant="v2")) is None
+
+    def test_equivalent_raster_is_none_on_a_cold_cache(
+        self,
+        cache: OcrArtifactCache,
+    ) -> None:
+        """Equivalent raster is none on a cold cache."""
+        assert cache.equivalent_raster(self.a_key()) is None
+
+    def test_equivalent_raster_prefers_the_greatest_digest(
+        self,
+        cache: OcrArtifactCache,
+    ) -> None:
+        """The same arbitrary-but-declared tie-break ``superseded`` follows."""
+        ordered = sorted(
+            (self.a_key("page-hash-lhs"), self.a_key("page-hash-rhs")),
+            key=self.digest_of,
+        )
+        cache.put(ordered[0], self.another_artifact())
+        cache.put(ordered[1], self.an_artifact())
+        assert cache.equivalent_raster(self.a_key("page-hash-probe")) == self.an_artifact()
+
+    def test_equivalent_raster_returns_a_truncated_row_for_the_caller_to_re_decide(
+        self,
+        cache: OcrArtifactCache,
+    ) -> None:
+        """The flag survives this round trip too, on ``get``'s own reasoning."""
+        cache.put(
+            self.a_key("page-hash-before"), an_ocr_artifact(text="half a pa", truncated=True)
+        )
+        found = cache.equivalent_raster(self.a_key("page-hash-after"))
+        assert found is not None
+        assert found.truncated is True
+
+    def test_equivalent_raster_is_total_under_a_read_fault(
+        self,
+        cache: OcrArtifactCache,
+    ) -> None:
+        """Equivalent raster is total under a read fault."""
+        cache.put(self.a_key("page-hash-before"), an_ocr_artifact())
+        self.induce_read_fault(cache)
+        assert cache.equivalent_raster(self.a_key("page-hash-after")) is None
 
 
 class DiagramCacheCases(ArtifactCacheContract[DiagramCacheKey, DiagramArtifact]):

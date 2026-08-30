@@ -17,7 +17,13 @@ from rmspec.domain.errors import StoreSchemaMismatchError, StoreUnavailableError
 from rmspec.persistence import SCHEMA_VERSION, SqliteDatabase
 from rmspec.persistence import _sqlite as sqlite_module
 from rmspec.persistence import migrations as migrations_module
-from rmspec.persistence.migrations import LEGACY_TABLES, MIGRATIONS, Migration
+from rmspec.persistence.migrations import (
+    LEGACY_REMEDIATION_TEMPLATE,
+    LEGACY_TABLES,
+    MIGRATIONS,
+    NEWER_SCHEMA_REMEDIATION,
+    Migration,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -191,6 +197,43 @@ def test_a_legacy_file_is_refused_rather_than_dropped(legacy_db: Path) -> None:
     # tables even if someone wanted it to.
     new_only = EXPECTED_TABLES - {"ocr_cache", "diagram_cache"}
     assert not new_only & surviving
+
+
+def test_both_refusals_tell_the_user_what_to_do(tmp_path: Path, legacy_db: Path) -> None:
+    """Refusing is correct; refusing with nothing to do next is the upgrade wall.
+
+    Every user of the legacy CLI meets the second of these on their first run of this
+    build, and it exits 78 -- the environment is wrong, not the request -- so there is
+    always an action and the error has to name it. Both sentences name
+    ``RMSPEC_SYNC_DB``, which is the only handle on the file that survives this layer:
+    ``store`` is the file's *name*, not the path the user set.
+    """
+    newer = tmp_path / "sync.db"
+    database = SqliteDatabase.open(newer)
+    database.close()
+    conn = sqlite3.connect(newer, isolation_level=None)
+    try:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    finally:
+        conn.close()
+
+    with pytest.raises(StoreSchemaMismatchError) as too_new:
+        SqliteDatabase.open(newer)
+    with pytest.raises(StoreSchemaMismatchError) as too_old:
+        SqliteDatabase.open(legacy_db)
+
+    assert too_new.value.remediation == NEWER_SCHEMA_REMEDIATION
+    assert too_old.value.remediation == LEGACY_REMEDIATION_TEMPLATE.format(
+        store=legacy_db.name,
+    )
+    # Two situations, two sentences: nothing is gained by upgrading past a file this
+    # build already understands, and nothing is gained by moving aside a file a newer
+    # build wrote.
+    assert too_new.value.remediation != too_old.value.remediation
+    for advice in (too_new.value.remediation, too_old.value.remediation):
+        assert advice is not None
+        assert "RMSPEC_SYNC_DB" in advice
+        assert "{" not in advice
 
 
 def test_an_empty_file_is_not_mistaken_for_a_legacy_one(tmp_path: Path) -> None:

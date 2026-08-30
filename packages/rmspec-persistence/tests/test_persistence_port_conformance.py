@@ -119,6 +119,9 @@ def test_the_null_ocr_cache_misses_everything_and_stores_nothing() -> None:
     cache.put(key, an_ocr_artifact())
     assert cache.get(key) is None
     assert cache.superseded(key) is None
+    # The fourth method too: a fallback that fired under `--no-cache` would make the
+    # flag mean something other than "this run pays".
+    assert cache.equivalent_raster(key) is None
 
 
 def test_the_null_diagram_cache_misses_everything_and_stores_nothing() -> None:
