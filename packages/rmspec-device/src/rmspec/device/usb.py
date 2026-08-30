@@ -271,7 +271,34 @@ _GET: Final = "GET"
 """The verb for every route this transport reads."""
 
 _HEAD: Final = "HEAD"
-"""The verb for the existence probe. Same status and ``Content-Type``, no body."""
+"""The verb for the existence probe. Same status and ``Content-Type`` as ``GET``."""
+
+#: Sent with every ``HEAD``, and *only* with ``HEAD``, because on this firmware a ``HEAD``
+#: permanently poisons a keep-alive connection.
+#:
+#: Measured 2026-08-30 against the attached tablet. The firmware ignores the request method
+#: (``protocol:methods``), so it answers a ``HEAD`` the way it answers a ``GET``: ``200`` with
+#: ``Transfer-Encoding: chunked`` and a real body. ``httpx`` follows RFC 9110 correctly -- a
+#: ``HEAD`` response has no body whatever its headers claim -- so it stops after the headers
+#: and leaves the chunked body in the socket. The next response read on that connection then
+#: begins at the chunk-size line, and httpx reports
+#: ``RemoteProtocolError: illegal status line: bytearray(b'105d')`` -- ``105d`` being the hex
+#: length of the body it never consumed.
+#:
+#: Reproduced three ways on one client: ``HEAD`` then ``GET`` fails on the ``GET``; ``HEAD``
+#: then ``HEAD`` fails on the second; and ``HEAD`` with this header succeeds three times in a
+#: row. So the defect is connection reuse after ``HEAD``, not ``HEAD`` itself.
+#:
+#: This was latent rather than new: whether the poisoned connection is the one the next
+#: request picks up depends on pool timing, which is why the hardware probe passed for weeks
+#: and then failed two runs in three. ``UsbFacts.read_facts`` does a ``HEAD`` and then reads,
+#: so it was the first caller to hit it reliably.
+#:
+#: The cost is one connection per probe, which is nothing: ``HEAD`` is called once per
+#: command. The alternative -- dropping ``HEAD`` for a ``GET`` whose body is discarded -- would
+#: transfer the whole listing to answer "is anything there", and ``http.json`` records ``HEAD``
+#: as the *safe* probe precisely because it is the cheap one.
+_CLOSE_AFTER_HEAD: Final = {"Connection": "close"}
 
 _POST: Final = "POST"
 """The verb for the one route this transport writes.
@@ -446,10 +473,18 @@ class UsbWebApi:
     def head(self, route: str, /) -> None:
         """Probe one route for existence, transferring no body.
 
-        The firmware returns the same status and ``Content-Type`` for ``HEAD`` as for
-        ``GET`` with a zero-length body, which makes this the cheap reachability check --
-        and the one response that must not be length-checked, since its ``Content-Length``
-        describes the body it deliberately omitted.
+        The firmware returns the same status and ``Content-Type`` for ``HEAD`` as for ``GET``,
+        which makes this the cheap reachability check -- and the one response that must not be
+        length-checked, since no body is read from it.
+
+        It does **not** answer with a zero-length body, which an earlier version of this
+        docstring claimed. Measured 2026-08-30: the response carries
+        ``Transfer-Encoding: chunked`` and no ``Content-Length``, and the firmware writes the
+        full body, because it ignores the request method. ``httpx`` correctly declines to read
+        a body for ``HEAD``, so those bytes stay in the socket and destroy the connection for
+        every later request on it. :data:`_CLOSE_AFTER_HEAD` is what makes this verb safe, and
+        it is sent from here rather than set on the client so that ``GET`` and ``POST`` keep
+        their connection reuse.
 
         Parameters
         ----------
@@ -473,7 +508,7 @@ class UsbWebApi:
             Never, in practice, for the same reason: the classification is derived from a
             body this verb does not return. Declared because the seam is shared.
         """
-        response = self._answer(_HEAD, route)
+        response = self._answer(_HEAD, route, headers=_CLOSE_AFTER_HEAD)
         if not response.is_success:
             raise translate_http(
                 route=route,
@@ -565,6 +600,7 @@ class UsbWebApi:
         *,
         part: dict[str, tuple[str, bytes, str]] | None = None,
         timeout: float | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         """Send one request, letting no ``httpx`` exception escape.
 
@@ -589,6 +625,10 @@ class UsbWebApi:
             or ``None`` for a request with no body.
         timeout
             Seconds this one request may take, or ``None`` to use the client's own ceiling.
+        headers
+            Extra headers for this one request, or ``None`` for none. Exists for
+            :data:`_CLOSE_AFTER_HEAD`, which is not a preference but the only thing that keeps
+            a ``HEAD`` from poisoning the connection it was sent on.
 
         Returns
         -------
@@ -609,9 +649,11 @@ class UsbWebApi:
         # timeout on every read, which is the opposite of leaving it to the client.
         try:
             if timeout is None:
-                response = self._client.request(method, url, files=part)
+                response = self._client.request(method, url, files=part, headers=headers)
             else:
-                response = self._client.request(method, url, files=part, timeout=timeout)
+                response = self._client.request(
+                    method, url, files=part, headers=headers, timeout=timeout
+                )
         except (httpx.HTTPError, httpx.InvalidURL, httpx.StreamError, OSError) as exc:
             raise translate_httpx(exc, endpoint=self._endpoint.base_url) from exc
         return response

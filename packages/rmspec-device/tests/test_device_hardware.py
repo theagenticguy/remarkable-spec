@@ -213,6 +213,26 @@ def _key_path() -> str:
     return str(pathlib.Path(raw).expanduser())
 
 
+def _guarded_client() -> httpx.Client:
+    """Build a client that can only send reads of the listing route.
+
+    The same construction the :func:`client` fixture uses, factored out because one test needs
+    two *additional* short-lived clients -- it measures a ``HEAD`` that deliberately poisons
+    the connection it was sent on, which must not be the shared one. Building those by hand
+    would have put unguarded clients in this module and quietly voided the guarantee its own
+    docstring makes, so there is one construction and no way to get an unguarded client.
+
+    Returns
+    -------
+    httpx.Client
+        The client. The caller closes it.
+    """
+    return httpx.Client(
+        timeout=TIMEOUT_SECONDS,
+        event_hooks={"request": [_only_read_the_listing]},
+    )
+
+
 @pytest.fixture
 def client() -> Iterator[httpx.Client]:
     """Yield a real HTTP client that can only send reads of the listing route.
@@ -222,10 +242,7 @@ def client() -> Iterator[httpx.Client]:
     httpx.Client
         The client, closed on the way out.
     """
-    with httpx.Client(
-        timeout=TIMEOUT_SECONDS,
-        event_hooks={"request": [_only_read_the_listing]},
-    ) as live:
+    with _guarded_client() as live:
         yield live
 
 
@@ -268,18 +285,58 @@ def shell() -> Iterator[ParamikoShell]:
 
 
 @pytest.mark.hardware
-def test_the_head_probe_answers_and_the_facts_source_reports_attached(
-    client: httpx.Client,
-    api: UsbWebApi,
-) -> None:
-    """``HEAD /documents/`` is the safe existence probe, and the only fact it establishes."""
-    response = client.head(f"{WEB_ENDPOINT.base_url}{LISTING_ROUTE}")
+def test_the_head_probe_answers_and_the_facts_source_reports_attached(api: UsbWebApi) -> None:
+    """``HEAD /documents/`` is the safe existence probe, and the only fact it establishes.
 
-    assert response.status_code == 200
-    # A zero-length body is what makes HEAD safe to probe with and what makes it the one
-    # response that must never be length-checked: its Content-Length describes the body it
-    # deliberately omitted.
-    assert response.content == b""
+    Measured 2026-08-30, correcting what this test used to assert. The firmware does **not**
+    answer a ``HEAD`` with a zero-length body: it ignores the request method, so it replies
+    ``200`` with ``Transfer-Encoding: chunked``, no ``Content-Length``, and the whole listing.
+    ``response.content`` is empty because ``httpx`` follows RFC 9110 and reads no body for a
+    ``HEAD`` -- the emptiness is the client declining to read, not the device declining to
+    write, and the difference is the whole defect. Those unread bytes stay in the socket, so
+    the next response on that connection begins at the chunk-size line and httpx reports
+    ``illegal status line: bytearray(b'105d')`` -- ``0x105d`` is 4189, the listing's exact
+    length.
+
+    ``Connection: close`` does more than discard the poison -- it changes the framing the
+    firmware chooses. The two shapes, both measured below on throwaway clients so neither can
+    contaminate the shared one:
+
+    ==========================  ==================================================
+    request                     response headers
+    ==========================  ==================================================
+    ``HEAD`` bare               ``content-type``, ``transfer-encoding: chunked``
+    ``HEAD`` + close            ``content-type``, ``connection: close``
+    ==========================  ==================================================
+
+    So with the header there is no chunked body to leave behind and the connection is torn
+    down regardless. :meth:`UsbWebApi.head` sends it for that reason, and an earlier version
+    of this test called ``client.head`` bare and then read facts on the same pooled client,
+    which failed roughly one run in six.
+    """
+    url = f"{WEB_ENDPOINT.base_url}{LISTING_ROUTE}"
+
+    # The hazard, demonstrated rather than described. Its own client, discarded immediately,
+    # because this request deliberately leaves an unread body in the socket.
+    with _guarded_client() as poisoned:
+        bare = poisoned.head(url)
+        assert bare.status_code == 200
+        assert bare.headers["transfer-encoding"] == "chunked"
+        assert "content-length" not in bare.headers
+        # Empty because httpx declined to read it, not because the device declined to write it.
+        assert bare.content == b""
+
+    # The fix, on its own client too.
+    with _guarded_client() as closing:
+        closed = closing.head(url, headers={"Connection": "close"})
+        assert closed.status_code == 200
+        assert closed.headers["connection"] == "close"
+        assert "transfer-encoding" not in closed.headers
+        assert closed.content == b""
+
+    # The shipped path, which is what a caller actually uses, and which must survive being
+    # followed immediately by a read on the same client.
+    assert api.head(LISTING_ROUTE) is None
 
     facts = UsbFacts(api=api).read_facts()
 

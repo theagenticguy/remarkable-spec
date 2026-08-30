@@ -535,12 +535,53 @@ def test_a_successful_head_transfers_no_body_and_answers_nothing():
 
 
 def test_a_head_that_announces_a_length_it_deliberately_omits_is_not_a_short_read():
-    """Measured: ``HEAD`` returns the same status and ``Content-Type`` with a zero-length body."""
+    """Measured: ``HEAD`` answers with the same status and ``Content-Type`` as ``GET``."""
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"", headers={"content-length": "2902"})
 
     assert web_api(handler).head(LISTING_ROUTE) is None
+
+
+def test_a_head_closes_its_connection_because_the_firmware_writes_a_body_anyway():
+    """Measured 2026-08-30: a ``HEAD`` poisons the connection it was sent on.
+
+    The firmware ignores the request method, so it answers a ``HEAD`` the way it answers a
+    ``GET``: ``200``, ``Transfer-Encoding: chunked``, and the whole body. ``httpx`` follows
+    RFC 9110 and reads no body for a ``HEAD``, so those bytes stay in the socket and the next
+    response read on that connection starts at the chunk-size line --
+    ``RemoteProtocolError: illegal status line: bytearray(b'105d')``, where ``0x105d`` is 4189,
+    the exact length of the listing it never consumed.
+
+    Reproduced against the tablet three ways on one client: ``HEAD`` then ``GET`` fails on the
+    ``GET``; ``HEAD`` then ``HEAD`` fails on the second; ``HEAD`` carrying this header succeeds
+    four times in a row with a 4189-byte ``GET`` between each. So this header is the fix, and
+    the defect is connection reuse after ``HEAD`` rather than ``HEAD`` itself.
+
+    It had been latent for weeks: whether the poisoned connection is the one the next request
+    picks up depends on pool timing, so the hardware probe passed until it failed two runs in
+    three.
+    """
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, content=b"[]", headers={"content-type": "application/json"})
+
+    api = web_api(handler)
+    api.head(LISTING_ROUTE)
+    api.get(LISTING_ROUTE)
+
+    head, get = sent
+    assert head.method == "HEAD"
+    assert head.headers["connection"] == "close"
+    # Only HEAD. GET and POST keep their connection reuse, because only HEAD leaves a body
+    # behind, and closing a connection per read would cost a handshake for nothing. The
+    # assertion is on the *value*, not on absence: httpx sends `connection: keep-alive` on
+    # every request of its own accord, so "no connection header" is unreachable and a test
+    # written that way would only be asserting httpx's default back at itself.
+    assert get.method == "GET"
+    assert get.headers["connection"] == "keep-alive"
 
 
 def test_a_failed_head_cannot_carry_the_devices_message_and_says_so():
