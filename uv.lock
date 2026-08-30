@@ -1315,11 +1315,15 @@ name = "rmspec-app"
 version = "0.2.0"
 source = { editable = "packages/rmspec-app" }
 dependencies = [
+    { name = "pydantic" },
     { name = "rmspec-domain" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "rmspec-domain", editable = "packages/rmspec-domain" }]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "rmspec-domain", editable = "packages/rmspec-domain" },
+]
 
 [[package]]
 name = "rmspec-cli"
